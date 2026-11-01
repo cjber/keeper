@@ -2,6 +2,14 @@
 
 keeper finds disposable data on an Arch Linux machine: stale worktrees, AUR clones, old package versions, orphaned packages, build output and agent leftovers. Nothing is removed until a plan is applied, and removed paths stay in trash until they are purged.
 
+## Set up with your agent
+
+Link `skills/keeper` into your agent's skills directory, then give it this prompt:
+
+```text
+Use keeper to free disk space on this machine. Scan, show me what is ready and what is blocked, and apply only what I approve.
+```
+
 ## Use
 
 ```sh

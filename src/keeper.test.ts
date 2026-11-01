@@ -407,6 +407,18 @@ test("purge deletes a worktree's branch only if it has not moved, and undo works
   expect(await git(movedMain, "branch", "--list", "b-moved")).toContain("b-moved");
 });
 
+test("purge reports measured free space separately from uncompressed size", async () => {
+  const batch = join(home, "batch");
+  mkdirSync(batch);
+  writeFileSync(join(batch, "out"), "data");
+  age(batch);
+  const { findings } = await scan(ctx, ["agent"]);
+  await applyPlan(createPlan(ctx.paths, findings, 7), ctx);
+  const result = await purge(ctx.paths, 0);
+  expect(result.bytes).toBeGreaterThan(0);
+  expect(result.freed).toBeGreaterThanOrEqual(0);
+});
+
 test("a failing purge hook keeps the transaction so it can retry", async () => {
   const path = await worktree("hooked");
   const hook = join(home, "hook.sh");

@@ -7,6 +7,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+- **Purge reports what it really freed.** `freed` is the measured change in free space, and sizes elsewhere are labelled
+  uncompressed, because on btrfs with compression they can be several times what a removal gives back.
+
 - **Worktrees can be proven finished.** A merged pull request with the same commit, or every commit on the default
   branch, makes a worktree low risk. An open pull request or an unfinished rebase, merge, bisect or cherry-pick blocks it.
 - **Purge finishes the job.** It deletes a trashed worktree's local branch if the branch has not moved, and runs an

@@ -71,6 +71,12 @@ trash                    keeper undo TX restores. keeper purge deletes for good 
 An agent can only add a blocker. It has no way to clear one, so a bad judgement can keep a file but never lose one.
 Each finding's id is a hash of the state that was judged, so approval covers that state and nothing newer.
 
+## Sizes and freed space
+
+Sizes in scans and plans are uncompressed. On btrfs with compression, removing a directory can free far less than its
+size, and worktree build output often stores in under a third of it. Trash sits on the same disk, so nothing is freed
+until `keeper purge`, which reports the measured change in free space as `freed`.
+
 ## What it finds
 
 | Category | Finds | Risk |

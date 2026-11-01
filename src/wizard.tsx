@@ -82,7 +82,7 @@ export function Wizard({ actions }: { actions: Actions }) {
 
   return (
     <box flexDirection="column" paddingLeft={1} paddingRight={1} flexGrow={1}>
-      <text wrapMode="none">keeper · {gib(total)} selected</text>
+      <text wrapMode="none">keeper · {gib(total)} selected, uncompressed</text>
       <box flexDirection="column" flexGrow={1}>
         {rows.slice(start, start + pageSize).map((finding, index) => {
           const mark = !eligible(finding) ? " - " : selected.has(finding.id) ? "[x]" : "[ ]";

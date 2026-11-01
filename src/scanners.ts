@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { availableParallelism, loadavg } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { readLedger } from "./ledger";
 import { ageDays, holders, type Paths, run, sizes } from "./system";
@@ -9,6 +10,55 @@ export const defaultStaleDays = 7;
 const staleBuildDays = 3;
 const transcriptDays = 14;
 const buildDirs = /\/(target|node_modules|\.next|\.turbo|\.venv)$/;
+
+/** A machine this far past its core count is oversubscribed, so `load` findings become worth showing. */
+const loadPerCore = 1.25;
+/** Groups below this share of a core are noise, and renicing them would change nothing. */
+const minGroupCpu = 25;
+/** Short bursts are normal; only work that has held the CPU this long is deprioritised. */
+const minGroupMinutes = 5;
+const sampleMs = 200;
+const clockTicks = 100;
+/** The bottom of the range: what nice can give without root. */
+export const lowestPriority = 19;
+/** Below this share of time spent fully stalled, memory pressure is not what a person is feeling. */
+const memoryStall = 10;
+/** A cgroup this close to its memory.high cap is being throttled rather than merely busy. */
+const cgroupCap = 0.9;
+const cgroupRoots = ["/sys/fs/cgroup/user.slice", "/sys/fs/cgroup/agent.slice"];
+
+/** Deprioritising any of these makes the desktop itself slow, which is the opposite of what a load finding is for. */
+const sessionCommands = new Set([
+  "Hyprland",
+  "start-hyprland",
+  "Xwayland",
+  "Xorg",
+  "gnome-shell",
+  "plasmashell",
+  "kwin_wayland",
+  "kwin_x11",
+  "mutter",
+  "sway",
+  "i3",
+  "xfwm4",
+  "openbox",
+  "kitty",
+  "kitten",
+  "foot",
+  "alacritty",
+  "ghostty",
+  "wezterm",
+  "konsole",
+  "gnome-terminal",
+  "xterm",
+  "systemd",
+  "dbus-daemon",
+  "dbus-broker",
+  "pipewire",
+  "wireplumber",
+  "hypridle",
+  "hyprlock",
+]);
 
 export interface Config {
   /** Absolute paths or `~/` paths to directories that hold only disposable agent output. */
@@ -26,6 +76,40 @@ export interface Context {
   now: number;
   /** Worktrees and agent output touched more recently than this are blocked. */
   staleDays: number;
+  /** Sampled processes, so a test never has to race a real machine. Absent means the scan reads /proc. */
+  processes?: readonly ProcessInfo[];
+  cores?: number;
+  loadAverage?: number;
+  /** Memory pressure and capped cgroups, so a test can describe a stalled machine without reproducing one. */
+  pressure?: MemoryPressure;
+  cgroups?: readonly CgroupUsage[];
+}
+
+/** Percent of the last ten seconds spent stalled on memory, as `/proc/pressure/memory` reports it. */
+export interface MemoryPressure {
+  some: number;
+  full: number;
+}
+
+/** A cgroup that has a memory.high cap and is close enough to it to be throttled. */
+export interface CgroupUsage {
+  path: string;
+  current: number;
+  high: number;
+  commands: string[];
+}
+
+/** One process as `/proc` described it over the sample window. */
+export interface ProcessInfo {
+  pid: number;
+  ppid: number;
+  uid: number;
+  nice: number;
+  /** Percent of one core used across the sample. */
+  cpu: number;
+  /** Seconds since the process started. */
+  age: number;
+  command: string;
 }
 
 export function findingId(category: Category, target: string, state: string): string {
@@ -370,6 +454,237 @@ async function scanSnapshots(): Promise<Finding[]> {
   ];
 }
 
+interface RawProcess {
+  pid: number;
+  ppid: number;
+  uid: number;
+  nice: number;
+  /** utime + stime in clock ticks, so two snapshots give the CPU used between them. */
+  ticks: number;
+  age: number;
+  command: string;
+}
+
+function readProcess(pid: number, uptime: number): RawProcess | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const close = stat.lastIndexOf(")");
+    const comm = stat.slice(stat.indexOf("(") + 1, close);
+    // Everything after the command: state, ppid, pgrp, then utime, stime, nice and starttime further along.
+    const fields = stat.slice(close + 2).split(" ");
+    return {
+      pid,
+      ppid: Number(fields[1]),
+      uid: lstatSync(`/proc/${pid}`).uid,
+      nice: Number(fields[16]),
+      ticks: Number(fields[11]) + Number(fields[12]),
+      age: uptime - Number(fields[19]) / clockTicks,
+      command: readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0/g, " ").trim() || `[${comm}]`,
+    };
+  } catch {
+    return undefined; // the process exited while it was being read
+  }
+}
+
+function snapshot(): Map<number, RawProcess> {
+  const uptime = Number(readFileSync("/proc/uptime", "utf8").split(" ")[0]);
+  return new Map(
+    readdirSync("/proc")
+      .filter((name) => /^\d+$/.test(name))
+      .flatMap((name) => {
+        const found = readProcess(Number(name), uptime);
+        return found ? ([[found.pid, found]] as [number, RawProcess][]) : [];
+      }),
+  );
+}
+
+/** Two snapshots give real usage instead of ps's average over a process's whole life. */
+async function sampleProcesses(milliseconds = sampleMs): Promise<{
+  processes: ProcessInfo[];
+  cores: number;
+  loadAverage: number;
+}> {
+  const before = snapshot();
+  await Bun.sleep(milliseconds);
+  const after = snapshot();
+  const seconds = milliseconds / 1000;
+  const processes = [...after].flatMap(([pid, now]) => {
+    const then = before.get(pid);
+    if (!then) return []; // started during the sample, so there is no usage to measure
+    const { ppid, uid, nice, age, command } = now;
+    return [{ pid, ppid, uid, nice, age, command, cpu: ((now.ticks - then.ticks) / clockTicks / seconds) * 100 }];
+  });
+  return { processes, cores: availableParallelism(), loadAverage: loadavg()[0] ?? 0 };
+}
+
+/**
+ * Groups by command, not by process group: a desktop session puts the window manager, terminals and everything a build
+ * spawns into one group, so renicing that group would slow the very thing that has to stay responsive.
+ */
+async function scanLoad(context: Context): Promise<Finding[]> {
+  const sample = context.processes
+    ? {
+        processes: context.processes,
+        cores: context.cores ?? availableParallelism(),
+        loadAverage: context.loadAverage ?? loadavg()[0] ?? 0,
+      }
+    : await sampleProcesses();
+  const { cores, loadAverage } = sample;
+  if (loadAverage <= cores * loadPerCore) return [];
+  const groups = new Map<string, ProcessInfo[]>();
+  for (const proc of sample.processes) {
+    const name = commandName(proc.command);
+    groups.set(name, [...(groups.get(name) ?? []), proc]);
+  }
+  const me = process.getuid?.() ?? -1;
+  return [...groups].flatMap(([name, members]) => {
+    const cpu = members.reduce((sum, member) => sum + member.cpu, 0);
+    const heaviest = members.reduce((hot, member) => (member.cpu > hot.cpu ? member : hot));
+    const oldest = members.reduce((long, member) => (member.age > long.age ? member : long));
+    if (cpu < minGroupCpu || oldest.age < minGroupMinutes * 60) return [];
+    const pids = members.map((member) => member.pid).sort((a, b) => a - b);
+    const blockers: string[] = [];
+    if (sessionCommands.has(name)) blockers.push("part of your desktop session, which is what has to stay responsive");
+    if (members.every((member) => member.nice >= lowestPriority)) blockers.push("already at the bottom priority");
+    if (pids.includes(process.pid)) blockers.push("this keeper run is part of the command");
+    if (heaviest.uid !== me) blockers.push("owned by another user");
+    return [
+      {
+        // The command name is the state: workers come and go, and "rustc is hammering this machine" is what was judged.
+        id: findingId("load", name, "cpu"),
+        category: "load",
+        risk: "medium",
+        action: "renice",
+        title: `${clip(heaviest.command)}${pids.length > 1 ? ` (+${pids.length - 1} more)` : ""}`,
+        paths: [],
+        packages: [],
+        bytes: 0,
+        cpu: Math.round(cpu),
+        pids,
+        reason: `${Math.round(cpu)}% of one core while load is ${loadAverage.toFixed(1)} on ${cores} cores. Renicing keeps the work and hands the CPU back to whatever you are typing into`,
+        blockers,
+      } satisfies Finding,
+    ];
+  });
+}
+
+/** argv[0] without its directory, which is what a person would call the program. */
+function commandName(command: string): string {
+  return basename(command.split(" ")[0] ?? command);
+}
+
+function clip(command: string): string {
+  return command.length > 80 ? `${command.slice(0, 77)}...` : command;
+}
+
+function gigabytes(bytes: number): string {
+  return `${(bytes / 1024 ** 3).toFixed(1)}G`;
+}
+
+function readPressure(): MemoryPressure {
+  try {
+    const text = readFileSync("/proc/pressure/memory", "utf8");
+    const average = (kind: string) => Number(new RegExp(`${kind} avg10=([\\d.]+)`).exec(text)?.[1] ?? 0);
+    return { some: average("some"), full: average("full") };
+  } catch {
+    return { some: 0, full: 0 }; // a kernel without pressure stall information
+  }
+}
+
+function commandsIn(cgroup: string, limit = 3): string[] {
+  try {
+    const commands = readFileSync(join(cgroup, "cgroup.procs"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((pid) => {
+        try {
+          return readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0/g, " ").trim();
+        } catch {
+          return "";
+        }
+      });
+    return [...new Set(commands.filter(Boolean))].slice(0, limit);
+  } catch {
+    return [];
+  }
+}
+
+/** Walks the slices a person's processes live in, keeping only cgroups that have a `memory.high` cap and are at it. */
+function readCgroups(): CgroupUsage[] {
+  const found: CgroupUsage[] = [];
+  const walk = (dir: string, depth: number): void => {
+    if (depth > 8) return;
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      const path = join(dir, name);
+      if (!isDirectory(path)) continue;
+      try {
+        const high = readFileSync(join(path, "memory.high"), "utf8").trim();
+        const current = Number(readFileSync(join(path, "memory.current"), "utf8"));
+        if (high !== "max" && current >= Number(high) * cgroupCap) {
+          found.push({ path, current, high: Number(high), commands: commandsIn(path) });
+        }
+      } catch {}
+      walk(path, depth + 1);
+    }
+  };
+  for (const root of cgroupRoots) walk(root, 0);
+  return found;
+}
+
+/**
+ * Reports where memory is stalled. `report`, never `trash`: keeper cannot decide whose working set to drop, and the cap
+ * that is thrashing was usually set on purpose. High `bytes` here is memory held, not space a cleanup would free.
+ */
+async function scanMemory(context: Context): Promise<Finding[]> {
+  const pressure = context.pressure ?? readPressure();
+  const pinned = context.cgroups ?? readCgroups();
+  if (pressure.full < memoryStall && pinned.length === 0) return [];
+  if (pinned.length === 0) {
+    return [
+      {
+        id: findingId("memory", "pressure", "stall"),
+        category: "memory",
+        risk: "medium",
+        action: "report",
+        title: `memory pressure: every task stalled ${Math.round(pressure.full)}% of the time`,
+        paths: [],
+        packages: [],
+        bytes: 0,
+        reason: "No cgroup is at a cap, so the working set simply does not fit in RAM",
+        blockers: [],
+      },
+    ];
+  }
+  return pinned.map((cgroup) => {
+    const name = cgroupName(cgroup.path);
+    const command = cgroup.commands[0];
+    return {
+      id: findingId("memory", cgroup.path, String(cgroup.high)),
+      category: "memory",
+      risk: "medium",
+      action: "report",
+      title: command ? `${name} · ${clip(command)}` : name,
+      paths: [],
+      packages: [],
+      bytes: cgroup.current,
+      reason: `${gigabytes(cgroup.current)} held against a ${gigabytes(cgroup.high)} memory.high cap, while every task stalls on memory ${Math.round(pressure.full)}% of the time`,
+      blockers: [],
+    };
+  });
+}
+
+/** Session scopes carry a full UUID; the short form is enough to find one with systemctl. */
+function cgroupName(path: string): string {
+  const name = basename(path).replace(/\.scope$/, "");
+  return /^(agent-session-[0-9a-f]{8})-[0-9a-f-]+$/.exec(name)?.[1] ?? name;
+}
+
 const scanners: Record<Category, (context: Context) => Promise<Finding[]>> = {
   worktree: scanWorktrees,
   aur: scanAur,
@@ -380,6 +695,8 @@ const scanners: Record<Category, (context: Context) => Promise<Finding[]>> = {
   transcripts: scanTranscripts,
   "uv-cache": scanUv,
   snapshots: scanSnapshots,
+  load: scanLoad,
+  memory: scanMemory,
 };
 
 function overlaps(a: string, b: string): boolean {

@@ -37,6 +37,7 @@ const help = `keeper keeps an Arch machine clean. Output is JSON when stdout is 
 
 Exit codes: 0 ok, 1 error, 2 usage, 3 needs --yes, 4 plan is entirely stale, 5 partly applied, so scan again, 6 another run holds the lock, so retry.
 Set KEEPER_ACTOR to name yourself in holds, claims and the log.
+A load finding appears only while the machine is oversubscribed, and renicing needs --max-risk medium.
 Categories: ${categories.join(", ")}.`;
 
 interface Flags {
@@ -105,6 +106,12 @@ export function gib(bytes: number): string {
   return `${(bytes / 1024 ** 3).toFixed(1)}G`;
 }
 
+/** Most findings free space, but a `load` finding frees none, so the size column shows what it does give back. */
+export function measure(finding: Finding): string {
+  if (finding.bytes > 0) return gib(finding.bytes);
+  return finding.cpu === undefined ? gib(0) : `${Math.round(finding.cpu)}%`;
+}
+
 /** Claims become deletable, so a slip here must not be able to take a home directory or a repo with it. */
 export function dangerous(path: string, home: string): boolean {
   return path === "/" || home === path || home.startsWith(`${path}/`) || existsSync(join(path, ".git/HEAD"));
@@ -126,7 +133,7 @@ function schema() {
 function line(finding: Finding): string {
   const state = finding.action === "report" ? "report" : finding.blockers.length ? "blocked" : "ready";
   const why = finding.blockers.length ? finding.blockers.join("; ") : finding.reason;
-  return `${finding.id}  ${gib(finding.bytes).padStart(7)}  ${finding.risk.padEnd(6)} ${state.padEnd(7)} ${finding.title}\n    ${why}`;
+  return `${finding.id}  ${measure(finding).padStart(7)}  ${finding.risk.padEnd(6)} ${state.padEnd(7)} ${finding.title}\n    ${why}`;
 }
 
 async function auto(flags: Flags): Promise<{ value: unknown; code: number }> {
@@ -206,9 +213,11 @@ async function dispatch(
       const next = outcome.transaction
         ? `keeper undo ${outcome.transaction} to restore, or keeper purge --older-days 0 to free the space`
         : "keeper scan";
+      const moved = outcome.bytes > 0 ? `, ${gib(outcome.bytes)} moved` : "";
+      const lowered = outcome.reniced > 0 ? `, ${outcome.reniced} processes deprioritised` : "";
       return {
         value: { ...outcome, next: partial ? "keeper scan" : next },
-        text: `applied ${outcome.applied.length}, stale ${outcome.stale.length}, failed ${outcome.failed.length}, ${gib(outcome.bytes)} moved. undo: ${outcome.transaction ?? "none"}`,
+        text: `applied ${outcome.applied.length}, stale ${outcome.stale.length}, failed ${outcome.failed.length}${moved}${lowered}. undo: ${outcome.transaction ?? "none"}`,
         code: partial
           ? exit.partial
           : outcome.applied.length === 0 && outcome.stale.length > 0
@@ -219,11 +228,17 @@ async function dispatch(
     case "undo": {
       const [id] = rest;
       if (!id) throw new UsageError("usage: keeper undo TX");
-      const result = undo(paths, id);
+      const result = await undo(paths, id);
       const reinstall = result.removedPackages.length
         ? `\nreinstall with: sudo pacman -S --asdeps ${result.removedPackages.join(" ")}`
         : "";
-      return { value: result, text: `restored ${result.restored.length} paths${reinstall}` };
+      const reniced = result.reniced ? `, ${result.reniced} processes back at their old priority` : "";
+      const stuck = result.stuck.length
+        ? `\n${result.stuck.length} still at low priority, which needs root to raise: ${result.stuck
+            .map((entry) => `${entry.pid} back to ${entry.nice}`)
+            .join(", ")}`
+        : "";
+      return { value: result, text: `restored ${result.restored.length} paths${reniced}${reinstall}${stuck}` };
     }
     case "purge": {
       const result = await purge(paths, flags.olderDays);

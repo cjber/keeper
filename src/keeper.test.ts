@@ -5,9 +5,10 @@ import { join } from "node:path";
 import { dangerous, runCli } from "./cli";
 import { BusyError, withLock, writeLedger } from "./ledger";
 import { applyPlan, createPlan, purge, undo } from "./ops";
-import { type Context, scan, worktreeDirs } from "./scanners";
-import { defaultPaths, holders, run } from "./system";
+import { type Context, type ProcessInfo, scan, worktreeDirs } from "./scanners";
+import { defaultPaths, holders, niceness, run } from "./system";
 import { units } from "./timer";
+import { eligible } from "./types";
 
 let home: string;
 let ctx: Context;
@@ -117,7 +118,7 @@ test("apply moves to trash, undo restores, and a changed finding is refused as s
   const applied = await applyPlan(plan, ctx);
   expect(applied.applied).toHaveLength(1);
   expect(existsSync(batch)).toBe(false);
-  undo(ctx.paths, applied.transaction as string);
+  await undo(ctx.paths, applied.transaction as string);
   expect(readFileSync(join(batch, "out"), "utf8")).toBe("data");
 
   writeFileSync(join(batch, "new"), "fresh");
@@ -210,4 +211,97 @@ test("the wizard refuses to open without a terminal", async () => {
 
 test("runCli rejects unknown options", async () => {
   expect(await runCli(["scan", "--nope"])).toBe(2);
+});
+
+const uid = process.getuid?.() ?? 0;
+
+function proc(overrides: Partial<ProcessInfo> = {}): ProcessInfo {
+  return {
+    pid: 10,
+    ppid: 1,
+    uid,
+    nice: 0,
+    cpu: 120,
+    age: 600,
+    command: "cargo build --release",
+    ...overrides,
+  };
+}
+
+test("load findings appear only on an oversubscribed machine, grouped by command", async () => {
+  const group = [proc(), proc({ pid: 11, ppid: 10, cpu: 30 })];
+  const busy = await scan({ ...ctx, processes: group, cores: 4, loadAverage: 12 }, ["load"]);
+  expect(busy.findings).toHaveLength(1);
+  expect(busy.findings[0]).toMatchObject({ category: "load", action: "renice", risk: "medium", cpu: 150 });
+  expect(busy.findings[0]?.pids).toEqual([10, 11]);
+  expect(busy.findings[0]?.blockers).toEqual([]);
+
+  // Load 2 on 4 cores is a machine doing its job, so there is nothing to report.
+  const idle = await scan({ ...ctx, processes: group, cores: 4, loadAverage: 2 }, ["load"]);
+  expect(idle.findings).toEqual([]);
+});
+
+test("a burst too short to matter and a command already at the bottom are not eligible", async () => {
+  const young = await scan({ ...ctx, processes: [proc({ age: 60 })], cores: 2, loadAverage: 9 }, ["load"]);
+  expect(young.findings).toEqual([]);
+
+  const lowered = await scan({ ...ctx, processes: [proc({ nice: 19 })], cores: 2, loadAverage: 9 }, ["load"]);
+  expect(lowered.findings[0]?.blockers.join()).toContain("already at the bottom priority");
+});
+
+test("the desktop session is never reniced, because it is what has to stay responsive", async () => {
+  const session = await scan(
+    { ...ctx, processes: [proc({ command: "/usr/bin/kitty --single-instance", cpu: 90 })], cores: 2, loadAverage: 9 },
+    ["load"],
+  );
+  expect(session.findings[0]?.blockers.join()).toContain("desktop session");
+});
+
+test("memory findings name the cgroup pinned at its cap, and can never be planned", async () => {
+  const pinned = {
+    path: "/sys/fs/cgroup/user.slice/agent-session-1.scope",
+    current: 3.2 * 1024 ** 3,
+    high: 3 * 1024 ** 3,
+    commands: ["cargo build --release"],
+  };
+  const { findings } = await scan({ ...ctx, pressure: { some: 80, full: 60 }, cgroups: [pinned] }, ["memory"]);
+  expect(findings).toHaveLength(1);
+  const [finding] = findings;
+  expect(finding).toMatchObject({ category: "memory", action: "report" });
+  expect(finding?.title).toContain("agent-session-1");
+  expect(finding && eligible(finding)).toBe(false);
+});
+
+test("memory pressure with no pinned cgroup is still reported, and a healthy machine stays silent", async () => {
+  const stalled = await scan({ ...ctx, pressure: { some: 50, full: 20 }, cgroups: [] }, ["memory"]);
+  expect(stalled.findings).toHaveLength(1);
+  expect(stalled.findings[0]?.title).toContain("memory pressure");
+
+  const healthy = await scan({ ...ctx, pressure: { some: 2, full: 0 }, cgroups: [] }, ["memory"]);
+  expect(healthy.findings).toEqual([]);
+});
+
+test("applying a load plan lowers the priority and undo puts it back", async () => {
+  const child = Bun.spawn(["sleep", "30"], { stdout: "ignore", stderr: "ignore" });
+  try {
+    const hot: Context = {
+      ...ctx,
+      processes: [proc({ pid: child.pid, cpu: 300, command: "sleep 30" })],
+      cores: 2,
+      loadAverage: 8,
+    };
+    const { findings } = await scan(hot, ["load"]);
+    expect(niceness(child.pid)).toBe(0);
+
+    const applied = await applyPlan(createPlan(ctx.paths, findings, 7), hot);
+    expect(applied.reniced).toBe(1);
+    expect(niceness(child.pid)).toBe(19);
+
+    const restored = await undo(ctx.paths, applied.transaction as string);
+    // Raising a nice value back needs root, so the honest contract is that it is either restored or reported.
+    expect(restored.reniced + restored.stuck.length).toBe(1);
+    expect(niceness(child.pid)).toBe(restored.reniced ? 0 : 19);
+  } finally {
+    child.kill();
+  }
 });

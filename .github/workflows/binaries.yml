@@ -1,0 +1,37 @@
+name: Binary checks
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  binary:
+    name: binary-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - run: bun install --frozen-lockfile --os linux --cpu "*" --libc "*"
+      - run: bun scripts/build.ts
+      - run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Exercise the native executable outside the checkout
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: bun scripts/smoke-binary.ts "dist/keeper-linux-$ARCH"
+      - name: Build and install the binary AUR package without Bun
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: bash scripts/check-binary-package.sh "$ARCH"

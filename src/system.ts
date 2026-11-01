@@ -24,24 +24,28 @@ export async function run(argv: string[], cwd?: string): Promise<Result> {
 
 export interface Paths {
   home: string;
-  worktrees: string;
-  paruClone: string;
+  worktrees: string[];
+  aurClones: string[];
   state: string;
   trash: string;
   config: string;
   units: string;
 }
 
-export function defaultPaths(home = homedir()): Paths {
+export function defaultPaths(home = homedir(), env: Record<string, string | undefined> = process.env): Paths {
   return {
     home,
-    worktrees: join(home, ".worktrees"),
-    paruClone: join(home, ".cache/paru/clone"),
-    state: join(process.env.XDG_STATE_HOME ?? join(home, ".local/state"), "keeper"),
+    worktrees: [join(home, ".worktrees")],
+    aurClones: [join(home, ".cache/paru/clone"), join(home, ".cache/yay")],
+    state: join(env.XDG_STATE_HOME ?? join(home, ".local/state"), "keeper"),
     trash: join(home, ".local/share/keeper/trash"),
-    config: join(process.env.XDG_CONFIG_HOME ?? join(home, ".config"), "keeper/config.toml"),
-    units: join(process.env.XDG_CONFIG_HOME ?? join(home, ".config"), "systemd/user"),
+    config: join(env.XDG_CONFIG_HOME ?? join(home, ".config"), "keeper/config.toml"),
+    units: join(env.XDG_CONFIG_HOME ?? join(home, ".config"), "systemd/user"),
   };
+}
+
+export function expandHome(home: string): (path: string) => string {
+  return (path) => (path === "~" ? home : path.startsWith("~/") ? join(home, path.slice(2)) : path);
 }
 
 /** Every path a running process holds as its cwd or an open file. Unreadable processes belong to other users. */

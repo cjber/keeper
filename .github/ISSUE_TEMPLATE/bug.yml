@@ -1,0 +1,24 @@
+name: Bug
+description: keeper did the wrong thing
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: finding
+    attributes:
+      label: Finding
+      description: The finding from `keeper scan --json`, with anything private removed.
+      render: json
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `keeper --version`.
+    validations:
+      required: true

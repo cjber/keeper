@@ -1,10 +1,10 @@
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { audit, withLock } from "./ledger";
 import type { Config, Context } from "./scanners";
-import { defaultStaleDays, lowestPriority, scan } from "./scanners";
-import { defaultPaths, liveFiles, niceness, type Paths, run } from "./system";
+import { defaultConfig, defaultStaleDays, logKeepBytes, lowestPriority, scan } from "./scanners";
+import { defaultPaths, expandHome, liveFiles, niceness, type Paths, run } from "./system";
 import {
   eligible,
   type Finding,
@@ -18,17 +18,31 @@ import {
 } from "./types";
 
 export function loadConfig(paths: Paths): Config {
-  const defaults: Config = { agentRoots: [], agentCachePatterns: [], repoRoots: [] };
+  let parsed: Partial<Config>;
   try {
-    return { ...defaults, ...(Bun.TOML.parse(readFileSync(paths.config, "utf8")) as Partial<Config>) };
+    parsed = Bun.TOML.parse(readFileSync(paths.config, "utf8")) as Partial<Config>;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return defaults;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return defaultConfig;
     throw new Error(`cannot read ${paths.config}: ${error}`);
   }
+  // A misspelt key must not leave a path unprotected or a root unscanned without anyone noticing.
+  const unknown = Object.keys(parsed).filter((key) => !(key in defaultConfig));
+  if (unknown.length) throw new Error(`unknown keys in ${paths.config}: ${unknown.join(", ")}`);
+  return { ...defaultConfig, ...parsed };
+}
+
+function configuredPaths(paths: Paths, config: Config): Paths {
+  const expand = expandHome(paths.home);
+  return {
+    ...paths,
+    worktrees: config.worktreeRoots.length ? config.worktreeRoots.map(expand) : paths.worktrees,
+    aurClones: config.aurClones.length ? config.aurClones.map(expand) : paths.aurClones,
+  };
 }
 
 export function context(staleDays = defaultStaleDays, paths: Paths = defaultPaths()): Context {
-  return { paths, config: loadConfig(paths), live: liveFiles(), now: Date.now(), staleDays };
+  const config = loadConfig(paths);
+  return { paths: configuredPaths(paths, config), config, live: liveFiles(), now: Date.now(), staleDays };
 }
 
 function writeJson(path: string, value: unknown): void {
@@ -66,7 +80,24 @@ export interface Outcome {
   transaction?: string;
 }
 
-async function execute(finding: Finding, _paths: Paths, tx: Transaction, base: string): Promise<void> {
+/** `mv` rather than rename, because a configured root may sit on a different filesystem from the trash. */
+async function move(from: string, to: string): Promise<void> {
+  const result = await run(["mv", "--no-target-directory", "--", from, to]);
+  if (result.code !== 0) throw new Error(result.stderr || `mv exited ${result.code}`);
+}
+
+/** Transcripts leave one directory per session behind. rmdir only ever removes an empty directory. */
+function removeEmptyParents(path: string, home: string): void {
+  for (let dir = dirname(path); dir.startsWith(`${home}/`); dir = dirname(dir)) {
+    try {
+      rmdirSync(dir);
+    } catch {
+      return;
+    }
+  }
+}
+
+async function execute(finding: Finding, paths: Paths, tx: Transaction, base: string): Promise<void> {
   if (finding.action === "renice") {
     let changed = 0;
     for (const pid of finding.pids ?? []) {
@@ -81,24 +112,30 @@ async function execute(finding: Finding, _paths: Paths, tx: Transaction, base: s
   }
   if (finding.action === "trash") {
     for (const original of finding.paths) {
+      // A worktree and its own build output can share a plan, so the parent's move may have taken this path.
+      if (!existsSync(original)) continue;
       const trashed = join(base, String(tx.entries.length));
-      try {
-        renameSync(original, trashed);
-      } catch (error) {
-        // A worktree and its own build output can share a plan, so the parent's move may have taken this path.
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-        throw error;
-      }
-      const entry: TrashEntry = { original, trashed, bytes: finding.paths.length === 1 ? finding.bytes : 0 };
-      if (finding.gitDir) entry.gitDir = finding.gitDir;
-      tx.entries.push(entry);
+      await move(original, trashed);
+      const { gitDir, branch, head } = finding;
+      const bytes = finding.paths.length === 1 ? finding.bytes : 0;
+      tx.entries.push({ original, trashed, bytes, gitDir, branch, head });
+      if (finding.category === "transcripts") removeEmptyParents(original, paths.home);
+    }
+    return;
+  }
+  if (finding.action === "truncate") {
+    for (const path of finding.paths) {
+      // Written in place: a rename would leave the running writer appending to a deleted file.
+      const start = Math.max(0, statSync(path).size - logKeepBytes);
+      const tail = await Bun.file(path).slice(start).arrayBuffer();
+      writeFileSync(path, Buffer.from(tail));
     }
     return;
   }
   const command: Record<string, string[]> = {
     paccache: ["sudo", "-n", "paccache", "-rk1"],
     "remove-packages": ["sudo", "-n", "pacman", "-Rns", "--noconfirm", ...finding.packages],
-    "uv-prune": ["uv", "cache", "prune"],
+    "uv-prune": ["env", "UV_LOCK_TIMEOUT=5", "uv", "cache", "prune"],
   };
   const argv = command[finding.action];
   if (!argv) throw new Error(`action ${finding.action} cannot be applied`);
@@ -176,16 +213,28 @@ async function restorePriority(entry: Reniced): Promise<boolean> {
   return (await run(argv)).code === 0 || (await run(["sudo", "-n", ...argv])).code === 0;
 }
 
-export async function undo(
-  paths: Paths,
-  id: string,
-): Promise<{ restored: string[]; removedPackages: string[]; reniced: number; stuck: Reniced[] }> {
+export interface Undone {
+  restored: string[];
+  removedPackages: string[];
+  reniced: number;
+  stuck: Reniced[];
+}
+
+export function undo(paths: Paths, id: string): Promise<Undone> {
+  return withLock(paths, () => undoUnlocked(paths, id));
+}
+
+async function undoUnlocked(paths: Paths, id: string): Promise<Undone> {
   const tx = transactions(paths).find((candidate) => candidate.id === id);
   if (!tx) throw new Error(`no transaction ${id}`);
+  // Entries already moved back by an interrupted undo are skipped, so running it again finishes the job.
+  const pending = tx.entries.filter((entry) => existsSync(entry.trashed));
+  const taken = pending.filter((entry) => existsSync(entry.original)).map((entry) => entry.original);
+  if (taken.length) throw new Error(`nothing restored, these paths exist again: ${taken.join(", ")}`);
   const restored: string[] = [];
-  for (const entry of tx.entries) {
+  for (const entry of pending) {
     mkdirSync(dirname(entry.original), { recursive: true });
-    renameSync(entry.trashed, entry.original);
+    await move(entry.trashed, entry.original);
     restored.push(entry.original);
   }
   // A process that has since exited cannot be put back, and one at the bottom cannot be raised without root.
@@ -201,11 +250,14 @@ export async function undo(
 }
 
 /** Deletion is final here, so git metadata for trashed worktrees is pruned only now and undo keeps working until then. */
-export function purge(
-  paths: Paths,
-  olderThanDays: number,
-  now = Date.now(),
-): Promise<{ purged: string[]; bytes: number }> {
+export interface Purged {
+  purged: string[];
+  bytes: number;
+  /** Transactions kept because the purge hook failed, so it can run again while their files still exist. */
+  failed: string[];
+}
+
+export function purge(paths: Paths, olderThanDays: number, now = Date.now()): Promise<Purged> {
   return withLock(paths, async () => {
     const result = await purgeUnlocked(paths, olderThanDays, now);
     if (result.purged.length) audit(paths, "purge", result);
@@ -213,23 +265,40 @@ export function purge(
   });
 }
 
-async function purgeUnlocked(
-  paths: Paths,
-  olderThanDays: number,
-  now: number,
-): Promise<{ purged: string[]; bytes: number }> {
+/** The hook sees the trashed tree, which still holds whatever it needs to read, such as a worktree's .env. */
+async function runPurgeHook(hook: string, entries: readonly TrashEntry[]): Promise<boolean> {
+  for (const entry of entries.filter((item) => item.gitDir)) {
+    if ((await run([hook, entry.trashed, entry.original])).code !== 0) return false;
+  }
+  return true;
+}
+
+async function purgeUnlocked(paths: Paths, olderThanDays: number, now: number): Promise<Purged> {
+  const { purgeHook } = loadConfig(paths);
   const purged: string[] = [];
+  const failed: string[] = [];
   let bytes = 0;
   for (const tx of transactions(paths)) {
-    if (now - statSync(join(paths.trash, tx.id)).mtimeMs < olderThanDays * 86_400_000) continue;
+    // Clamped, because a file timestamp can land a fraction of a millisecond after the clock read and 0 means everything.
+    const age = Math.max(0, now - statSync(join(paths.trash, tx.id)).mtimeMs);
+    if (age < olderThanDays * 86_400_000) continue;
+    if (purgeHook && !(await runPurgeHook(expandHome(paths.home)(purgeHook), tx.entries))) {
+      failed.push(tx.id);
+      continue;
+    }
     rmSync(join(paths.trash, tx.id), { recursive: true, force: true });
     for (const gitDir of new Set(tx.entries.flatMap((entry) => (entry.gitDir ? [entry.gitDir] : [])))) {
       await run(["git", "--git-dir", gitDir, "worktree", "prune"]);
     }
+    for (const { gitDir, branch, head } of tx.entries) {
+      // Passing the old value makes this a no-op on a branch that moved after the worktree was trashed.
+      if (gitDir && branch && head)
+        await run(["git", "--git-dir", gitDir, "update-ref", "-d", `refs/heads/${branch}`, head]);
+    }
     purged.push(tx.id);
     bytes += tx.entries.reduce((sum, entry) => sum + entry.bytes, 0);
   }
-  return { purged, bytes };
+  return { purged, bytes, failed };
 }
 
 export function withinRisk(finding: Finding, max: Risk): boolean {

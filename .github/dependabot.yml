@@ -9,3 +9,12 @@ updates:
     groups:
       dependencies:
         patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: daily
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]

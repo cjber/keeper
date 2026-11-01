@@ -1,5 +1,7 @@
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
+import packageJson from "../package.json";
+import { freshen, primaryCheckouts } from "./freshen";
 import { actor, audit, BusyError, type Claim, type Hold, readAudit, readLedger, writeLedger } from "./ledger";
 import { applyPlan, context, createPlan, freeBytes, purge, readPlan, transactions, undo, withinRisk } from "./ops";
 import { defaultStaleDays, scan } from "./scanners";
@@ -12,7 +14,8 @@ export const exit = { ok: 0, error: 1, usage: 2, needsConfirmation: 3, stalePlan
 
 const trashDays = 14;
 const holdDays = 7;
-const warnFreeBytes = 60 * 1024 ** 3;
+/** Each adds evidence or an action, and keeper works without it. */
+const optionalTools = ["gh", "paccache", "expac", "notify-send", "uv"];
 
 const help = `keeper keeps an Arch machine clean. Output is JSON when stdout is not a terminal or with --json.
 
@@ -28,13 +31,15 @@ const help = `keeper keeps an Arch machine clean. Output is JSON when stdout is 
                                  protect a path you will return to (default ${holdDays} days)
   keeper claim PATH              declare your own scratch as disposable once stale
   keeper release PATH            drop your hold or claim on a path
-  keeper status                  trash, holds, schedule and free space
+  keeper status                  trash, holds, schedule, last run and what needs attention
   keeper log                     recent mutations and who made them
   keeper schema                  machine-readable description of this CLI
   keeper auto                    apply low-risk findings, purge old trash, notify
+  keeper --version               print the version
   keeper timer install [--cron]  schedule keeper auto daily
   keeper timer remove            remove the schedule
 
+Worktrees are low risk only with proof: a merged PR with the same commit, or every commit on the default branch.
 Exit codes: 0 ok, 1 error, 2 usage, 3 needs --yes, 4 plan is entirely stale, 5 partly applied, so scan again, 6 another run holds the lock, so retry.
 Set KEEPER_ACTOR to name yourself in holds, claims and the log.
 A load finding appears only while the machine is oversubscribed, and renicing needs --max-risk medium.
@@ -117,12 +122,13 @@ export function dangerous(path: string, home: string): boolean {
   return path === "/" || home === path || home.startsWith(`${path}/`) || existsSync(join(path, ".git/HEAD"));
 }
 
-function schema() {
+export function schema() {
   return {
     schemaVersion,
     exitCodes: exit,
     categories,
     risks,
+    version: packageJson.version,
     finding: "id, category, risk, action, title, paths, packages, bytes, reason, blockers",
     eligible: "blockers is empty and action is not report",
     environment: { KEEPER_ACTOR: "name recorded in holds, claims and the log" },
@@ -136,8 +142,11 @@ function line(finding: Finding): string {
   return `${finding.id}  ${measure(finding).padStart(7)}  ${finding.risk.padEnd(6)} ${state.padEnd(7)} ${finding.title}\n    ${why}`;
 }
 
-async function auto(flags: Flags): Promise<{ value: unknown; code: number }> {
+async function auto(flags: Flags): Promise<{ value: { summary: string } & Record<string, unknown>; code: number }> {
   const ctx = context();
+  // Freshen first, so the scan judges worktrees against the default branch as it is now.
+  const repos = ctx.config.freshen ? await primaryCheckouts(ctx) : [];
+  const freshened = await Promise.all(repos.map(freshen));
   const report = await scan(ctx);
   const ready = report.findings.filter((finding) => eligible(finding) && finding.risk === "low");
   const paths = ctx.paths;
@@ -147,10 +156,12 @@ async function auto(flags: Flags): Promise<{ value: unknown; code: number }> {
   const free = await freeBytes(paths.home);
   const waitingBytes = waiting.reduce((sum, finding) => sum + finding.bytes, 0);
   const summary = `Moved ${gib(outcome?.bytes ?? 0)} to trash, purged ${gib(purged.bytes)}, ${gib(free)} free. ${gib(waitingBytes)} waits for approval.`;
-  if (waitingBytes > 10 * 1024 ** 3 || free < warnFreeBytes) {
-    await run(["notify-send", ...(free < warnFreeBytes ? ["-u", "critical"] : []), "keeper", summary]);
+  const low = free < ctx.config.warnFreeGb * 1024 ** 3;
+  if (waitingBytes > 10 * 1024 ** 3 || low) {
+    await run(["notify-send", ...(low ? ["-u", "critical"] : []), "keeper", summary]);
   }
-  const incomplete = (outcome?.failed.length ?? 0) > 0;
+  const incomplete = (outcome?.failed.length ?? 0) > 0 || purged.failed.length > 0;
+  audit(paths, "auto", { summary, incomplete });
   return {
     value: {
       at: new Date().toISOString(),
@@ -159,6 +170,7 @@ async function auto(flags: Flags): Promise<{ value: unknown; code: number }> {
       outcome,
       purged,
       waiting: waiting.length,
+      freshened: freshened.filter((note) => note !== undefined),
       warnings: report.warnings,
     },
     code: incomplete ? exit.partial : exit.ok,
@@ -290,20 +302,31 @@ async function dispatch(
       return { value: schema(), text: JSON.stringify(schema(), null, 2) };
     case "status": {
       const trash = transactions(paths);
+      const lastRun = readAudit(paths, 500)
+        .filter((entry): entry is { at: string; summary: string } => (entry as { event?: string }).event === "auto")
+        .at(-1);
+      const holds = readLedger(paths).holds.filter((hold) => Date.parse(hold.until) > Date.now());
+      const schedule = await scheduleStatus();
       const value = {
+        version: packageJson.version,
         free: await freeBytes(paths.home),
-        schedule: await scheduleStatus(),
-        holds: readLedger(paths).holds,
+        schedule,
+        lastRun,
+        holds,
         trash: trash.map((tx) => ({ id: tx.id, appliedAt: tx.appliedAt, paths: tx.entries.length })),
+        missingTools: optionalTools.filter((tool) => !Bun.which(tool)),
+        next: schedule === "none" ? "keeper timer install" : "keeper scan",
       };
+      const last = lastRun ? `\nlast run ${lastRun.at}: ${lastRun.summary}` : "";
+      const missing = value.missingTools.length ? `\nmissing: ${value.missingTools.join(", ")}` : "";
       return {
         value,
-        text: `${gib(value.free)} free, schedule ${value.schedule}, ${trash.length} transactions in trash`,
+        text: `${gib(value.free)} free, schedule ${schedule}, ${trash.length} transactions in trash, ${holds.length} holds${last}${missing}\nnext: ${value.next}`,
       };
     }
     case "auto": {
       const result = await auto(flags);
-      return { value: result.value, text: JSON.stringify(result.value), code: result.code };
+      return { value: result.value, text: result.value.summary, code: result.code };
     }
     case "timer": {
       const [verb] = rest;
@@ -326,6 +349,10 @@ async function dispatch(
 export async function runCli(args: readonly string[]): Promise<number | undefined> {
   if (args.includes("--help") || args.includes("-h")) {
     console.log(help);
+    return exit.ok;
+  }
+  if (args.includes("--version")) {
+    console.log(`keeper ${packageJson.version}`);
     return exit.ok;
   }
   let json = !process.stdout.isTTY || args.includes("--json");

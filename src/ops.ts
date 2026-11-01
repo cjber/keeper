@@ -1,13 +1,15 @@
 import { randomBytes } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { audit, withLock } from "./ledger";
 import type { Config, Context } from "./scanners";
-import { defaultStaleDays, scan } from "./scanners";
-import { defaultPaths, liveFiles, type Paths, run } from "./system";
+import { defaultStaleDays, lowestPriority, scan } from "./scanners";
+import { defaultPaths, liveFiles, niceness, type Paths, run } from "./system";
 import {
   eligible,
   type Finding,
   type Plan,
+  type Reniced,
   type Risk,
   risks,
   schemaVersion,
@@ -59,10 +61,24 @@ export interface Outcome {
   stale: string[];
   failed: { id: string; error: string }[];
   bytes: number;
+  /** Processes whose priority was lowered, which frees no space but is the point of a quiet machine again. */
+  reniced: number;
   transaction?: string;
 }
 
 async function execute(finding: Finding, _paths: Paths, tx: Transaction, base: string): Promise<void> {
+  if (finding.action === "renice") {
+    let changed = 0;
+    for (const pid of finding.pids ?? []) {
+      const nice = niceness(pid);
+      if (nice === undefined || nice >= lowestPriority) continue; // gone, or already at the bottom
+      if ((await run(["renice", "-n", String(lowestPriority), "-p", String(pid)])).code !== 0) continue;
+      tx.reniced.push({ pid, nice });
+      changed++;
+    }
+    if (changed === 0) throw new Error("no process in this group could be reniced");
+    return;
+  }
   if (finding.action === "trash") {
     for (const original of finding.paths) {
       const trashed = join(base, String(tx.entries.length));
@@ -92,11 +108,19 @@ async function execute(finding: Finding, _paths: Paths, tx: Transaction, base: s
 }
 
 /** Rescans and re-matches ids first: a plan is approval for the state it saw, not for whatever is there now. */
-export async function applyPlan(plan: Plan, ctx: Context): Promise<Outcome> {
+export function applyPlan(plan: Plan, ctx: Context): Promise<Outcome> {
+  return withLock(ctx.paths, async () => {
+    const outcome = await applyUnlocked(plan, ctx);
+    audit(ctx.paths, "apply", { plan: plan.id, ...outcome });
+    return outcome;
+  });
+}
+
+async function applyUnlocked(plan: Plan, ctx: Context): Promise<Outcome> {
   const current = new Map(
     (await scan({ ...ctx, staleDays: plan.staleDays })).findings.map((finding) => [finding.id, finding]),
   );
-  const outcome: Outcome = { applied: [], stale: [], failed: [], bytes: 0 };
+  const outcome: Outcome = { applied: [], stale: [], failed: [], bytes: 0, reniced: 0 };
   const id = newId();
   const base = join(ctx.paths.trash, id);
   mkdirSync(base, { recursive: true });
@@ -106,6 +130,7 @@ export async function applyPlan(plan: Plan, ctx: Context): Promise<Outcome> {
     appliedAt: new Date(ctx.now).toISOString(),
     entries: [],
     removedPackages: [],
+    reniced: [],
   };
   for (const findingId of plan.findingIds) {
     const finding = current.get(findingId);
@@ -113,10 +138,12 @@ export async function applyPlan(plan: Plan, ctx: Context): Promise<Outcome> {
       outcome.stale.push(findingId);
       continue;
     }
+    const reniced = tx.reniced.length;
     try {
       await execute(finding, ctx.paths, tx, base);
       outcome.applied.push(findingId);
       outcome.bytes += finding.bytes;
+      outcome.reniced += tx.reniced.length - reniced;
     } catch (error) {
       outcome.failed.push({ id: findingId, error: String(error) });
     }
@@ -143,7 +170,16 @@ export function transactions(paths: Paths): Transaction[] {
   });
 }
 
-export function undo(paths: Paths, id: string): { restored: string[]; removedPackages: string[] } {
+/** Raising a nice value back needs root, so an unprivileged attempt is followed by keeper's usual `sudo -n`. */
+async function restorePriority(entry: Reniced): Promise<boolean> {
+  const argv = ["renice", "-n", String(entry.nice), "-p", String(entry.pid)];
+  return (await run(argv)).code === 0 || (await run(["sudo", "-n", ...argv])).code === 0;
+}
+
+export async function undo(
+  paths: Paths,
+  id: string,
+): Promise<{ restored: string[]; removedPackages: string[]; reniced: number; stuck: Reniced[] }> {
   const tx = transactions(paths).find((candidate) => candidate.id === id);
   if (!tx) throw new Error(`no transaction ${id}`);
   const restored: string[] = [];
@@ -152,15 +188,35 @@ export function undo(paths: Paths, id: string): { restored: string[]; removedPac
     renameSync(entry.trashed, entry.original);
     restored.push(entry.original);
   }
+  // A process that has since exited cannot be put back, and one at the bottom cannot be raised without root.
+  let reniced = 0;
+  const stuck: Reniced[] = [];
+  for (const entry of tx.reniced ?? []) {
+    if (await restorePriority(entry)) reniced++;
+    else stuck.push(entry);
+  }
   rmSync(join(paths.trash, id), { recursive: true, force: true });
-  return { restored, removedPackages: tx.removedPackages };
+  audit(paths, "undo", { transaction: id, restored: restored.length, reniced, stuck: stuck.length });
+  return { restored, removedPackages: tx.removedPackages, reniced, stuck };
 }
 
 /** Deletion is final here, so git metadata for trashed worktrees is pruned only now and undo keeps working until then. */
-export async function purge(
+export function purge(
   paths: Paths,
   olderThanDays: number,
   now = Date.now(),
+): Promise<{ purged: string[]; bytes: number }> {
+  return withLock(paths, async () => {
+    const result = await purgeUnlocked(paths, olderThanDays, now);
+    if (result.purged.length) audit(paths, "purge", result);
+    return result;
+  });
+}
+
+async function purgeUnlocked(
+  paths: Paths,
+  olderThanDays: number,
+  now: number,
 ): Promise<{ purged: string[]; bytes: number }> {
   const purged: string[] = [];
   let bytes = 0;

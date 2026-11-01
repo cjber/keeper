@@ -1,13 +1,17 @@
+import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { actor, audit, BusyError, type Claim, type Hold, readAudit, readLedger, writeLedger } from "./ledger";
 import { applyPlan, context, createPlan, freeBytes, purge, readPlan, transactions, undo, withinRisk } from "./ops";
 import { defaultStaleDays, scan } from "./scanners";
 import { defaultPaths, run } from "./system";
 import { installCron, installSystemd, removeSchedule, scheduleStatus } from "./timer";
-import { type Category, categories, eligible, type Finding, type Risk, risks } from "./types";
+import { type Category, categories, eligible, type Finding, type Risk, risks, schemaVersion } from "./types";
 
 /** Each code past 2 tells the caller one thing to do next. */
-export const exit = { ok: 0, error: 1, usage: 2, needsConfirmation: 3, stalePlan: 4, partial: 5 } as const;
+export const exit = { ok: 0, error: 1, usage: 2, needsConfirmation: 3, stalePlan: 4, partial: 5, busy: 6 } as const;
 
 const trashDays = 14;
+const holdDays = 7;
 const warnFreeBytes = 60 * 1024 ** 3;
 
 const help = `keeper keeps an Arch machine clean. Output is JSON when stdout is not a terminal or with --json.
@@ -20,12 +24,20 @@ const help = `keeper keeps an Arch machine clean. Output is JSON when stdout is 
   keeper apply PLAN --yes        rescan, then apply what is unchanged
   keeper undo TX                 restore a transaction from trash
   keeper purge [--older-days N]  delete trash for good (default ${trashDays})
-  keeper status                  trash, schedule and free space
+  keeper hold PATH --reason R [--days N]
+                                 protect a path you will return to (default ${holdDays} days)
+  keeper claim PATH              declare your own scratch as disposable once stale
+  keeper release PATH            drop your hold or claim on a path
+  keeper status                  trash, holds, schedule and free space
+  keeper log                     recent mutations and who made them
+  keeper schema                  machine-readable description of this CLI
   keeper auto                    apply low-risk findings, purge old trash, notify
   keeper timer install [--cron]  schedule keeper auto daily
   keeper timer remove            remove the schedule
 
-Exit codes: 0 ok, 1 error, 2 usage, 3 needs --yes, 4 plan is entirely stale, 5 partly applied, so scan again.
+Exit codes: 0 ok, 1 error, 2 usage, 3 needs --yes, 4 plan is entirely stale, 5 partly applied, so scan again, 6 another run holds the lock, so retry.
+Set KEEPER_ACTOR to name yourself in holds, claims and the log.
+A load finding appears only while the machine is oversubscribed, and renicing needs --max-risk medium.
 Categories: ${categories.join(", ")}.`;
 
 interface Flags {
@@ -37,6 +49,8 @@ interface Flags {
   maxRisk: Risk;
   olderDays: number;
   staleDays: number;
+  holdDays: number;
+  reason?: string;
 }
 
 class UsageError extends Error {}
@@ -50,6 +64,7 @@ function parse(args: readonly string[]): Flags {
     maxRisk: "low",
     olderDays: trashDays,
     staleDays: defaultStaleDays,
+    holdDays,
   };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i] as string;
@@ -73,7 +88,11 @@ function parse(args: readonly string[]): Flags {
       flags.staleDays = Number(value());
       if (!Number.isFinite(flags.staleDays) || flags.staleDays < 0)
         throw new UsageError("--stale-days must be a number");
-    } else if (arg === "--older-days") {
+    } else if (arg === "--days") {
+      flags.holdDays = Number(value());
+      if (!Number.isFinite(flags.holdDays) || flags.holdDays <= 0) throw new UsageError("--days must be positive");
+    } else if (arg === "--reason") flags.reason = value();
+    else if (arg === "--older-days") {
       flags.olderDays = Number(value());
       if (!Number.isFinite(flags.olderDays) || flags.olderDays < 0)
         throw new UsageError("--older-days must be a number");
@@ -87,10 +106,34 @@ export function gib(bytes: number): string {
   return `${(bytes / 1024 ** 3).toFixed(1)}G`;
 }
 
+/** Most findings free space, but a `load` finding frees none, so the size column shows what it does give back. */
+export function measure(finding: Finding): string {
+  if (finding.bytes > 0) return gib(finding.bytes);
+  return finding.cpu === undefined ? gib(0) : `${Math.round(finding.cpu)}%`;
+}
+
+/** Claims become deletable, so a slip here must not be able to take a home directory or a repo with it. */
+export function dangerous(path: string, home: string): boolean {
+  return path === "/" || home === path || home.startsWith(`${path}/`) || existsSync(join(path, ".git/HEAD"));
+}
+
+function schema() {
+  return {
+    schemaVersion,
+    exitCodes: exit,
+    categories,
+    risks,
+    finding: "id, category, risk, action, title, paths, packages, bytes, reason, blockers",
+    eligible: "blockers is empty and action is not report",
+    environment: { KEEPER_ACTOR: "name recorded in holds, claims and the log" },
+    help,
+  };
+}
+
 function line(finding: Finding): string {
   const state = finding.action === "report" ? "report" : finding.blockers.length ? "blocked" : "ready";
   const why = finding.blockers.length ? finding.blockers.join("; ") : finding.reason;
-  return `${finding.id}  ${gib(finding.bytes).padStart(7)}  ${finding.risk.padEnd(6)} ${state.padEnd(7)} ${finding.title}\n    ${why}`;
+  return `${finding.id}  ${measure(finding).padStart(7)}  ${finding.risk.padEnd(6)} ${state.padEnd(7)} ${finding.title}\n    ${why}`;
 }
 
 async function auto(flags: Flags): Promise<{ value: unknown; code: number }> {
@@ -132,7 +175,10 @@ async function dispatch(
     case "scan": {
       const report = await scan(context(flags.staleDays), flags.category);
       const total = report.findings.filter(eligible).reduce((sum, finding) => sum + finding.bytes, 0);
-      return { value: report, text: `${report.findings.map(line).join("\n")}\n\n${gib(total)} eligible` };
+      return {
+        value: { ...report, next: "keeper plan [ID...] [--max-risk medium]" },
+        text: `${report.findings.map(line).join("\n")}\n\n${gib(total)} eligible`,
+      };
     }
     case "plan": {
       const report = await scan(context(flags.staleDays), flags.category);
@@ -146,7 +192,10 @@ async function dispatch(
           })
         : report.findings.filter((finding) => eligible(finding) && withinRisk(finding, flags.maxRisk));
       const plan = createPlan(paths, chosen, flags.staleDays);
-      return { value: plan, text: `plan ${plan.id}: ${chosen.length} items, ${gib(plan.bytes)}` };
+      return {
+        value: { ...plan, next: `keeper apply ${plan.id} --yes` },
+        text: `plan ${plan.id}: ${chosen.length} items, ${gib(plan.bytes)}`,
+      };
     }
     case "apply": {
       const [id] = rest;
@@ -161,9 +210,14 @@ async function dispatch(
       }
       const outcome = await applyPlan(plan, context(plan.staleDays));
       const partial = outcome.failed.length > 0 || (outcome.stale.length > 0 && outcome.applied.length > 0);
+      const next = outcome.transaction
+        ? `keeper undo ${outcome.transaction} to restore, or keeper purge --older-days 0 to free the space`
+        : "keeper scan";
+      const moved = outcome.bytes > 0 ? `, ${gib(outcome.bytes)} moved` : "";
+      const lowered = outcome.reniced > 0 ? `, ${outcome.reniced} processes deprioritised` : "";
       return {
-        value: outcome,
-        text: `applied ${outcome.applied.length}, stale ${outcome.stale.length}, failed ${outcome.failed.length}, ${gib(outcome.bytes)} moved. undo: ${outcome.transaction ?? "none"}`,
+        value: { ...outcome, next: partial ? "keeper scan" : next },
+        text: `applied ${outcome.applied.length}, stale ${outcome.stale.length}, failed ${outcome.failed.length}${moved}${lowered}. undo: ${outcome.transaction ?? "none"}`,
         code: partial
           ? exit.partial
           : outcome.applied.length === 0 && outcome.stale.length > 0
@@ -174,21 +228,72 @@ async function dispatch(
     case "undo": {
       const [id] = rest;
       if (!id) throw new UsageError("usage: keeper undo TX");
-      const result = undo(paths, id);
+      const result = await undo(paths, id);
       const reinstall = result.removedPackages.length
         ? `\nreinstall with: sudo pacman -S --asdeps ${result.removedPackages.join(" ")}`
         : "";
-      return { value: result, text: `restored ${result.restored.length} paths${reinstall}` };
+      const reniced = result.reniced ? `, ${result.reniced} processes back at their old priority` : "";
+      const stuck = result.stuck.length
+        ? `\n${result.stuck.length} still at low priority, which needs root to raise: ${result.stuck
+            .map((entry) => `${entry.pid} back to ${entry.nice}`)
+            .join(", ")}`
+        : "";
+      return { value: result, text: `restored ${result.restored.length} paths${reniced}${reinstall}${stuck}` };
     }
     case "purge": {
       const result = await purge(paths, flags.olderDays);
       return { value: result, text: `purged ${result.purged.length} transactions, ${gib(result.bytes)}` };
     }
+    case "hold": {
+      const [target] = rest;
+      if (!target || !flags.reason) throw new UsageError("usage: keeper hold PATH --reason R [--days N]");
+      const path = resolve(target);
+      const ledger = readLedger(paths);
+      const hold: Hold = {
+        path,
+        until: new Date(Date.now() + flags.holdDays * 86_400_000).toISOString(),
+        reason: flags.reason,
+        actor: actor(),
+      };
+      writeLedger(paths, { ...ledger, holds: [...ledger.holds.filter((item) => item.path !== path), hold] });
+      audit(paths, "hold", hold);
+      return { value: hold, text: `held ${path} until ${hold.until}` };
+    }
+    case "claim": {
+      const [target] = rest;
+      if (!target) throw new UsageError("usage: keeper claim PATH");
+      const path = resolve(target);
+      if (dangerous(path, paths.home)) throw new UsageError(`${path} is too broad to claim`);
+      const ledger = readLedger(paths);
+      const claim: Claim = { path, actor: actor(), at: new Date().toISOString() };
+      writeLedger(paths, { ...ledger, claims: [...ledger.claims.filter((item) => item.path !== path), claim] });
+      audit(paths, "claim", claim);
+      return { value: claim, text: `claimed ${path}` };
+    }
+    case "release": {
+      const [target] = rest;
+      if (!target) throw new UsageError("usage: keeper release PATH");
+      const path = resolve(target);
+      const ledger = readLedger(paths);
+      writeLedger(paths, {
+        holds: ledger.holds.filter((item) => item.path !== path),
+        claims: ledger.claims.filter((item) => item.path !== path),
+      });
+      audit(paths, "release", { path });
+      return { value: { released: path }, text: `released ${path}` };
+    }
+    case "log": {
+      const entries = readAudit(paths, 50);
+      return { value: entries, text: entries.map((entry) => JSON.stringify(entry)).join("\n") };
+    }
+    case "schema":
+      return { value: schema(), text: JSON.stringify(schema(), null, 2) };
     case "status": {
       const trash = transactions(paths);
       const value = {
         free: await freeBytes(paths.home),
         schedule: await scheduleStatus(),
+        holds: readLedger(paths).holds,
         trash: trash.map((tx) => ({ id: tx.id, appliedAt: tx.appliedAt, paths: tx.entries.length })),
       };
       return {
@@ -237,10 +342,13 @@ export async function runCli(args: readonly string[]): Promise<number | undefine
     return result.code ?? exit.ok;
   } catch (error) {
     const usage = error instanceof UsageError;
+    const busy = error instanceof BusyError;
     const message = error instanceof Error ? error.message : String(error);
     console.error(
-      json ? JSON.stringify({ error: { code: usage ? "usage" : "error", message } }) : `keeper: ${message}`,
+      json
+        ? JSON.stringify({ error: { code: usage ? "usage" : busy ? "busy" : "error", message } })
+        : `keeper: ${message}`,
     );
-    return usage ? exit.usage : exit.error;
+    return usage ? exit.usage : busy ? exit.busy : exit.error;
   }
 }

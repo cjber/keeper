@@ -1,4 +1,4 @@
-import { readdirSync, readlinkSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, readlinkSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -63,6 +63,16 @@ export function liveFiles(): string[] {
 export function holders(path: string, live: readonly string[]): boolean {
   const prefix = `${path}/`;
   return live.some((file) => file === path || file.startsWith(prefix));
+}
+
+/** `/proc/<pid>/stat` wraps its command in parentheses, so field 19 (nice) is counted from after the last one. */
+export function niceness(pid: number): number | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    return Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[16]);
+  } catch {
+    return undefined;
+  }
 }
 
 export function ageDays(path: string, now = Date.now()): number {

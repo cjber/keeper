@@ -1,6 +1,6 @@
 import { useKeyboard, useRenderer } from "@opentui/react";
 import { useEffect, useState } from "react";
-import { gib } from "./cli";
+import { gib, measure } from "./cli";
 import { applyPlan, context, createPlan } from "./ops";
 import { scan } from "./scanners";
 import { defaultPaths } from "./system";
@@ -89,7 +89,7 @@ export function Wizard({ actions }: { actions: Actions }) {
           return (
             <box key={finding.id} backgroundColor={index + start === cursor ? "#333333" : undefined}>
               <text wrapMode="none">
-                {mark} {gib(finding.bytes).padStart(7)} {finding.risk.padEnd(6)} {finding.title}
+                {mark} {measure(finding).padStart(7)} {finding.risk.padEnd(6)} {finding.title}
               </text>
             </box>
           );

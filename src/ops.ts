@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { audit, withLock } from "./ledger";
 import type { Config, Context } from "./scanners";
 import { defaultStaleDays, scan } from "./scanners";
 import { defaultPaths, liveFiles, type Paths, run } from "./system";
@@ -92,7 +93,15 @@ async function execute(finding: Finding, _paths: Paths, tx: Transaction, base: s
 }
 
 /** Rescans and re-matches ids first: a plan is approval for the state it saw, not for whatever is there now. */
-export async function applyPlan(plan: Plan, ctx: Context): Promise<Outcome> {
+export function applyPlan(plan: Plan, ctx: Context): Promise<Outcome> {
+  return withLock(ctx.paths, async () => {
+    const outcome = await applyUnlocked(plan, ctx);
+    audit(ctx.paths, "apply", { plan: plan.id, ...outcome });
+    return outcome;
+  });
+}
+
+async function applyUnlocked(plan: Plan, ctx: Context): Promise<Outcome> {
   const current = new Map(
     (await scan({ ...ctx, staleDays: plan.staleDays })).findings.map((finding) => [finding.id, finding]),
   );
@@ -153,14 +162,27 @@ export function undo(paths: Paths, id: string): { restored: string[]; removedPac
     restored.push(entry.original);
   }
   rmSync(join(paths.trash, id), { recursive: true, force: true });
+  audit(paths, "undo", { transaction: id, restored: restored.length });
   return { restored, removedPackages: tx.removedPackages };
 }
 
 /** Deletion is final here, so git metadata for trashed worktrees is pruned only now and undo keeps working until then. */
-export async function purge(
+export function purge(
   paths: Paths,
   olderThanDays: number,
   now = Date.now(),
+): Promise<{ purged: string[]; bytes: number }> {
+  return withLock(paths, async () => {
+    const result = await purgeUnlocked(paths, olderThanDays, now);
+    if (result.purged.length) audit(paths, "purge", result);
+    return result;
+  });
+}
+
+async function purgeUnlocked(
+  paths: Paths,
+  olderThanDays: number,
+  now: number,
 ): Promise<{ purged: string[]; bytes: number }> {
   const purged: string[] = [];
   let bytes = 0;

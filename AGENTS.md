@@ -13,6 +13,7 @@ bun run gate
 
 - `src/scanners.ts`: read-only findings and their blockers
 - `src/ops.ts`: plans, apply, trash, undo, purge
+- `src/ledger.ts`: holds, claims, audit log, lock
 - `src/cli.ts`: argument parsing, output, exit codes
 - `src/timer.ts`: systemd and cron schedules
 - `src/wizard.tsx`: selection UI, with no safety rules of its own
@@ -24,4 +25,5 @@ bun run gate
 - Do not treat atime, or the git index mtime, as evidence of use.
 - `apply` rescans and matches ids. Never add a path that skips that check.
 - Only low-risk findings may run unattended. Worktrees and packages stay behind approval.
+- An agent's hold beats every scanner. Mutations go through `withLock` and write to the audit log.
 - Delete through trash. Only `purge` is final.

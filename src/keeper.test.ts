@@ -2,7 +2,8 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runCli } from "./cli";
+import { dangerous, runCli } from "./cli";
+import { BusyError, withLock, writeLedger } from "./ledger";
 import { applyPlan, createPlan, purge, undo } from "./ops";
 import { type Context, scan, worktreeDirs } from "./scanners";
 import { defaultPaths, holders, run } from "./system";
@@ -132,6 +133,45 @@ test("apply still enforces the plan's window on findings it rescans", async () =
   const plan = createPlan(ctx.paths, findings, 7);
   expect((await applyPlan(plan, ctx)).stale).toHaveLength(1);
   expect(existsSync(batch)).toBe(true);
+});
+
+test("a hold blocks a finding that would otherwise be ready, until it expires", async () => {
+  const batch = join(home, "batch");
+  mkdirSync(batch);
+  age(batch);
+  const until = new Date(Date.now() + 86_400_000).toISOString();
+  writeLedger(ctx.paths, { holds: [{ path: batch, until, reason: "resuming", actor: "a" }], claims: [] });
+  expect((await scan(ctx, ["agent"])).findings[0]?.blockers.join()).toContain("held by a");
+  const expired = new Date(Date.now() - 1000).toISOString();
+  writeLedger(ctx.paths, { holds: [{ path: batch, until: expired, reason: "old", actor: "a" }], claims: [] });
+  expect((await scan(ctx, ["agent"])).findings[0]?.blockers).toEqual([]);
+});
+
+test("a claimed path becomes a finding once stale", async () => {
+  const scratch = join(home, "scratch");
+  mkdirSync(scratch);
+  age(scratch);
+  writeLedger(ctx.paths, { holds: [], claims: [{ path: scratch, actor: "a", at: "now" }] });
+  expect((await scan(ctx, ["agent"])).findings.map((finding) => finding.paths[0])).toContain(scratch);
+});
+
+test("claims refuse home, its parents and repositories", async () => {
+  const repo = join(home, "repo");
+  mkdirSync(join(repo, ".git"), { recursive: true });
+  writeFileSync(join(repo, ".git/HEAD"), "ref");
+  expect(dangerous(home, home)).toBe(true);
+  expect(dangerous("/", home)).toBe(true);
+  expect(dangerous(repo, home)).toBe(true);
+  expect(dangerous(join(home, "scratch"), home)).toBe(false);
+});
+
+test("a live lock makes a second mutation fail as busy, and a dead lock is taken over", async () => {
+  mkdirSync(ctx.paths.state, { recursive: true });
+  writeFileSync(join(ctx.paths.state, "lock"), String(process.pid));
+  await expect(withLock(ctx.paths, async () => 1)).rejects.toBeInstanceOf(BusyError);
+  writeFileSync(join(ctx.paths.state, "lock"), "999999999");
+  expect(await withLock(ctx.paths, async () => 1)).toBe(1);
+  expect(existsSync(join(ctx.paths.state, "lock"))).toBe(false);
 });
 
 test("purge keeps young trash and removes old trash", async () => {

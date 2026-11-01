@@ -16,6 +16,10 @@ keeper timer install              # run keeper auto daily
 
 Output is JSON when stdout is not a terminal. Run `keeper --help` for every option and exit code.
 
+## For agents
+
+`keeper hold PATH --reason R` protects work an agent will come back to, and `keeper claim PATH` declares its scratch as disposable. Mutations take a lock and land in `keeper log` with the actor's name. `keeper schema` describes the CLI, and JSON results carry a `next` command. `skills/keeper` holds the agent skill.
+
 ## Daily runs
 
 `keeper auto` applies low-risk findings, purges trash over 14 days old, and sends a desktop notification when free space is low or over 10G waits for approval. Worktrees and packages are never removed unattended.

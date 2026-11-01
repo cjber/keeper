@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { readLedger } from "./ledger";
 import { ageDays, holders, type Paths, run, sizes } from "./system";
 import { type Category, type Finding, type Scan, schemaVersion } from "./types";
 
@@ -37,6 +38,10 @@ function entries(path: string): string[] {
   } catch {
     return [];
   }
+}
+
+function expandHome(home: string): (path: string) => string {
+  return (path) => (path.startsWith("~/") ? join(home, path.slice(2)) : path);
 }
 
 function isDirectory(path: string): boolean {
@@ -204,12 +209,13 @@ async function scanOrphans(): Promise<Finding[]> {
 }
 
 async function scanAgent(context: Context): Promise<Finding[]> {
-  const expand = (path: string) => (path.startsWith("~/") ? join(context.paths.home, path.slice(2)) : path);
+  const expand = expandHome(context.paths.home);
   const patterns = context.config.agentCachePatterns.map((pattern) => new RegExp(pattern));
   const cached = entries(join(context.paths.home, ".cache")).filter((path) =>
     patterns.some((pattern) => pattern.test(path.slice(path.lastIndexOf("/") + 1))),
   );
-  const roots = [...context.config.agentRoots.map(expand).filter(existsSync), ...cached];
+  const claimed = readLedger(context.paths).claims.map((claim) => claim.path);
+  const roots = [...new Set([...context.config.agentRoots.map(expand), ...claimed, ...cached])].filter(existsSync);
   const bytes = await sizes(roots);
   return roots.map((path) => {
     const age = ageDays(path, context.now);
@@ -246,7 +252,7 @@ function lstatAge(path: string, now: number): number {
 
 /** Build output is disposable even inside a worktree that must stay, which is where most of the space sits. */
 async function scanBuild(context: Context): Promise<Finding[]> {
-  const expand = (path: string) => (path.startsWith("~/") ? join(context.paths.home, path.slice(2)) : path);
+  const expand = expandHome(context.paths.home);
   const repos = [
     ...worktreeDirs(context.paths.worktrees),
     ...context.config.repoRoots.flatMap((root) => worktreeDirs(expand(root))),
@@ -376,6 +382,10 @@ const scanners: Record<Category, (context: Context) => Promise<Finding[]>> = {
   snapshots: scanSnapshots,
 };
 
+function overlaps(a: string, b: string): boolean {
+  return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+}
+
 export async function scan(context: Context, only?: readonly Category[]): Promise<Scan> {
   const selected = only ?? (Object.keys(scanners) as Category[]);
   const warnings: string[] = [];
@@ -387,10 +397,19 @@ export async function scan(context: Context, only?: readonly Category[]): Promis
       }),
     ),
   );
+  const holds = readLedger(context.paths).holds.filter((hold) => Date.parse(hold.until) > context.now);
+  const findings = results.flat();
+  for (const finding of findings) {
+    for (const hold of holds) {
+      if (finding.paths.some((path) => overlaps(path, hold.path))) {
+        finding.blockers.push(`held by ${hold.actor} until ${hold.until}: ${hold.reason}`);
+      }
+    }
+  }
   return {
     schemaVersion,
     scannedAt: new Date(context.now).toISOString(),
-    findings: results.flat().sort((a, b) => b.bytes - a.bytes),
+    findings: findings.sort((a, b) => b.bytes - a.bytes),
     warnings,
   };
 }

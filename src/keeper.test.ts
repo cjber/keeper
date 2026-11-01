@@ -1,11 +1,22 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { dangerous, runCli } from "./cli";
+import { dangerous, runCli, schema } from "./cli";
+import { freshen } from "./freshen";
 import { BusyError, withLock, writeLedger } from "./ledger";
-import { applyPlan, createPlan, purge, undo } from "./ops";
-import { type Context, type ProcessInfo, scan, worktreeDirs } from "./scanners";
+import { applyPlan, context, createPlan, loadConfig, purge, undo } from "./ops";
+import { type Context, defaultConfig, type ProcessInfo, type PullRequest, scan, worktreeDirs } from "./scanners";
 import { defaultPaths, holders, niceness, run } from "./system";
 import { units } from "./timer";
 import { eligible } from "./types";
@@ -48,8 +59,8 @@ beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "keeper-"));
   mkdirSync(join(home, ".worktrees"));
   ctx = {
-    paths: defaultPaths(home),
-    config: { agentRoots: ["~/batch"], agentCachePatterns: ["^pr\\d+-venv$"], repoRoots: [] },
+    paths: defaultPaths(home, {}),
+    config: { ...defaultConfig, agentRoots: ["~/batch"], agentCachePatterns: ["^pr\\d+-venv$"] },
     live: [],
     now: Date.now(),
     staleDays: 7,
@@ -303,5 +314,211 @@ test("applying a load plan lowers the priority and undo puts it back", async () 
     expect(niceness(child.pid)).toBe(restored.reniced ? 0 : 19);
   } finally {
     child.kill();
+  }
+});
+
+function pull(state: PullRequest["state"], head: string, name: string): () => Promise<PullRequest[]> {
+  return async () => [{ number: 7, state, headRefName: name, headRefOid: head }];
+}
+
+test("a merged PR for this exact commit proves a recent worktree done", async () => {
+  const path = await worktree("merged");
+  const head = await git(path, "rev-parse", "HEAD");
+  const report = await scan({ ...ctx, pullRequests: pull("MERGED", head, "b-merged") }, ["worktree"]);
+  expect(report.findings[0]).toMatchObject({ risk: "low", blockers: [] });
+  expect(report.findings[0]?.reason).toContain("PR #7");
+});
+
+test("a squash-merged branch deleted from the remote is still proven by its PR", async () => {
+  const path = await worktree("squashed");
+  await git(path, "commit", "-qm", "work", "--allow-empty");
+  const head = await git(path, "rev-parse", "HEAD");
+  const unproven = await scan(ctx, ["worktree"]);
+  expect(unproven.findings[0]?.blockers.join()).toContain("commits on no remote");
+  const report = await scan({ ...ctx, pullRequests: pull("MERGED", head, "b-squashed") }, ["worktree"]);
+  expect(report.findings[0]).toMatchObject({ risk: "low", blockers: [] });
+});
+
+test("a reused branch name is not proof, because the commit differs", async () => {
+  await worktree("reused");
+  const report = await scan({ ...ctx, pullRequests: pull("MERGED", "0".repeat(40), "b-reused") }, ["worktree"]);
+  expect(report.findings[0]?.risk).toBe("medium");
+  expect(report.findings[0]?.blockers.join()).toContain("touched");
+});
+
+test("an open PR blocks the worktree", async () => {
+  const path = await worktree("open");
+  age(path);
+  age(join(home, "open-main/.git/worktrees/open/logs/HEAD"));
+  const report = await scan({ ...ctx, pullRequests: pull("OPEN", "x", "b-open") }, ["worktree"]);
+  expect(report.findings[0]?.blockers).toEqual(["PR #7 is open"]);
+});
+
+test("a new branch cut from main keeps the age window, and only an idle one is low risk", async () => {
+  const path = await worktree("fresh");
+  await git(join(home, "fresh-main"), "remote", "set-head", "origin", "main");
+  const fresh = (await scan(ctx, ["worktree"])).findings[0];
+  expect(fresh?.blockers.join()).toContain("touched");
+  age(path);
+  age(join(home, "fresh-main/.git/worktrees/fresh/logs/HEAD"));
+  const idle = (await scan(ctx, ["worktree"])).findings[0];
+  expect(idle).toMatchObject({ risk: "low", blockers: [] });
+});
+
+test("a rebase in progress blocks a clean, pushed worktree", async () => {
+  const path = await worktree("rebasing");
+  mkdirSync(join(home, "rebasing-main/.git/worktrees/rebasing/rebase-merge"));
+  age(path);
+  age(join(home, "rebasing-main/.git/worktrees/rebasing/logs/HEAD"));
+  const report = await scan(ctx, ["worktree"]);
+  expect(report.findings[0]?.blockers).toEqual(["rebase-merge is in progress"]);
+});
+
+test("a stray directory is a finding, unless a checkout sits inside it", async () => {
+  mkdirSync(join(home, ".worktrees/repo/stray"), { recursive: true });
+  mkdirSync(join(home, ".worktrees/repo/cb/feature/.git"), { recursive: true });
+  const stray = join(home, ".worktrees/repo/stray");
+  age(stray);
+  age(join(home, ".worktrees/repo/cb"));
+  age(join(home, ".worktrees/repo/cb/feature"));
+  const { findings } = await scan(ctx, ["worktree"]);
+  const by = (name: string) => findings.find((finding) => finding.paths[0]?.endsWith(name));
+  expect(by("stray")).toMatchObject({ risk: "medium", blockers: [] });
+  expect(by("repo/cb")?.blockers).toContain("contains a checkout");
+});
+
+test("purge deletes a worktree's branch only if it has not moved, and undo works until then", async () => {
+  const path = await worktree("gone");
+  await worktree("moved");
+  const merged = async (repo: string, branch: string) => pull("MERGED", await git(repo, "rev-parse", "HEAD"), branch)();
+  const prs = async (repo: string) => (repo.endsWith("gone") ? merged(repo, "b-gone") : merged(repo, "b-moved"));
+  const live = { ...ctx, pullRequests: prs };
+  const { findings } = await scan(live, ["worktree"]);
+  await applyPlan(createPlan(ctx.paths, findings, 7), live);
+  expect(existsSync(path)).toBe(false);
+  expect(await git(join(home, "gone-main"), "branch", "--list", "b-gone")).toContain("b-gone");
+
+  const movedMain = join(home, "moved-main");
+  await git(movedMain, "commit", "-qm", "later", "--allow-empty");
+  await git(movedMain, "update-ref", "refs/heads/b-moved", "HEAD");
+
+  await purge(ctx.paths, 0);
+  expect(await git(join(home, "gone-main"), "branch", "--list", "b-gone")).toBe("");
+  expect(await git(movedMain, "branch", "--list", "b-moved")).toContain("b-moved");
+});
+
+test("a failing purge hook keeps the transaction so it can retry", async () => {
+  const path = await worktree("hooked");
+  const hook = join(home, "hook.sh");
+  const seen = join(home, "seen");
+  writeFileSync(hook, `#!/bin/sh\ntest -f "$1/file" && echo "$2" >> ${seen}\nexit "$(cat ${home}/code)"\n`);
+  chmodSync(hook, 0o755);
+  writeFileSync(join(home, "code"), "1");
+  mkdirSync(join(home, ".config/keeper"), { recursive: true });
+  writeFileSync(ctx.paths.config, `purgeHook = "${hook}"\n`);
+  age(path);
+  age(join(home, "hooked-main/.git/worktrees/hooked/logs/HEAD"));
+  const { findings } = await scan(ctx, ["worktree"]);
+  const { transaction } = await applyPlan(createPlan(ctx.paths, findings, 7), ctx);
+  expect(await purge(ctx.paths, 0)).toMatchObject({ purged: [], failed: [transaction] });
+  writeFileSync(join(home, "code"), "0");
+  expect(await purge(ctx.paths, 0)).toMatchObject({ purged: [transaction], failed: [] });
+  expect(readFileSync(seen, "utf8").trim().split("\n")).toEqual([path, path]);
+});
+
+test("a recent file deep in build output keeps it, though everything near the top is old", async () => {
+  const path = await worktree("deep");
+  mkdirSync(join(path, "target/debug/deps"), { recursive: true });
+  writeFileSync(join(path, "target/debug/deps/lib"), "new");
+  for (const dir of ["target/debug/deps", "target/debug", "target"]) age(join(path, dir));
+  expect((await scan(ctx, ["build"])).findings).toEqual([]);
+  age(join(path, "target/debug/deps/lib"));
+  expect((await scan(ctx, ["build"])).findings).toHaveLength(1);
+});
+
+test("an oversized log keeps its tail and its inode", async () => {
+  const log = join(home, "app.log");
+  writeFileSync(log, Buffer.alloc(51 * 1024 ** 2, 97));
+  const inode = statSync(log).ino;
+  const live = { ...ctx, config: { ...ctx.config, logs: ["~/app.log", "~/absent.log"] } };
+  const { findings } = await scan(live, ["logs"]);
+  expect(findings).toHaveLength(1);
+  await applyPlan(createPlan(ctx.paths, findings, 7), live);
+  expect(statSync(log).size).toBe(5 * 1024 ** 2);
+  expect(statSync(log).ino).toBe(inode);
+});
+
+test("undo refuses to overwrite a path that exists again, then finishes once it is clear", async () => {
+  const batch = join(home, "batch");
+  mkdirSync(batch);
+  age(batch);
+  const { findings } = await scan(ctx, ["agent"]);
+  const { transaction } = await applyPlan(createPlan(ctx.paths, findings, 7), ctx);
+  mkdirSync(batch);
+  await expect(undo(ctx.paths, transaction as string)).rejects.toThrow("exist again");
+  rmSync(batch, { recursive: true });
+  expect((await undo(ctx.paths, transaction as string)).restored).toEqual([batch]);
+});
+
+test("a misspelt config key is an error, and configured roots replace the defaults", () => {
+  mkdirSync(join(home, ".config/keeper"), { recursive: true });
+  writeFileSync(ctx.paths.config, 'worktreeRoot = ["~/w"]\n');
+  expect(() => loadConfig(ctx.paths)).toThrow("unknown keys");
+  writeFileSync(ctx.paths.config, 'worktreeRoots = ["~/w"]\naurClones = ["/opt/aur"]\n');
+  const { paths } = context(7, ctx.paths);
+  expect(paths.worktrees).toEqual([join(home, "w")]);
+  expect(paths.aurClones).toEqual(["/opt/aur"]);
+});
+
+test("emptied transcript folders go too, and everything else stays", async () => {
+  const session = join(home, ".claude/projects/p/s");
+  mkdirSync(session, { recursive: true });
+  writeFileSync(join(home, ".claude/projects/keep"), "x");
+  writeFileSync(join(session, "t.jsonl"), "x");
+  writeFileSync(join(home, ".claude/projects/keep2"), "x");
+  age(join(session, "t.jsonl"));
+  const { findings } = await scan(ctx, ["transcripts"]);
+  await applyPlan(createPlan(ctx.paths, findings, 7), ctx);
+  expect(existsSync(join(home, ".claude/projects/p"))).toBe(false);
+  expect(existsSync(join(home, ".claude/projects/keep"))).toBe(true);
+});
+
+async function behindCheckout(name: string): Promise<{ main: string; other: string }> {
+  await worktree(name);
+  const main = join(home, `${name}-main`);
+  await git(main, "remote", "set-head", "origin", "main");
+  const other = join(home, `${name}-other`);
+  await git(home, "clone", "-q", join(home, `${name}.git`), other);
+  await git(other, "commit", "-qm", "upstream", "--allow-empty");
+  await git(other, "push", "-q", "origin", "HEAD:main");
+  return { main, other };
+}
+
+test("freshen fast-forwards a clean checkout and returns it from a pushed branch", async () => {
+  const { main } = await behindCheckout("ff");
+  await git(main, "checkout", "-q", "-b", "side");
+  await git(main, "push", "-q", "-u", "origin", "side");
+  expect(await freshen(main)).toContain("fast-forwarded 1");
+  expect(await git(main, "branch", "--show-current")).toBe("main");
+  expect(await git(main, "rev-parse", "HEAD")).toBe(await git(main, "rev-parse", "origin/main"));
+});
+
+test("freshen leaves modified files and unpushed commits alone", async () => {
+  const { main } = await behindCheckout("guarded");
+  writeFileSync(join(main, "file"), "changed");
+  await freshen(main);
+  expect(await git(main, "rev-parse", "HEAD")).not.toBe(await git(main, "rev-parse", "origin/main"));
+  await git(main, "checkout", "--", "file");
+  await git(main, "checkout", "-q", "-b", "local");
+  await git(main, "commit", "-qm", "only here", "--allow-empty");
+  await freshen(main);
+  expect(await git(main, "branch", "--show-current")).toBe("local");
+});
+
+test("every keeper command the docs name exists in the CLI", async () => {
+  const help = schema().help;
+  for (const file of ["README.md", "skills/keeper/SKILL.md"]) {
+    const text = readFileSync(join(import.meta.dir, "..", file), "utf8");
+    for (const [, command] of text.matchAll(/`keeper ([a-z]+)/g)) expect(help).toContain(`keeper ${command}`);
   }
 });

@@ -1,4 +1,4 @@
-export const schemaVersion = 2;
+export const schemaVersion = 3;
 
 export const categories = [
   "worktree",
@@ -10,6 +10,7 @@ export const categories = [
   "transcripts",
   "uv-cache",
   "snapshots",
+  "logs",
   "load",
   "memory",
 ] as const;
@@ -22,7 +23,7 @@ export type Risk = (typeof risks)[number];
  * `report` findings carry evidence for a person and can never be planned.
  * `renice` is the only action that changes no data, which is why it is medium risk rather than low: `auto` runs it never.
  */
-export type Action = "trash" | "paccache" | "remove-packages" | "uv-prune" | "renice" | "report";
+export type Action = "trash" | "paccache" | "remove-packages" | "uv-prune" | "renice" | "truncate" | "report";
 
 export interface Finding {
   /** Hash of category, target and state, so an id stops matching once the thing it judged changes. */
@@ -39,6 +40,9 @@ export interface Finding {
   blockers: string[];
   /** Git common dir, so purge can prune the worktree's metadata and undo can still restore it first. */
   gitDir?: string;
+  /** Branch and commit of a worktree, so purge deletes the local branch only if it has not moved. */
+  branch?: string;
+  head?: string;
   /** Percent of one core the finding's processes used during the sample. Absent for everything that is not `load`. */
   cpu?: number;
   /** Pids the finding judged, so `renice` can target the command without a second scan. */
@@ -67,6 +71,8 @@ export interface TrashEntry {
   trashed: string;
   bytes: number;
   gitDir?: string;
+  branch?: string;
+  head?: string;
 }
 
 export interface Transaction {

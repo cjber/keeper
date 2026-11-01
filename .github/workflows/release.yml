@@ -1,0 +1,90 @@
+name: Release
+
+# Pushing a vX.Y.Z tag (see scripts/release.ts) publishes a GitHub release and both AUR packages. The AUR step needs the
+# AUR_SSH_PRIVATE_KEY secret: the private half of a key registered on the maintainer's AUR account.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions: {}
+
+jobs:
+  binaries:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/binaries.yml # zizmor: ignore[self-repository] actionlint 1.7.12 does not support the replacement.
+
+  release:
+    needs: [binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          no-cache: true
+      - run: bun install --frozen-lockfile --os linux --cpu "*" --libc "*"
+      - run: bunx tsc --noEmit
+      - run: bun test
+
+      - name: Check the tag is on main and matches package.json
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          version=$(bun -e 'console.log((await Bun.file("package.json").json()).version)')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $version"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Build standalone binaries
+        run: bun scripts/build.ts
+
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          bun scripts/changelog.ts "$VERSION" > "$RUNNER_TEMP/notes.md"
+          gh release create "$GITHUB_REF_NAME" dist/keeper-linux-x64 dist/keeper-linux-arm64 --verify-tag --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"
+
+      - name: Render AUR packages
+        run: |
+          set -euo pipefail
+          curl -fsSL -o source.tar.gz "https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
+          bun scripts/render-aur.ts --version "$VERSION" --sha256 "$(sha256sum source.tar.gz | cut -d' ' -f1)" --bin-x64-sha256 "$(sha256sum dist/keeper-linux-x64 | cut -d' ' -f1)" --bin-arm64-sha256 "$(sha256sum dist/keeper-linux-arm64 | cut -d' ' -f1)" --out aur
+
+      - name: Push to AUR
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AUR_SSH_PRIVATE_KEY:-}" ]; then
+            echo "::error::AUR_SSH_PRIVATE_KEY is not set"
+            exit 1
+          fi
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          cat > ~/.ssh/known_hosts <<'KEYS'
+          aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEuBKrPzbawxA/k2g6NcyV5jmqwJ2s+zpgZGZ7tpLIcN
+          KEYS
+          sed -i 's/^ *//' ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur -o IdentitiesOnly=yes -o UserKnownHostsFile=~/.ssh/known_hosts"
+          for pkgname in keeper keeper-bin; do
+            rendered=aur
+            if [ "$pkgname" = keeper-bin ]; then rendered=aur/bin; fi
+            git clone "ssh://aur@aur.archlinux.org/${pkgname}.git" "aur-${pkgname}"
+            cp "$rendered/PKGBUILD" "$rendered/.SRCINFO" "aur-${pkgname}/"
+            git -C "aur-${pkgname}" config user.name "cjber"
+            git -C "aur-${pkgname}" config user.email "cjberragan@gmail.com"
+            git -C "aur-${pkgname}" add PKGBUILD .SRCINFO
+            if git -C "aur-${pkgname}" diff --cached --quiet; then continue; fi
+            git -C "aur-${pkgname}" commit -m "${pkgname} ${VERSION}"
+            git -C "aur-${pkgname}" push origin HEAD:master
+          done

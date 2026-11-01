@@ -3,12 +3,14 @@ import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node
 import { availableParallelism, loadavg } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { readLedger } from "./ledger";
-import { ageDays, holders, type Paths, run, sizes } from "./system";
+import { ageDays, expandHome, holders, type Paths, run, sizes } from "./system";
 import { type Category, type Finding, type Scan, schemaVersion } from "./types";
 
 export const defaultStaleDays = 7;
 const staleBuildDays = 3;
 const transcriptDays = 14;
+const logCapBytes = 50 * 1024 ** 2;
+export const logKeepBytes = 5 * 1024 ** 2;
 const buildDirs = /\/(target|node_modules|\.next|\.turbo|\.venv)$/;
 
 /** A machine this far past its core count is oversubscribed, so `load` findings become worth showing. */
@@ -67,6 +69,38 @@ export interface Config {
   agentCachePatterns: string[];
   /** Directories of git checkouts whose ignored build output may be cleaned. */
   repoRoots: string[];
+  /** Directories that hold worktrees. Empty keeps the default, ~/.worktrees. */
+  worktreeRoots: string[];
+  /** AUR helper clone directories. Empty keeps the defaults for paru and yay. */
+  aurClones: string[];
+  /** Appended log files that nothing rotates. Past 50M each is cut to its last 5M. */
+  logs: string[];
+  /** `keeper auto` notifies below this much free space. */
+  warnFreeGb: number;
+  /** Run before a worktree is deleted for good, with its trashed path then its original path. */
+  purgeHook: string;
+  /** Have `keeper auto` return primary checkouts to their default branch and fast-forward them. */
+  freshen: boolean;
+}
+
+export const defaultConfig: Config = {
+  agentRoots: [],
+  agentCachePatterns: [],
+  repoRoots: [],
+  worktreeRoots: [],
+  aurClones: [],
+  logs: [],
+  warnFreeGb: 20,
+  purgeHook: "",
+  freshen: false,
+};
+
+/** One pull request as `gh pr list` reports it. */
+export interface PullRequest {
+  number: number;
+  state: "OPEN" | "CLOSED" | "MERGED";
+  headRefName: string;
+  headRefOid: string;
 }
 
 export interface Context {
@@ -78,6 +112,8 @@ export interface Context {
   staleDays: number;
   /** Sampled processes, so a test never has to race a real machine. Absent means the scan reads /proc. */
   processes?: readonly ProcessInfo[];
+  /** Replaces the GitHub lookup in tests. */
+  pullRequests?: (repo: string) => Promise<PullRequest[]>;
   cores?: number;
   loadAverage?: number;
   /** Memory pressure and capped cgroups, so a test can describe a stalled machine without reproducing one. */
@@ -124,10 +160,6 @@ function entries(path: string): string[] {
   }
 }
 
-function expandHome(home: string): (path: string) => string {
-  return (path) => (path.startsWith("~/") ? join(home, path.slice(2)) : path);
-}
-
 function isDirectory(path: string): boolean {
   try {
     return statSync(path).isDirectory();
@@ -145,38 +177,89 @@ export function worktreeDirs(root: string): string[] {
     );
 }
 
-async function inspectWorktree(path: string, context: Context, bytes: number): Promise<Finding> {
+/** No gh, no auth or no network means no proof, which leaves a worktree behind the age window and approval. */
+async function listPullRequests(repo: string): Promise<PullRequest[]> {
+  const fields = "number,state,headRefName,headRefOid";
+  const result = await run(["gh", "pr", "list", "--state", "all", "--limit", "1000", "--json", fields], repo);
+  if (result.code !== 0) return [];
+  try {
+    return JSON.parse(result.stdout) as PullRequest[];
+  } catch {
+    return [];
+  }
+}
+
+/** An operation in progress is unfinished work, however clean and pushed the tree looks. */
+const unfinishedOperations = ["rebase-merge", "rebase-apply", "BISECT_LOG", "MERGE_HEAD", "CHERRY_PICK_HEAD"];
+
+type PullRequestLookup = (commonDir: string, path: string) => Promise<PullRequest[]>;
+
+async function inspectWorktree(
+  path: string,
+  context: Context,
+  bytes: number,
+  lookup: PullRequestLookup,
+): Promise<Finding> {
   const git = (...args: string[]) => run(["git", "--no-optional-locks", "-C", path, ...args]);
   const valid = (await git("rev-parse", "--git-common-dir")).code === 0;
   const blockers: string[] = [];
-  const [status, ahead, head, branch, commonDir] = await Promise.all([
+  const [status, ahead, head, branch, commonDir, gitDir, defaultBranch] = await Promise.all([
     git("status", "--porcelain"),
     git("rev-list", "--count", "HEAD", "--not", "--remotes"),
     git("rev-parse", "HEAD"),
     git("rev-parse", "--abbrev-ref", "HEAD"),
     git("rev-parse", "--path-format=absolute", "--git-common-dir"),
+    git("rev-parse", "--absolute-git-dir"),
+    git("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"),
   ]);
   if (!valid) blockers.push("not a valid checkout, so its work cannot be checked");
   if (status.stdout) blockers.push(`${status.stdout.split("\n").length} uncommitted or untracked files`);
-  // Ancestry of main says nothing after a squash merge, so the question is only whether HEAD exists on a remote.
-  if (ahead.code !== 0 || ahead.stdout !== "0") blockers.push(`${ahead.stdout || "unknown"} commits on no remote`);
   if (holders(path, context.live)) blockers.push("in use by a running process");
+  const operation = unfinishedOperations.find((name) => gitDir.stdout && existsSync(join(gitDir.stdout, name)));
+  if (operation) blockers.push(`${operation} is in progress`);
+  const pullRequests = valid && commonDir.stdout ? await lookup(commonDir.stdout, path) : [];
+  const open = pullRequests.find((pr) => pr.state === "OPEN" && pr.headRefName === branch.stdout);
+  if (open) blockers.push(`PR #${open.number} is open`);
+  // The commit must match too: a branch name gets reused, and a branch can gain commits after its PR merged.
+  const merged = pullRequests.find(
+    (pr) => pr.state === "MERGED" && pr.headRefName === branch.stdout && pr.headRefOid === head.stdout,
+  );
+  // A merged branch is usually deleted from the remote, and the pull request is what still holds this commit.
+  if (!merged && (ahead.code !== 0 || ahead.stdout !== "0")) {
+    blockers.push(`${ahead.stdout || "unknown"} commits on no remote`);
+  }
+  const mainline = defaultBranch.stdout.replace(/^origin\//, "");
+  const contained =
+    Boolean(defaultBranch.stdout) &&
+    branch.stdout !== mainline &&
+    (await git("merge-base", "--is-ancestor", "HEAD", defaultBranch.stdout)).code === 0;
+  const proof = merged ? `Merged in PR #${merged.number}` : contained ? "Every commit is on the default branch" : "";
   const gitIndex = commonDir.stdout ? entries(join(commonDir.stdout, "worktrees")) : [];
   const touched = Math.min(ageDays(path, context.now), ...gitIndex.filter(sameWorktree(path)).map(headAge(context)));
-  if (touched < context.staleDays) blockers.push(`touched ${Math.floor(touched)} days ago`);
+  // Only a merge outruns the age window. A branch just cut from main is also contained in it, and is about to be used.
+  if (!merged && touched < context.staleDays) blockers.push(`touched ${Math.floor(touched)} days ago`);
   return {
-    id: findingId("worktree", path, `${head.stdout}\0${status.stdout}`),
+    id: findingId("worktree", path, `${head.stdout}\0${status.stdout}\0${proof}\0${open?.number ?? ""}`),
     category: "worktree",
-    risk: "medium",
+    risk: proof ? "low" : "medium",
     action: "trash",
-    title: `${path.replace(`${context.paths.worktrees}/`, "")} (${branch.stdout || "unknown branch"})`,
+    title: `${relativeToRoot(path, context.paths.worktrees)} (${branch.stdout || "unknown branch"})`,
     paths: [path],
     packages: [],
     bytes,
-    reason: "Worktree with every commit on a remote and nothing uncommitted",
+    reason: proof
+      ? `${proof}, and nothing is uncommitted`
+      : "Worktree with every commit on a remote and nothing uncommitted",
     blockers,
     gitDir: commonDir.stdout || undefined,
+    branch: branch.stdout && branch.stdout !== "HEAD" ? branch.stdout : undefined,
+    head: head.stdout || undefined,
   };
+}
+
+function relativeToRoot(path: string, roots: readonly string[]): string {
+  const root = roots.find((candidate) => path.startsWith(`${candidate}/`));
+  return root ? path.slice(root.length + 1) : path;
 }
 
 /** Commits and checkouts move logs/HEAD. The index will not do: any `git status` rewrites it. */
@@ -201,9 +284,49 @@ function headAge(context: Context): (admin: string) => number {
 }
 
 async function scanWorktrees(context: Context): Promise<Finding[]> {
-  const dirs = worktreeDirs(context.paths.worktrees);
-  const bytes = await sizes(dirs);
-  return Promise.all(dirs.map((dir) => inspectWorktree(dir, context, bytes.get(dir) ?? 0)));
+  const dirs = context.paths.worktrees.flatMap(worktreeDirs);
+  const leftovers = context.paths.worktrees.flatMap(leftoverDirs);
+  const bytes = await sizes([...dirs, ...leftovers]);
+  const fetch = context.pullRequests ?? listPullRequests;
+  const known = new Map<string, Promise<PullRequest[]>>();
+  const lookup: PullRequestLookup = (commonDir, path) => {
+    const found = known.get(commonDir) ?? fetch(path);
+    known.set(commonDir, found);
+    return found;
+  };
+  return [
+    ...(await Promise.all(dirs.map((dir) => inspectWorktree(dir, context, bytes.get(dir) ?? 0, lookup)))),
+    ...(await Promise.all(leftovers.map((dir) => inspectLeftover(dir, context, bytes.get(dir) ?? 0)))),
+  ];
+}
+
+/** A directory beside worktrees that is not a checkout, usually what a manual removal left behind. */
+function leftoverDirs(root: string): string[] {
+  return entries(root)
+    .filter((dir) => isDirectory(dir) && !existsSync(join(dir, ".git")))
+    .flatMap((dir) => entries(dir).filter((child) => isDirectory(child) && !existsSync(join(child, ".git"))));
+}
+
+async function inspectLeftover(path: string, context: Context, bytes: number): Promise<Finding> {
+  // Branch names with a slash nest worktrees a level deeper, so this one may be a parent of live checkouts.
+  const nested = await run(["find", path, "-maxdepth", "3", "-name", ".git", "-print", "-quit"]);
+  const age = newestAge(path, context.now);
+  const blockers: string[] = [];
+  if (nested.stdout) blockers.push("contains a checkout");
+  if (holders(path, context.live)) blockers.push("in use by a running process");
+  if (age < context.staleDays) blockers.push(`touched ${Math.floor(age)} days ago`);
+  return {
+    id: findingId("worktree", path, `leftover\0${bytes}`),
+    category: "worktree",
+    risk: "medium",
+    action: "trash",
+    title: `${relativeToRoot(path, context.paths.worktrees)} (no checkout)`,
+    paths: [path],
+    packages: [],
+    bytes,
+    reason: "Directory in a worktree root that git does not track",
+    blockers,
+  };
 }
 
 async function building(): Promise<boolean> {
@@ -211,7 +334,8 @@ async function building(): Promise<boolean> {
 }
 
 async function scanAur(context: Context): Promise<Finding[]> {
-  const clones = entries(context.paths.paruClone).filter(isDirectory);
+  const roots = context.paths.aurClones;
+  const clones = roots.flatMap(entries).filter(isDirectory);
   const installed = new Set((await run(["pacman", "-Qq"])).stdout.split("\n"));
   const busy = await building();
   const uninstalled = clones.filter((dir) => !installed.has(dir.slice(dir.lastIndexOf("/") + 1)));
@@ -240,7 +364,7 @@ async function scanAur(context: Context): Promise<Finding[]> {
         ? ["in use by a running process"]
         : [],
   });
-  const relative = (path: string) => path.replace(`${context.paths.paruClone}/`, "");
+  const relative = (path: string) => relativeToRoot(path, roots);
   return [
     ...uninstalled.map((path) =>
       finding(path, `${relative(path)} clone`, "AUR clone of a package that is not installed"),
@@ -334,11 +458,35 @@ function lstatAge(path: string, now: number): number {
   }
 }
 
+/**
+ * A build rewrites files deep inside its output without touching anything near the top, so the top cannot show it idle.
+ * Installers keep the mtimes in their tarballs, so a fresh install needs `newestAge` as well.
+ */
+async function hasRecentFile(path: string, days: number): Promise<boolean> {
+  const minutes = String(Math.ceil(days * 1440));
+  const found = await run([
+    "find",
+    path,
+    "(",
+    "-type",
+    "f",
+    "-o",
+    "-type",
+    "l",
+    ")",
+    "-mmin",
+    `-${minutes}`,
+    "-print",
+    "-quit",
+  ]);
+  return found.stdout !== "";
+}
+
 /** Build output is disposable even inside a worktree that must stay, which is where most of the space sits. */
 async function scanBuild(context: Context): Promise<Finding[]> {
   const expand = expandHome(context.paths.home);
   const repos = [
-    ...worktreeDirs(context.paths.worktrees),
+    ...context.paths.worktrees.flatMap(worktreeDirs),
     ...context.config.repoRoots.flatMap((root) => worktreeDirs(expand(root))),
   ];
   const candidates = repos.flatMap((repo) => {
@@ -354,6 +502,7 @@ async function scanBuild(context: Context): Promise<Finding[]> {
   const ignored = (
     await Promise.all(
       stale.map(async (path) => {
+        if (await hasRecentFile(path, staleBuildDays)) return undefined;
         const parent = dirname(path);
         const name = basename(path);
         const check = await run(["git", "-C", parent, "check-ignore", "-q", name]);
@@ -378,7 +527,13 @@ async function scanBuild(context: Context): Promise<Finding[]> {
 }
 
 async function scanTranscripts(context: Context): Promise<Finding[]> {
-  const roots = [".codex/sessions", ".codex/archived_sessions", ".claude/projects", ".claude/jobs"];
+  const roots = [
+    ".codex/sessions",
+    ".codex/archived_sessions",
+    ".claude/projects",
+    ".claude/jobs",
+    ".claude/file-history",
+  ];
   const found = await Promise.all(
     roots.map((root) =>
       run([
@@ -429,7 +584,8 @@ async function scanUv(context: Context): Promise<Finding[]> {
       packages: [],
       bytes: 0,
       reason: `Cache holds ${Math.round(bytes / 1024 ** 3)}G. Pruning removes entries no environment needs, so the amount freed is unknown until it runs`,
-      blockers: [],
+      // uv refuses to prune while another uv holds the cache lock, which is the normal state of a busy machine.
+      blockers: (await run(["pgrep", "-x", "uv"])).code === 0 ? ["uv is running"] : [],
     },
   ];
 }
@@ -452,6 +608,33 @@ async function scanSnapshots(): Promise<Finding[]> {
       blockers: [],
     },
   ];
+}
+
+async function scanLogs(context: Context): Promise<Finding[]> {
+  const expand = expandHome(context.paths.home);
+  return context.config.logs.map(expand).flatMap((path) => {
+    let size: number;
+    try {
+      size = statSync(path).size;
+    } catch {
+      return [];
+    }
+    if (size <= logCapBytes) return [];
+    return [
+      {
+        id: findingId("logs", path, String(size)),
+        category: "logs",
+        risk: "low",
+        action: "truncate",
+        title: path.replace(`${context.paths.home}/`, "~/"),
+        paths: [path],
+        packages: [],
+        bytes: size - logKeepBytes,
+        reason: "Appended log that nothing rotates. Keeps the last 5M in place, so a writer can carry on",
+        blockers: [],
+      } satisfies Finding,
+    ];
+  });
 }
 
 interface RawProcess {
@@ -695,6 +878,7 @@ const scanners: Record<Category, (context: Context) => Promise<Finding[]>> = {
   transcripts: scanTranscripts,
   "uv-cache": scanUv,
   snapshots: scanSnapshots,
+  logs: scanLogs,
   load: scanLoad,
   memory: scanMemory,
 };

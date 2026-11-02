@@ -103,8 +103,22 @@ until `keeper purge`, which reports the measured change in free space as `freed`
 | `docker` | Dangling images and build cache unused for 7 days; unused volumes are reported only | low, volumes report only |
 | `logs` | Configured logs over 50M, cut to their last 5M | low |
 | `snapshots` | Timeshift snapshots, which keep deleted data on disk | report only |
+| `apps` | Explicitly installed packages that ship a `.desktop` launcher and were not seen running for 90 days | medium, by id only |
+| `large` | Files over 500M under `$HOME`, stale, outside git repos, dotdirs, downloads, screenshots and application trees | medium, by id only |
+| `downloads` | Stale downloads, finished installers, and partials (partials over a day old are low) | low or medium, by id only |
+| `screenshots` | Stale images in the Pictures `Screenshots` and grim/hyprshot folders | medium, by id only |
+| `duplicates` | Identical files in different personal document trees, keeping the newest copy and offering the rest | medium, by id only |
 | `load` | Commands holding the CPU while the machine is oversubscribed | medium |
 | `memory` | Cgroups at their `memory.high` cap, and memory pressure | report only |
+
+Apps, large files, downloads, screenshots and duplicates are personal or application data, so they are only planned
+when you name their id. `keeper plan` with no ids never takes them, even with `--max-risk medium`.
+
+`large` and `duplicates` skip application trees: anything under a Wine prefix (a directory holding `drive_c` or
+`system.reg`), a Steam, Lutris, Heroic or GOG library, a `~/Games` style library, flatpak data or a VM store, and any
+directory holding an install marker such as a `.exe`, `.toc` or `.pak`. A duplicate is offered only when the copy
+keeper keeps is in a different top-level folder of your own documents: `Documents`, `Pictures`, `Music`, `Videos`,
+`Downloads` or `Desktop`.
 
 These block a worktree whatever its age: uncommitted files, commits on no remote, a running process inside it, an open
 pull request, a rebase, merge, bisect or cherry-pick in progress, and any hold.
@@ -138,8 +152,8 @@ useful, and `keeper scan --cached` or the wizard reuse them:
 | --- | --- |
 | Never, always scanned | `load`, `memory` |
 | 15 minutes | `worktree` |
-| 1 hour | `build`, `agent`, `transcripts`, `logs`, `docker` |
-| 6 hours | `aur`, `pacman-cache`, `orphans`, `package-cache`, `snapshots` |
+| 1 hour | `build`, `agent`, `transcripts`, `logs`, `docker`, `downloads`, `screenshots` |
+| 6 hours | `aur`, `pacman-cache`, `orphans`, `package-cache`, `snapshots`, `apps`, `large`, `duplicates` |
 
 Applying rescans the categories in its plan first, so a kept finding can never be what decides a removal, and applying,
 undoing or claiming drops the categories it changed. Holds are applied on every read. `keeper scan` without `--cached`
@@ -149,6 +163,17 @@ keeper records free space whenever it scans or changes something, at most every 
 is installed. `keeper history` returns those readings with the applies, purges, undos and nightly runs, and the
 wizard draws them.
 
+The `apps` category reads a last-seen ledger that `keeper sample` records hourly: which executables are running, folded
+to their owning package. Use is never judged from atime, and only packages with a `.desktop` launcher count as apps, so
+`git`, `ripgrep` or `docker` are never offered. The ledger keeps the last sample in each hour bucket, and coverage counts
+only the days that hold a sample. A timer that stopped or a machine that was off therefore leaves a gap, and the window
+extends instead of treating the missing days as watched.
+
+A package is proven unused only once the samples cover the whole `--app-stale-days` window (default 90) and it was not
+seen in it. Until then the first run stays quiet: the largest apps not seen yet appear as candidates, still only
+removable by their id, so a big app can be dropped before the window fills. Lower `--app-stale-days` to the time
+actually sampled to judge every unseen app against it. With no samples at all, apps reports nothing.
+
 ## Commands
 
 | Command | What it does |
@@ -156,7 +181,7 @@ wizard draws them.
 | `keeper` | Opens the wizard (terminal only) |
 | `keeper status` | Free space, schedule, last run and whether the nightly runs are healthy, holds, trash and missing tools |
 | `keeper scan` | Lists findings and their blockers. `--cached` reuses recently scanned categories |
-| `keeper plan` | Saves a plan of eligible findings. Add `--max-risk medium` once medium risk is approved |
+| `keeper plan` | Saves a plan of eligible findings. Apps and personal files need their id. Add `--max-risk medium` once medium risk is approved |
 | `keeper apply PLAN --yes` | Rescans, then applies what is unchanged |
 | `keeper undo TX` | Restores a transaction from trash |
 | `keeper purge` | Deletes trash over 14 days old for good |
@@ -165,7 +190,7 @@ wizard draws them.
 | `keeper release PATH` | Drops a hold or claim |
 | `keeper log` | Shows recent mutations and who made them |
 | `keeper history` | Free space readings and the events that changed it, over 30 days or `--days N` |
-| `keeper sample` | Records free space now, as the hourly timer does |
+| `keeper sample` | Records free space and which executables are running, as the hourly timer does |
 | `keeper schema` | Describes the CLI as JSON |
 | `keeper auto` | Applies low-risk findings, purges old trash and notifies |
 | `keeper timer install` | Schedules `keeper auto` daily and `keeper sample` hourly with systemd, or `--cron` |
@@ -203,6 +228,8 @@ agentCachePatterns = ["^pr\\d+-venv$"]
 logs = ["~/scripts/backup.log"]
 # Notify below this much free space. Default: 20
 warnFreeGb = 20
+# Files under $HOME this large or more are offered by `large` once stale, outside application trees. Default: 524288000 (500M)
+largeBytes = 524288000
 # Run before a worktree is deleted for good, with its trashed path then its original path.
 purgeHook = "~/bin/drop-worktree-db"
 # Have keeper auto return main checkouts to the default branch and fast-forward them.

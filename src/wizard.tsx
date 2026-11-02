@@ -9,7 +9,7 @@ import { applyPlan, context, createPlan } from "./ops";
 import { defaultTheme, type Theme } from "./scanners";
 import { defaultPaths } from "./system";
 import { installSystemd } from "./timer";
-import { type Category, categories, count, eligible, type Finding, outermost, type Scan } from "./types";
+import { bulkEligible, type Category, categories, count, eligible, type Finding, outermost, type Scan } from "./types";
 
 export interface Actions {
   /** Every category last stored, however old, shown while the scan runs. Never acted on. */
@@ -40,7 +40,7 @@ export const liveActions: Actions = {
   },
   apply: async (findings) => {
     const ctx = context();
-    const outcome = await applyPlan(createPlan(ctx.paths, findings, ctx.staleDays), ctx);
+    const outcome = await applyPlan(createPlan(ctx.paths, findings, ctx.staleDays, ctx.appStaleDays), ctx);
     const lowered = outcome.reniced ? `lowered the priority of ${count(outcome.reniced, "process", "processes")}` : "";
     const done =
       [outcome.bytes ? `moved ${size(outcome.bytes)} to trash` : "", lowered].filter(Boolean).join(" and ") ||
@@ -224,7 +224,7 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
     }
     if (key.name === "a") {
       // Adds to the selection, so medium-risk rows picked by hand stay picked.
-      const low = open.filter((f) => f.risk === "low").map((f) => f.id);
+      const low = open.filter((f) => f.risk === "low" && bulkEligible(f)).map((f) => f.id);
       setSelected(new Set([...selected, ...low]));
       setMessage(low.length ? `Selected ${low.length} low-risk findings` : "No low-risk finding is eligible");
     }

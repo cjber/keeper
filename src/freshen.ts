@@ -1,5 +1,6 @@
 import { type Context, worktreeDirs } from "./scanners";
 import { expandHome, run } from "./system";
+import { count } from "./types";
 
 /** The main checkout of every repo keeper can see, whether listed directly or known through one of its worktrees. */
 export async function primaryCheckouts(context: Context): Promise<string[]> {
@@ -41,5 +42,7 @@ export async function freshen(repo: string): Promise<string | undefined> {
   const behind = (await git("rev-list", "--count", `HEAD..${remote}`)).stdout;
   if (behind === "0" || !behind) return current === mainline ? undefined : `${repo}: returned to ${mainline}`;
   const merged = await git("merge", "--quiet", "--ff-only", remote);
-  return merged.code === 0 ? `${repo}: fast-forwarded ${behind} commits` : `${repo}: fast-forward refused`;
+  return merged.code === 0
+    ? `${repo}: fast-forwarded ${count(Number(behind), "commit")}`
+    : `${repo}: fast-forward refused`;
 }

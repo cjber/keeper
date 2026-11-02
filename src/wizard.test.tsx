@@ -71,7 +71,7 @@ test("lists eligible findings first and shows blocked ones on b", async () => {
 
 test("says why nothing is selectable instead of ignoring the key", async () => {
   const { captureCharFrame, mockInput, settle, renderer } = await open([finding("b", "low", ["in use"])]);
-  expect(captureCharFrame()).toContain("Press b to see the 1 blocked findings");
+  expect(captureCharFrame()).toContain("Press b to see 1 blocked finding.");
   await act(async () => {
     await mockInput.pressKey("a");
   });

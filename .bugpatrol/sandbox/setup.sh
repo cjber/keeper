@@ -37,15 +37,17 @@ add dirty-work && echo wip > "$home/.worktrees/dirty-work/notes.txt" # uncommitt
 add unpushed && (cd "$home/.worktrees/unpushed" && echo x > x && git add x && git commit -qm local) # unpushed commit
 add fresh-branch # touched today: blocked by the age window
 add "a-very-long-branch-name-that-keeps-going-to-test-how-the-wizard-truncates-titles"
-for name in merged-feature dirty-work unpushed a-very-long-branch-name-that-keeps-going-to-test-how-the-wizard-truncates-titles; do
-  old "$home/.worktrees/$name" "$home/drive/app/.git/worktrees/$name/logs/HEAD"
-done
 
 # Build output inside an idle worktree, git-ignored and old.
 mkdir -p "$home/.worktrees/merged-feature/node_modules/left-pad" "$home/.worktrees/merged-feature/dist"
 head -c 3000000 /dev/zero > "$home/.worktrees/merged-feature/node_modules/left-pad/index.js"
 head -c 800000 /dev/zero > "$home/.worktrees/merged-feature/dist/bundle.js"
 find "$home/.worktrees/merged-feature/node_modules" "$home/.worktrees/merged-feature/dist" -exec touch -h -d "20 days ago" {} +
+
+# Aged last, since adding the build output above touches the worktree.
+for name in merged-feature dirty-work unpushed a-very-long-branch-name-that-keeps-going-to-test-how-the-wizard-truncates-titles; do
+  old "$home/.worktrees/$name" "$home/drive/app/.git/worktrees/$name/logs/HEAD"
+done
 
 # A directory beside the worktrees that git does not track, as a manual removal leaves.
 mkdir -p "$home/.worktrees/old-experiment/scratch"

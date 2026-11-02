@@ -16,6 +16,7 @@ import { defaultPaths, expandHome, liveFiles, niceness, type Paths, run } from "
 import {
   eligible,
   type Finding,
+  outermost,
   type Plan,
   type Reniced,
   type Risk,
@@ -65,7 +66,8 @@ function writeJson(path: string, value: unknown): void {
 
 const newId = () => randomBytes(4).toString("hex");
 
-export function createPlan(paths: Paths, findings: readonly Finding[], staleDays: number, now = Date.now()): Plan {
+export function createPlan(paths: Paths, chosen: readonly Finding[], staleDays: number, now = Date.now()): Plan {
+  const findings = outermost(chosen);
   const plan: Plan = {
     schemaVersion,
     id: newId(),

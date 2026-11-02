@@ -7,7 +7,7 @@ import { applyPlan, context, createPlan, freeBytes, purge, readPlan, transaction
 import { defaultStaleDays, scan } from "./scanners";
 import { defaultPaths, run } from "./system";
 import { installCron, installSystemd, lastServiceResult, removeSchedule, scheduleStatus } from "./timer";
-import { type Category, categories, eligible, type Finding, type Risk, risks, schemaVersion } from "./types";
+import { type Category, categories, count, eligible, type Finding, type Risk, risks, schemaVersion } from "./types";
 
 /** Each code past 2 tells the caller one thing to do next. */
 export const exit = { ok: 0, error: 1, usage: 2, needsConfirmation: 3, stalePlan: 4, partial: 5, busy: 6 } as const;
@@ -247,7 +247,7 @@ async function dispatch(
       const plan = createPlan(paths, chosen, flags.staleDays);
       return {
         value: { ...plan, next: `keeper apply ${plan.id} --yes` },
-        text: `plan ${plan.id}: ${chosen.length} items, ${size(plan.bytes)}`,
+        text: `plan ${plan.id}: ${count(chosen.length, "item")}, ${size(plan.bytes)}`,
       };
     }
     case "apply": {
@@ -258,7 +258,7 @@ async function dispatch(
       if (!flags.yes) {
         return {
           value: { status: "needs_confirmation", plan },
-          text: `plan ${id} would process ${plan.findingIds.length} items, ${size(plan.bytes)}. Re-run with --yes.`,
+          text: `plan ${id} would process ${count(plan.findingIds.length, "item")}, ${size(plan.bytes)}. Re-run with --yes.`,
           code: exit.needsConfirmation,
         };
       }
@@ -268,7 +268,7 @@ async function dispatch(
         ? `keeper undo ${outcome.transaction} to restore, or keeper purge --older-days 0 to free the space`
         : "keeper scan";
       const moved = outcome.bytes > 0 ? `, ${size(outcome.bytes)} moved` : "";
-      const lowered = outcome.reniced > 0 ? `, ${outcome.reniced} processes deprioritised` : "";
+      const lowered = outcome.reniced > 0 ? `, ${count(outcome.reniced, "process", "processes")} deprioritised` : "";
       return {
         value: { ...outcome, next: partial ? "keeper scan" : next },
         text: `applied ${outcome.applied.length}, stale ${outcome.stale.length}, failed ${outcome.failed.length}${moved}${lowered}. undo: ${outcome.transaction ?? "none"}`,
@@ -286,7 +286,9 @@ async function dispatch(
       const reinstall = result.removedPackages.length
         ? `\nreinstall with: sudo pacman -S --asdeps ${result.removedPackages.join(" ")}`
         : "";
-      const reniced = result.reniced ? `, ${result.reniced} processes back at their old priority` : "";
+      const reniced = result.reniced
+        ? `, ${count(result.reniced, "process", "processes")} back at their old priority`
+        : "";
       const stuck = result.stuck.length
         ? `\n${result.stuck.length} still at low priority, which needs root to raise: ${result.stuck
             .map((entry) => `${entry.pid} back to ${entry.nice}`)
@@ -298,7 +300,7 @@ async function dispatch(
       const result = await purge(paths, flags.olderDays);
       return {
         value: result,
-        text: `purged ${result.purged.length} transactions: ${size(result.freed)} freed on disk, ${size(result.bytes)} uncompressed`,
+        text: `purged ${count(result.purged.length, "transaction")}: ${size(result.freed)} freed on disk, ${size(result.bytes)} uncompressed`,
       };
     }
     case "hold": {
@@ -381,7 +383,7 @@ async function dispatch(
       const missing = value.missingTools.length ? `\nmissing: ${value.missingTools.join(", ")}` : "";
       return {
         value,
-        text: `${size(value.free)} free, schedule ${schedule}, ${trash.length} transactions in trash, ${holds.length} holds${last}${verdict}${missing}\nnext: ${value.next}`,
+        text: `${size(value.free)} free, schedule ${schedule}, ${count(trash.length, "transaction")} in trash, ${count(holds.length, "hold")}${last}${verdict}${missing}\nnext: ${value.next}`,
       };
     }
     case "auto": {

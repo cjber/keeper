@@ -41,11 +41,16 @@ export const liveActions: Actions = {
   apply: async (findings) => {
     const ctx = context();
     const outcome = await applyPlan(createPlan(ctx.paths, findings, ctx.staleDays), ctx);
+    const lowered = outcome.reniced ? `lowered the priority of ${count(outcome.reniced, "process", "processes")}` : "";
+    const done =
+      [outcome.bytes ? `moved ${size(outcome.bytes)} to trash` : "", lowered].filter(Boolean).join(" and ") ||
+      "applied";
+    const stale = findings.filter((finding) => outcome.stale.includes(finding.id)).map((finding) => finding.title);
     return [
       outcome.transaction
-        ? `Moved ${size(outcome.bytes)} to trash. Undo with keeper undo ${outcome.transaction}`
-        : "Nothing was moved",
-      outcome.stale.length ? `${count(outcome.stale.length, "finding")} skipped as changed since the scan` : "",
+        ? `${done.charAt(0).toUpperCase()}${done.slice(1)}. Undo with keeper undo ${outcome.transaction}`
+        : "Nothing was changed",
+      stale.length ? `Skipped ${stale.join(", ")}: changed since the scan, r rescans` : "",
       outcome.failed.length ? `${count(outcome.failed.length, "finding")} failed, see keeper log` : "",
     ]
       .filter(Boolean)
@@ -76,17 +81,21 @@ const clip = (text: string, room: number) => (text.length > room ? `${text.slice
 type Progress = Partial<Record<Category, { found: number | null; cached: boolean }>>;
 const views = ["list", "space", "history"] as const;
 type View = (typeof views)[number];
-const keys = (showBlocked: boolean) => [
-  "j/k move",
-  "space select",
-  "a all low risk",
-  "enter apply",
-  `b ${showBlocked ? "hide" : "show"} blocked`,
-  "g graphs",
-  "r rescan",
-  "t schedule",
-  "q/esc quit",
-];
+/** Only the keys that work in the view on screen. */
+const keys = (view: View, showBlocked: boolean) =>
+  view === "list"
+    ? [
+        "j/k move",
+        "space select",
+        "a all low risk",
+        "enter apply",
+        `b ${showBlocked ? "hide" : "show"} blocked`,
+        "g space by category",
+        "r rescan",
+        "t schedule",
+        "q/esc quit",
+      ]
+    : [view === "space" ? "g free space history" : "g back to the list", "r rescan", "q/esc quit"];
 const two = (n: number) => String(n).padStart(2, "0");
 const time = (iso: string | number) => {
   const date = new Date(iso);
@@ -103,6 +112,28 @@ const describe = (event: Event) =>
     : event.event === "purge"
       ? `purge freed ${size(event.bytes ?? 0)}`
       : "undo restored a transaction";
+/**
+ * The latest events in time order, as many as fit on the two lines under the chart. Each stays whole, so an event that
+ * does not fit is left out rather than wrapped mid-phrase.
+ */
+function legend(events: readonly (Event & { event: keyof typeof marks })[], room: number): string {
+  const entries = events.map(
+    (event) => `${marks[event.event]} ${weekday(event.at)} ${time(event.at)} ${describe(event)}`,
+  );
+  const lines: string[][] = [[]];
+  for (const entry of entries.slice(-4).reverse()) {
+    const line = lines.at(-1) ?? [];
+    if (!line.length || [...line, entry].join("   ").length <= room) line.unshift(entry);
+    else if (lines.length < 2) lines.push([entry]);
+    else break;
+  }
+  return lines
+    .reverse()
+    .map((line) => line.map((entry) => clip(entry, room)).join("   "))
+    .filter(Boolean)
+    .join("\n");
+}
+
 /** Space under this folds into one line, so the bars show where the disk actually went. */
 const smallBar = 100 * 1024 ** 2;
 const labelWidth = 7;
@@ -165,7 +196,8 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
 
   // Every view gets the same panel, so switching never moves the lines around it. The explanation keeps two lines
   // because blockers with their next step often wrap.
-  const keyLines = Math.ceil(keys(showBlocked).join(" · ").length / Math.max(width - 2, 1));
+  // The list's key line is the longest, so every view reserves its height.
+  const keyLines = Math.ceil(keys("list", showBlocked).join(" · ").length / Math.max(width - 2, 1));
   const panel = Math.max(3, height - 1 - 2 - 1 - (report?.warnings.length ? 1 : 0) - keyLines);
 
   useKeyboard((key) => {
@@ -213,6 +245,13 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
   const start = Math.max(0, Math.min(at - pageSize + 1, rows.length - pageSize));
   const active = rows[at];
   const total = outermost(chosen).reduce((sum, finding) => sum + finding.bytes, 0);
+  const groups = chosen.filter((finding) => finding.action === "renice").length;
+  const picked = [
+    total || groups === 0 ? `${size(total)} selected, uncompressed` : "",
+    groups ? `${count(groups, "process group")} to deprioritise` : "",
+  ]
+    .filter(Boolean)
+    .join(", ");
   const shown = report ? ` · showing ${time(report.scannedAt)}` : "";
   const scanning = () => {
     const waiting = categories.filter((category) => !progress?.[category]);
@@ -240,7 +279,7 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
   // The graph views explain themselves, so this line holds the space key, or the events the chart marks.
   const plotWidth = Math.max(width - 2 - labelWidth - 2, 2);
   const plotted =
-    view === "history" ? freeChart(history.samples, history.events, plotWidth, panel - 2, Date.now(), size) : undefined;
+    view === "history" ? freeChart(history.samples, history.events, plotWidth, panel - 3, Date.now(), size) : undefined;
   const explanation =
     view === "list"
       ? active
@@ -248,11 +287,8 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
         : ""
       : view === "space"
         ? "█ ready to clean now · ░ waiting on a blocker · b in the list shows each reason"
-        : (plotted?.events ?? [])
-            .slice(-4)
-            .reverse()
-            .map((event) => `${marks[event.event]} ${weekday(event.at)} ${time(event.at)}  ${describe(event)}`)
-            .join("    ") || "Readings come from every keeper run and, with the timer on, every hour";
+        : legend(plotted?.events ?? [], width - 2) ||
+          "Readings come from every keeper run and, with the timer on, every hour";
 
   const list = (
     <>
@@ -424,15 +460,16 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
         </text>
         <text wrapMode="none" fg={terminal}>
           {"".padStart(labelWidth + 2)}
-          {plotted.axis.map((cell) => (
-            <span
-              key={`axis-${cell.column}`}
-              fg={cell.kind ? color(markColor[cell.kind]) : terminal}
-              attributes={cell.kind ? 0 : TextAttributes.DIM}
-            >
-              {cell.text}
+          {plotted.ticks.map((tick, index) => (
+            <span key={`tick-${tick.column}`} fg={color(markColor[tick.kind])}>
+              {"".padStart(tick.column - (plotted.ticks[index - 1]?.column ?? -1) - 1)}
+              {marks[tick.kind]}
             </span>
           ))}
+        </text>
+        <text wrapMode="none" {...dim}>
+          {"".padStart(labelWidth + 2)}
+          {plotted.axis}
         </text>
       </>
     );
@@ -443,7 +480,7 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
       <text wrapMode="none" fg={color(theme.accent)} attributes={TextAttributes.BOLD}>
         {clip(
           view === "list"
-            ? `keeper · ${open.length} eligible, ${blocked} blocked · ${chosen.length ? `${size(total)} selected, uncompressed` : "nothing selected"}`
+            ? `keeper · ${open.length} eligible, ${blocked} blocked · ${chosen.length ? picked : "nothing selected"}`
             : view === "space"
               ? `keeper · space · ${size(sum(bars, "ready"))} ready now, ${size(sum(bars, "blocked"))} waiting`
               : `keeper · free space${headline()}`,
@@ -465,8 +502,8 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
         </text>
       ) : null}
       {/* One text per binding, so a narrow terminal wraps between bindings rather than inside one. */}
-      <box flexDirection="row" flexWrap="wrap">
-        {keys(showBlocked).map((binding, index, all) => (
+      <box flexDirection="row" flexWrap="wrap" height={keyLines} flexShrink={0}>
+        {keys(view, showBlocked).map((binding, index, all) => (
           <text key={binding} wrapMode="none" fg={terminal} attributes={TextAttributes.DIM}>
             {binding}
             {index < all.length - 1 ? " · " : ""}

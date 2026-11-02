@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cachedScan, forget } from "./cache";
+import { cachedScan, forget, forgetUnder } from "./cache";
 import { freeChart, spaceBars, waits } from "./charts";
 import { readEvents, readSamples, sample } from "./history";
 import { audit, writeLedger } from "./ledger";
@@ -48,6 +48,15 @@ test("a recent category is reused until its max age, a full rescan or a forget",
   await cachedScan(ctx, { reuse: false, only: ["agent"] });
   forget(ctx.paths, ["agent"]);
   expect((await cachedScan(ctx, { only: ["agent"] })).cached).toEqual([]);
+});
+
+test("an apply drops cached findings inside the paths it moved, whatever their category", async () => {
+  mkdirSync(join(home, "batch", "node_modules"), { recursive: true });
+  await cachedScan(ctx, { only: ["agent"] });
+  forgetUnder(ctx.paths, [join(home, "batch")]);
+  const reused = await cachedScan(ctx, { only: ["agent"] });
+  expect(reused.cached).toEqual(["agent"]);
+  expect(reused.findings).toHaveLength(0);
 });
 
 test("a cache from another window, a failed category and load are never reused", async () => {
@@ -119,9 +128,10 @@ test("the free space chart draws a line on round gridlines and marks events on t
   // Rising: the line starts in the bottom row and ends in the top one.
   expect(chart?.rows.at(-1)?.runs[0]?.ink).toBe("line");
   expect(chart?.rows[0]?.runs.at(-1)?.ink).toBe("line");
-  // Only the apply is marked, at its column on the axis. A nightly run leaves no mark.
+  // Only the apply is marked, on its own row, so the hour labels under it stay whole. A nightly run leaves no mark.
   expect(chart?.events.map((event) => event.event)).toEqual(["apply"]);
-  expect(chart?.axis.find((cell) => cell.kind)?.column).toBe(10);
+  expect(chart?.ticks).toEqual([{ column: 10, kind: "apply" }]);
+  expect(chart?.axis).toMatch(/^\s*\d\d:00 /);
   expect(freeChart([{ at: at(0), free: gig, size: gig }], [], 10, 4, now, String)).toBeUndefined();
 });
 
@@ -172,6 +182,7 @@ test("build output inside a blocked worktree counts as build, once, and waits gr
     finding("worktree", "/w/a", 100, ["PR #4 is open, merge or close it"]),
     finding("build", "/w/a/target", 90, ["built in the last 3 days, offered after 3 idle days"]),
     finding("worktree", "/w/b", 20, ["PR #9 is open, merge or close it", "touched today, offered after 7 idle days"]),
+    { ...finding("build", "", 0, ["includes this keeper run, and keeper never lowers its own priority"]), paths: [] },
   ];
   expect(spaceBars(findings)).toEqual([
     { category: "build", ready: 0, blocked: 90 },
@@ -180,5 +191,6 @@ test("build output inside a blocked worktree counts as build, once, and waits gr
   expect(waits(findings)).toEqual([
     { reason: "built recently, offered once idle", count: 1, bytes: 90 },
     { reason: "PR is open, merge or close it", count: 2, bytes: 30 },
+    { reason: "includes this keeper run, judged once it exits", count: 1, bytes: 0 },
   ]);
 });

@@ -967,7 +967,10 @@ async function scanLoad(context: Context): Promise<Finding[]> {
     const blockers: string[] = [];
     if (sessionCommands.has(name)) blockers.push("part of your desktop session, which is what has to stay responsive");
     if (members.every((member) => member.nice >= lowestPriority)) blockers.push("already at the bottom priority");
-    if (pids.includes(process.pid)) blockers.push("this keeper run is part of the command");
+    if (pids.includes(process.pid))
+      blockers.push(
+        "includes this keeper run, and keeper never lowers its own priority: a scan after it exits judges the rest",
+      );
     if (heaviest.uid !== me) blockers.push("owned by another user");
     return [
       {

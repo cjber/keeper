@@ -71,6 +71,20 @@ export function forget(paths: Paths, changed: readonly Category[] = categories):
   write(paths, cache);
 }
 
+/**
+ * Drops stored findings that sit inside paths an apply just moved, whatever their category: a trashed worktree takes
+ * its build output with it, and that build category may still be fresh enough to be reused.
+ */
+export function forgetUnder(paths: Paths, moved: readonly string[]): void {
+  const cache = read(paths);
+  if (!cache || !moved.length) return;
+  const gone = (path: string) => moved.some((root) => path === root || path.startsWith(`${root}/`));
+  for (const entry of Object.values(cache.entries)) {
+    if (entry) entry.findings = entry.findings.filter((finding) => !finding.paths.length || !finding.paths.every(gone));
+  }
+  write(paths, cache);
+}
+
 /** Everything stored, however old, for the wizard to show while it scans. Never a basis for acting. */
 export function lastKnown(context: Context): Scan | undefined {
   const stored = read(context.paths);

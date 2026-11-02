@@ -320,6 +320,8 @@ async function purgeUnlocked(paths: Paths, olderThanDays: number, now: number): 
     purged.push(tx.id);
     bytes += tx.entries.reduce((sum, entry) => sum + entry.bytes, 0);
   }
+  // Flushing a whole filesystem can take seconds, so only a purge that removed something measures.
+  if (purged.length === 0) return { purged, bytes, freed: 0, failed };
   // Copy-on-write filesystems release space when the transaction commits, so measuring now needs a sync.
   await run(["sync", "--file-system", paths.home]);
   return { purged, bytes, freed: Math.max(0, (await freeBytes(paths.home)) - freeBefore), failed };

@@ -2,6 +2,7 @@
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import packageJson from "../package.json";
 
 const source = process.argv[2];
 if (!source) throw new Error("usage: bun scripts/smoke-binary.ts <binary>");
@@ -23,7 +24,7 @@ const tmux = (...args: string[]) =>
 try {
   copyFileSync(resolve(source), executable);
   chmodSync(executable, 0o755);
-  if (!keeper("--version").startsWith("keeper ")) throw new Error("--version failed");
+  if (JSON.parse(keeper("--version")).version !== packageJson.version) throw new Error("--version failed");
   if (!keeper("--help").includes("keeper scan")) throw new Error("--help failed");
   if (!JSON.parse(keeper("schema")).exitCodes) throw new Error("schema is not JSON");
   if (typeof JSON.parse(keeper("status")).free !== "number") throw new Error("status is not JSON");

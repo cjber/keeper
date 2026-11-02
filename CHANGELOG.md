@@ -7,6 +7,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+- **The wizard groups long scans.** Findings are listed under their category with a count and size, a category with
+  many rows starts folded, `h`/`l` folds or expands it, `pgup`/`pgdn` pages through the list, and the header shows the
+  position. `space` on a category header selects the whole section.
+
 ## [0.1.0] - 2026-11-02
 
 First release.

@@ -21,6 +21,12 @@ const finding = (id: string, risk: Finding["risk"], blockers: string[] = []): Fi
   blockers,
 });
 
+const section = (id: string, category: Finding["category"], bytes = 1024 ** 3): Finding => ({
+  ...finding(id, "low"),
+  category,
+  bytes,
+});
+
 async function open(
   findings: Finding[],
   cached?: Finding[],
@@ -218,5 +224,70 @@ test("the history view explains itself before there are two readings", async () 
   });
   await settle();
   expect(captureCharFrame()).toContain("No readings yet.");
+  renderer.destroy();
+});
+
+test("groups findings by category and folds a long section", async () => {
+  const downloads = Array.from({ length: 25 }, (_, index) => section(`dl${index}`, "downloads"));
+  const { captureCharFrame, renderer } = await open([...downloads, section("keep", "aur")]);
+  const frame = captureCharFrame();
+  expect(frame).toContain("downloads");
+  expect(frame).toContain("▸");
+  expect(frame).toContain("aur");
+  expect(frame).toContain("▾");
+  // The short section shows its row, while the long one starts folded.
+  expect(frame).toContain("item keep");
+  expect(frame).not.toContain("item dl0");
+  renderer.destroy();
+});
+
+test("right expands a folded section and left folds it again", async () => {
+  const downloads = Array.from({ length: 25 }, (_, index) => section(`dl${index}`, "downloads"));
+  const { captureCharFrame, mockInput, settle, renderer } = await open(downloads);
+  expect(captureCharFrame()).not.toContain("item dl0");
+  await act(async () => {
+    await mockInput.pressKey("l");
+  });
+  await settle();
+  expect(captureCharFrame()).toContain("item dl0");
+  await act(async () => {
+    await mockInput.pressKey("h");
+  });
+  await settle();
+  expect(captureCharFrame()).not.toContain("item dl0");
+  renderer.destroy();
+});
+
+test("space on a section header selects the whole section", async () => {
+  const { captureCharFrame, mockInput, applied, settle, renderer } = await open([
+    section("one", "aur"),
+    section("two", "aur"),
+  ]);
+  // The cursor starts on the section header.
+  await act(async () => {
+    await mockInput.pressKey(" ");
+  });
+  await settle();
+  expect(captureCharFrame()).toContain("[x]");
+  await act(async () => {
+    await mockInput.pressEnter();
+  });
+  await settle();
+  expect(applied.mock.calls[0]?.[0].map((item) => item.id).sort()).toEqual(["one", "two"]);
+  renderer.destroy();
+});
+
+test("a long list shows its position and pagedown moves a page", async () => {
+  const many = [
+    ...Array.from({ length: 15 }, (_, index) => section(`a${index}`, "aur")),
+    ...Array.from({ length: 15 }, (_, index) => section(`d${index}`, "downloads")),
+  ];
+  const { captureCharFrame, mockInput, settle, renderer } = await open(many);
+  expect(captureCharFrame()).toMatch(/1-\d+\/\d+/);
+  await act(async () => {
+    await mockInput.pressKey("\x1b[6~");
+  });
+  await settle();
+  expect(captureCharFrame()).toMatch(/2-\d+\/\d+/);
   renderer.destroy();
 });

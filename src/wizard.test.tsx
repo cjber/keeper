@@ -30,7 +30,8 @@ async function open(findings: Finding[], cached?: Finding[], load: Promise<void>
   });
   const actions: Actions = {
     cached: () => (cached ? report(cached) : undefined),
-    load: async () => {
+    load: async (done) => {
+      done?.("aur", findings.length);
       await load;
       return report(findings);
     },
@@ -99,7 +100,8 @@ test("shows the cached scan while rescanning but acts only on the fresh one", as
     scanning,
   );
   expect(captureCharFrame()).toContain("item old");
-  expect(captureCharFrame()).toContain("Rescanning...");
+  expect(captureCharFrame()).toContain("until the new one finishes");
+  expect(captureCharFrame()).toContain("✓ aur 1");
   await act(async () => {
     await mockInput.pressKey("a");
     await mockInput.pressEnter();
@@ -110,6 +112,7 @@ test("shows the cached scan while rescanning but acts only on the fresh one", as
   await settle();
   expect(captureCharFrame()).toContain("item fresh");
   expect(captureCharFrame()).not.toContain("item old");
+  expect(captureCharFrame()).not.toContain("✓ aur");
   renderer.destroy();
 });
 

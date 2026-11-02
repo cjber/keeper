@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "screen-wizard-list",
+  "description": "Main wizard list of cleanup candidates with selection, risk, category and key line.",
+  "platform": "cli",
+  "requires": [],
+  "steps": [
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui start 100 30",
+      "at": "terminal||e3b0c44298fc"
+    }
+  ],
+  "screenId": "wizard-list",
+  "createdAt": "2026-11-02T10:27:50.119Z",
+  "updatedAt": "2026-11-02T10:27:50.119Z"
+}

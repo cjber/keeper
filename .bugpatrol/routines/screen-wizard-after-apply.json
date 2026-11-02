@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "id": "screen-wizard-after-apply",
+  "description": "Wizard list after Enter applies a selection, with a message naming the undo transaction.",
+  "platform": "cli",
+  "requires": [
+    "enter-app"
+  ],
+  "steps": [
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui show | cat -v | head -12",
+      "at": "terminal||e3b0c44298fc"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui keys j && .bugpatrol/sandbox/tui text | head -12",
+      "at": "terminal||e3b0c44298fc"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui keys space >/dev/null; .bugpatrol/sandbox/tui text | sed -n '1,4p;27,30p'",
+      "at": "terminal||e3b0c44298fc"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui keys a >/dev/null; .bugpatrol/sandbox/tui text | sed -n '1,9p;27,30p'",
+      "at": "terminal||e3b0c44298fc"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui keys b >/dev/null; .bugpatrol/sandbox/tui text",
+      "at": "terminal||e3b0c44298fc"
+    },
+    {
+      "kind": "run",
+      "command": "for i in 1 2 3 4 5 6 7 8; do .bugpatrol/sandbox/tui keys j >/dev/null; .bugpatrol/sandbox/tui text | sed -n '28p'; done; .bugpatrol/sandbox/tui show | sed -n '9,14p' | cat -v",
+      "at": "terminal||e3b0c44298fc"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui resize 80 24 >/dev/null; sleep 1; .bugpatrol/sandbox/tui text",
+      "at": "terminal||e3b0c44298fc"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui resize 60 20 >/dev/null; sleep 1; .bugpatrol/sandbox/tui text",
+      "at": "terminal||e3b0c44298fc"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui resize 100 30 >/dev/null; sleep 1; .bugpatrol/sandbox/tui keys t >/dev/null; .bugpatrol/sandbox/tui text | tail -6",
+      "at": "terminal||e3b0c44298fc"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui keys Enter >/dev/null; sleep 3; .bugpatrol/sandbox/tui text",
+      "at": "terminal||e3b0c44298fc"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui keys a >/dev/null; .bugpatrol/sandbox/tui text | sed -n '1,4p;28,30p'; .bugpatrol/sandbox/tui keys t >/dev/null; sleep 4; .bugpatrol/sandbox/tui text | sed -n '1,4p;28,30p'",
+      "at": "terminal||e3b0c44298fc"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui keys a >/dev/null; .bugpatrol/sandbox/tui keys Enter; sleep 4; .bugpatrol/sandbox/tui text",
+      "at": "terminal||e3b0c44298fc"
+    }
+  ],
+  "screenId": "wizard-after-apply",
+  "createdAt": "2026-11-02T10:29:05.733Z",
+  "updatedAt": "2026-11-02T10:29:05.733Z"
+}

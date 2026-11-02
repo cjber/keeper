@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "id": "repro-8f6cca78d7ce",
+  "description": "Reproduces: Wizard columns merge and clip, and the key line is cut off in narrow terminals",
+  "platform": "cli",
+  "requires": [
+    "enter-app"
+  ],
+  "steps": [
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui show | cat -v | head -12"
+    }
+  ],
+  "screenId": "wizard-list",
+  "bug": {
+    "shows": "235% cp"
+  },
+  "createdAt": "2026-11-02T10:32:15.727Z",
+  "updatedAt": "2026-11-02T10:32:15.727Z"
+}

@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "platform": "cli",
+  "screens": [
+    {
+      "name": "Wizard list",
+      "description": "Main wizard list of cleanup candidates with selection, risk, category and key line.",
+      "platform": "cli",
+      "firstSeenAt": "2026-11-02T10:27:50.119Z",
+      "id": "wizard-list",
+      "location": "terminal",
+      "screenKey": "terminal|",
+      "routineId": "screen-wizard-list",
+      "lastCapture": ".bugpatrol/runs/sessions/ses_20261102102738_3538/002-wizard-list.png",
+      "links": [
+        "wizard-after-apply"
+      ],
+      "visits": 1,
+      "lastSeenAt": "2026-11-02T10:29:05.734Z"
+    },
+    {
+      "name": "Agent CLI errors",
+      "description": "JSON error output and exit codes of keeper subcommands when piped.",
+      "platform": "cli",
+      "firstSeenAt": "2026-11-02T10:29:24.079Z",
+      "id": "cli-errors",
+      "location": "terminal",
+      "screenKey": "terminal|",
+      "routineId": "screen-cli-errors",
+      "lastCapture": ".bugpatrol/runs/sessions/ses_20261102102738_3538/020-cli-errors.png",
+      "links": [],
+      "visits": 1,
+      "lastSeenAt": "2026-11-02T10:29:24.079Z"
+    },
+    {
+      "name": "Wizard after apply",
+      "description": "Wizard list after Enter applies a selection, with a message naming the undo transaction.",
+      "platform": "cli",
+      "firstSeenAt": "2026-11-02T10:29:05.734Z",
+      "id": "wizard-after-apply",
+      "location": "terminal",
+      "screenKey": "terminal|",
+      "routineId": "screen-wizard-after-apply",
+      "lastCapture": ".bugpatrol/runs/sessions/ses_20261102102738_3538/015-wizard-after-apply.png",
+      "links": [
+        "cli-errors"
+      ],
+      "visits": 1,
+      "lastSeenAt": "2026-11-02T10:29:24.119Z",
+      "transitions": [
+        {
+          "to": "cli-errors",
+          "kind": "other",
+          "via": "run",
+          "steps": 4,
+          "count": 1,
+          "lastSeenAt": "2026-11-02T10:29:24.119Z"
+        }
+      ]
+    }
+  ],
+  "updatedAt": "2026-11-02T10:29:24.119Z"
+}

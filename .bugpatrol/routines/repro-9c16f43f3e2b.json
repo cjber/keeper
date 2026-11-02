@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "id": "repro-9c16f43f3e2b",
+  "description": "Reproduces: keeper hold and claim accept mistyped paths, leaving the real path unprotected",
+  "platform": "cli",
+  "requires": [
+    "screen-cli-errors"
+  ],
+  "steps": [
+    {
+      "kind": "run",
+      "command": "bash -c 'K=.bugpatrol/sandbox/keeper; $K plan --max-risk medium > /tmp/keeper-patrol/p.json; echo plan=$?; cat /tmp/keeper-patrol/p.json; ID=$(grep -o \"\\\"id\\\":\\\"[a-f0-9]*\\\"\" /tmp/keeper-patrol/p.json | head -1 | cut -d\\\" -f4); $K apply $ID; echo apply-noyes=$?; $K apply $ID --yes; echo apply=$?'"
+    },
+    {
+      "kind": "run",
+      "command": "bash -c '.bugpatrol/sandbox/keeper apply nosuchplan --yes 2>&1 | cat; echo exit=${PIPESTATUS[0]}'"
+    },
+    {
+      "kind": "run",
+      "command": "bash -c 'K=.bugpatrol/sandbox/keeper; $K undo 9c7076d7 | cat; echo undo=${PIPESTATUS[0]}; $K undo 9c7076d7 | cat; echo undo2=${PIPESTATUS[0]}; $K scan --json | head -c 600; echo; $K scan --json | python3 -I -c \"import json,sys; d=json.load(sys.stdin); print(type(d).__name__, list(d)[:5] if isinstance(d,dict) else len(d))\"'"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/setup.sh >/dev/null 2>&1; .bugpatrol/sandbox/tui start 100 30 | head -16"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui keys k >/dev/null; .bugpatrol/sandbox/tui show | sed -n '2,3p' | cat -v; .bugpatrol/sandbox/tui keys Escape | tail -3; .bugpatrol/sandbox/tui keys x | tail -3"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui text | tail -5; echo ---; .bugpatrol/sandbox/tui text | wc -l"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui text | cat -A | head -30 | cut -c1-110"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui stop; bash -c 'K=.bugpatrol/sandbox/keeper; for c in \"hold /tmp/keeper-patrol/home/.worktrees/old-experiment --reason testing\" \"hold /tmp/keeper-patrol/home/.worktrees/old-experiment --reason again\" \"claim /tmp/keeper-patrol/home/nosuch\" \"hold /nonexistent --reason x\" \"scan --category worktree\" \"plan 0000 --max-risk low\" \"purge\" \"timer install --cron\" \"--version\" \"auto\"; do echo \"== $c\"; $K $c 2>&1 | head -c 400; echo \" exit=${PIPESTATUS[0]}\"; done'"
+    }
+  ],
+  "screenId": "cli-errors",
+  "bug": {
+    "shows": "\"path\":\"/nonexistent\""
+  },
+  "createdAt": "2026-11-02T10:32:32.679Z",
+  "updatedAt": "2026-11-02T10:32:32.679Z"
+}

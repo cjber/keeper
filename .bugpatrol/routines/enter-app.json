@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "id": "enter-app",
+  "description": "Start the wizard at 100x30.",
+  "platform": "cli",
+  "requires": [
+    "screen-wizard-list"
+  ],
+  "steps": [],
+  "createdAt": "2026-11-02T10:27:50.766Z",
+  "updatedAt": "2026-11-02T10:27:50.766Z"
+}

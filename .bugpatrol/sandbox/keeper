@@ -1,0 +1,7 @@
+#!/bin/sh
+# keeper against the sandbox home, with stubbed system commands. The only way the patrol runs keeper.
+root=/tmp/keeper-patrol
+here=$(cd "$(dirname "$0")/../.." && pwd)
+export HOME=$root/home XDG_STATE_HOME=$root/home/.local/state XDG_CONFIG_HOME=$root/home/.config
+export PATH="$root/bin:$PATH"
+exec bun "$here/src/index.tsx" "$@"

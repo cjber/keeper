@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "id": "repro-530a9038245a",
+  "description": "Reproduces: Wizard explanation line shows fragments like \"whatever you are typing into\"",
+  "platform": "cli",
+  "requires": [
+    "enter-app"
+  ],
+  "steps": [
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui show | cat -v | head -12"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui keys j && .bugpatrol/sandbox/tui text | head -12"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui keys space >/dev/null; .bugpatrol/sandbox/tui text | sed -n '1,4p;27,30p'"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui keys a >/dev/null; .bugpatrol/sandbox/tui text | sed -n '1,9p;27,30p'"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui keys b >/dev/null; .bugpatrol/sandbox/tui text"
+    },
+    {
+      "kind": "run",
+      "command": "for i in 1 2 3 4 5 6 7 8; do .bugpatrol/sandbox/tui keys j >/dev/null; .bugpatrol/sandbox/tui text | sed -n '28p'; done; .bugpatrol/sandbox/tui show | sed -n '9,14p' | cat -v"
+    }
+  ],
+  "screenId": "wizard-list",
+  "bug": {
+    "shows": "whatever you are typing into"
+  },
+  "createdAt": "2026-11-02T10:32:24.478Z",
+  "updatedAt": "2026-11-02T10:32:24.478Z"
+}

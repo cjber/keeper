@@ -8,7 +8,28 @@ export interface Result {
   stderr: string;
 }
 
+/**
+ * Spawning blocks the calling thread for about a millisecond per child, and a scan starts thousands.
+ * Started all at once they freeze the wizard and flood a machine that is already loaded, so few run at a time.
+ */
+const maxChildren = 12;
+let children = 0;
+const waiting: (() => void)[] = [];
+
 export async function run(argv: string[], cwd?: string): Promise<Result> {
+  // A finishing child hands its slot straight to the next waiter, so the count never overshoots.
+  if (children >= maxChildren) await new Promise<void>((resolve) => waiting.push(resolve));
+  else children++;
+  try {
+    return await spawn(argv, cwd);
+  } finally {
+    const next = waiting.shift();
+    if (next) next();
+    else children--;
+  }
+}
+
+async function spawn(argv: string[], cwd?: string): Promise<Result> {
   try {
     const child = Bun.spawn(argv, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
     const [stdout, stderr, code] = await Promise.all([

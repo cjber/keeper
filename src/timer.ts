@@ -27,6 +27,13 @@ Environment=${quote(`PATH=${path}`)}
 ExecStart=${[...command, "auto"].map(quote).join(" ")}
 StandardOutput=append:${paths.state}/keeper.log
 StandardError=append:${paths.state}/keeper.log
+ExecStopPost=${[
+      "/bin/sh",
+      "-c",
+      '[ "$SERVICE_RESULT" = success ] || notify-send -u critical keeper "The nightly run failed. See keeper status"',
+    ]
+      .map(quote)
+      .join(" ")}
 `,
     [timer]: `[Unit]
 Description=Daily keeper run
@@ -69,6 +76,21 @@ export async function removeSchedule(paths: Paths): Promise<void> {
   await run(["systemctl", "--user", "daemon-reload"]);
   const current = (await run(["crontab", "-l"])).stdout;
   if (current.includes(cronMark)) await writeCrontab(current.split("\n").filter((entry) => !entry.endsWith(cronMark)));
+}
+
+/** How the last nightly run ended under systemd: success, exit-code, signal and so on. Undefined before any run. */
+export async function lastServiceResult(): Promise<string | undefined> {
+  const shown = await run([
+    "systemctl",
+    "--user",
+    "show",
+    service,
+    "--property=Result,ExecMainStartTimestampMonotonic",
+  ]);
+  const fields = Object.fromEntries(shown.stdout.split("\n").map((line) => line.split("=", 2)));
+  return fields.ExecMainStartTimestampMonotonic && fields.ExecMainStartTimestampMonotonic !== "0"
+    ? fields.Result
+    : undefined;
 }
 
 export async function scheduleStatus(): Promise<string> {

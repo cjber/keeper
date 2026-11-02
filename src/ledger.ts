@@ -102,3 +102,15 @@ export async function withLock<T>(paths: Paths, work: () => Promise<T>): Promise
     rmSync(lock, { force: true });
   }
 }
+
+/**
+ * Changes the ledger under the lock, so a hold cannot land between an apply's check and its move.
+ * Returns the ledger as it was before the change.
+ */
+export function updateLedger(paths: Paths, change: (ledger: Ledger) => Ledger): Promise<Ledger> {
+  return withLock(paths, async () => {
+    const before = readLedger(paths);
+    writeLedger(paths, change(before));
+    return before;
+  });
+}

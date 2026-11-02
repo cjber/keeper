@@ -13,9 +13,9 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { dangerous, runCli, schema } from "./cli";
+import { dangerous, health, runCli, schema } from "./cli";
 import { freshen } from "./freshen";
-import { BusyError, withLock, writeLedger } from "./ledger";
+import { BusyError, type Ledger, readLedger, updateLedger, withLock, writeLedger } from "./ledger";
 import { applyPlan, context, createPlan, loadConfig, purge, undo } from "./ops";
 import {
   type Context,
@@ -114,7 +114,7 @@ test("a commit only on this machine blocks the worktree", async () => {
   await git(path, "commit", "-qm", "local", "--allow-empty");
   age(path);
   const report = await scan(ctx, ["worktree"]);
-  expect(report.findings[0]?.blockers.join()).toContain("commits on no remote");
+  expect(report.findings[0]?.blockers.join()).toContain("on no remote");
 });
 
 test("build output is found in a dirty worktree only when ignored and stale", async () => {
@@ -194,6 +194,18 @@ test("a live lock makes a second mutation fail as busy, and a dead lock is taken
   writeFileSync(join(ctx.paths.state, "lock"), "999999999");
   expect(await withLock(ctx.paths, async () => 1)).toBe(1);
   expect(existsSync(join(ctx.paths.state, "lock"))).toBe(false);
+});
+
+test("a hold waits for the lock, so it cannot land in the middle of an apply", async () => {
+  mkdirSync(ctx.paths.state, { recursive: true });
+  writeFileSync(join(ctx.paths.state, "lock"), String(process.pid));
+  const hold = { path: home, until: "2099-01-01T00:00:00Z", reason: "r", actor: "a" };
+  const add = (ledger: Ledger) => ({ ...ledger, holds: [hold] });
+  await expect(updateLedger(ctx.paths, add)).rejects.toBeInstanceOf(BusyError);
+  expect(readLedger(ctx.paths).holds).toEqual([]);
+  rmSync(join(ctx.paths.state, "lock"));
+  await updateLedger(ctx.paths, add);
+  expect(readLedger(ctx.paths).holds).toEqual([hold]);
 });
 
 test("purge keeps young trash and removes old trash", async () => {
@@ -361,7 +373,7 @@ test("a squash-merged branch deleted from the remote is still proven by its PR",
   await git(path, "commit", "-qm", "work", "--allow-empty");
   const head = await git(path, "rev-parse", "HEAD");
   const unproven = await scan(ctx, ["worktree"]);
-  expect(unproven.findings[0]?.blockers.join()).toContain("commits on no remote");
+  expect(unproven.findings[0]?.blockers.join()).toContain("on no remote");
   const report = await scan({ ...ctx, pullRequests: pull("MERGED", head, "b-squashed") }, ["worktree"]);
   expect(report.findings[0]).toMatchObject({ risk: "low", blockers: [] });
 });
@@ -502,7 +514,7 @@ test("undo refuses to overwrite a path that exists again, then finishes once it 
 test("a theme sets only the colours it names, and a misspelt one is an error", () => {
   mkdirSync(join(home, ".config/keeper"), { recursive: true });
   writeFileSync(ctx.paths.config, '[theme]\ncursor = "#333333"\n');
-  expect(loadConfig(ctx.paths).theme).toMatchObject({ cursor: "#333333", accent: "" });
+  expect(loadConfig(ctx.paths).theme).toMatchObject({ cursor: "#333333", accent: "cyan", blocked: "" });
   writeFileSync(ctx.paths.config, '[theme]\ncursour = "#333333"\n');
   expect(() => loadConfig(ctx.paths)).toThrow("theme.cursour");
 });
@@ -611,4 +623,20 @@ test("docker: dangling images and build cache are prunable, unused volumes are o
   expect(findings[2]).toMatchObject({ title: "2 unused docker volumes", bytes: 3e9 });
   expect(findings[2]?.reason).toContain("app-wt1, app-wt2");
   expect(dockerFindings({ Images: null, Volumes: null }, 0)).toEqual([]);
+});
+
+test("health names each reason the nightly runs cannot be trusted, and nothing when they can", () => {
+  const now = Date.parse("2026-11-10T12:00:00Z");
+  const run = { at: "2026-11-10T00:30:00Z", summary: "ok" };
+  expect(health("systemd", run, "success", now)).toEqual([]);
+  expect(health("none", run, undefined, now)).toEqual(["no schedule, so nothing runs nightly"]);
+  expect(health("systemd", undefined, undefined, now)).toEqual(["no nightly run recorded yet"]);
+  expect(health("systemd", { ...run, at: "2026-11-08T00:30:00Z" }, "success", now)).toEqual([
+    "the last nightly run was 59 hours ago",
+  ]);
+  expect(health("systemd", { ...run, incomplete: true, warnings: ["docker: down"] }, "exit-code", now)).toEqual([
+    "the last nightly run ended in exit-code",
+    "the last nightly run could not apply or purge everything",
+    "the last nightly scan warned: docker: down",
+  ]);
 });

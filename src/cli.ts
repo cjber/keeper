@@ -2,11 +2,11 @@ import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import packageJson from "../package.json";
 import { freshen, primaryCheckouts } from "./freshen";
-import { actor, audit, BusyError, type Claim, type Hold, readAudit, readLedger, writeLedger } from "./ledger";
+import { actor, audit, BusyError, type Claim, type Hold, readAudit, readLedger, updateLedger } from "./ledger";
 import { applyPlan, context, createPlan, freeBytes, purge, readPlan, transactions, undo, withinRisk } from "./ops";
 import { defaultStaleDays, scan } from "./scanners";
 import { defaultPaths, run } from "./system";
-import { installCron, installSystemd, removeSchedule, scheduleStatus } from "./timer";
+import { installCron, installSystemd, lastServiceResult, removeSchedule, scheduleStatus } from "./timer";
 import { type Category, categories, eligible, type Finding, type Risk, risks, schemaVersion } from "./types";
 
 /** Each code past 2 tells the caller one thing to do next. */
@@ -59,7 +59,15 @@ interface Flags {
   reason?: string;
 }
 
-class UsageError extends Error {}
+/** A mistake in how keeper was called. `next` is the command that gets the caller unstuck. */
+class UsageError extends Error {
+  constructor(
+    message: string,
+    readonly next = "keeper --help",
+  ) {
+    super(message);
+  }
+}
 
 function parse(args: readonly string[]): Flags {
   const flags: Flags = {
@@ -93,7 +101,7 @@ function parse(args: readonly string[]): Flags {
     } else if (arg === "--stale-days") {
       flags.staleDays = Number(value());
       if (!Number.isFinite(flags.staleDays) || flags.staleDays < 0)
-        throw new UsageError("--stale-days must be a number");
+        throw new UsageError("--stale-days must be a number of days, 0 or more");
     } else if (arg === "--days") {
       flags.holdDays = Number(value());
       if (!Number.isFinite(flags.holdDays) || flags.holdDays <= 0) throw new UsageError("--days must be positive");
@@ -101,21 +109,26 @@ function parse(args: readonly string[]): Flags {
     else if (arg === "--older-days") {
       flags.olderDays = Number(value());
       if (!Number.isFinite(flags.olderDays) || flags.olderDays < 0)
-        throw new UsageError("--older-days must be a number");
+        throw new UsageError("--older-days must be a number of days, 0 or more");
     } else if (arg.startsWith("-")) throw new UsageError(`unknown option ${arg}`);
     else flags.positional.push(arg);
   }
   return flags;
 }
 
-export function gib(bytes: number): string {
-  return `${(bytes / 1024 ** 3).toFixed(1)}G`;
+/** Short size: 512K, 340M, 2.3G. */
+export function size(bytes: number): string {
+  const units = ["B", "K", "M", "G", "T"];
+  const power = Math.min(Math.max(Math.floor(Math.log(bytes) / Math.log(1024)), 0), units.length - 1);
+  const value = bytes / 1024 ** power;
+  return `${power >= 3 ? value.toFixed(1) : Math.round(value)}${units[power]}`;
 }
 
-/** Most findings free space, but a `load` finding frees none, so the size column shows what it does give back. */
+/** A `load` finding frees no space, so it shows the CPU it gives back. A prune frees an amount unknown until it runs. */
 export function measure(finding: Finding): string {
-  if (finding.bytes > 0) return gib(finding.bytes);
-  return finding.cpu === undefined ? gib(0) : `${Math.round(finding.cpu)}%`;
+  if (finding.bytes > 0) return size(finding.bytes);
+  if (finding.cpu !== undefined) return `${Math.round(finding.cpu)}% cpu`;
+  return "?";
 }
 
 /** Claims become deletable, so a slip here must not be able to take a home directory or a repo with it. */
@@ -130,7 +143,8 @@ export function schema() {
     categories,
     risks,
     version: packageJson.version,
-    finding: "id, category, risk, action, title, paths, packages, bytes, reason, blockers",
+    finding:
+      "id, category, risk, action, title, paths, packages, bytes, reason, blockers; worktrees add gitDir, branch and head; load findings add cpu and pids",
     bytes: "uncompressed size, so a compressing filesystem frees less. Only purge's freed field is measured",
     eligible: "blockers is empty and action is not report",
     environment: { KEEPER_ACTOR: "name recorded in holds, claims and the log" },
@@ -142,6 +156,29 @@ function line(finding: Finding): string {
   const state = finding.action === "report" ? "report" : finding.blockers.length ? "blocked" : "ready";
   const why = finding.blockers.length ? finding.blockers.join("; ") : finding.reason;
   return `${finding.id}  ${measure(finding).padStart(7)}  ${finding.risk.padEnd(6)} ${state.padEnd(7)} ${finding.title}\n    ${why}`;
+}
+
+interface AutoRun {
+  at: string;
+  summary: string;
+  incomplete?: boolean;
+  warnings?: string[];
+}
+
+/** A nightly run is due once a day, so a gap past this means the schedule stopped or the run crashed before logging. */
+const overdueHours = 36;
+
+/** What stops the nightly runs from being trusted. Empty means every check passed. */
+export function health(schedule: string, last: AutoRun | undefined, result: string | undefined, now: number): string[] {
+  if (schedule === "none") return ["no schedule, so nothing runs nightly"];
+  const problems: string[] = [];
+  if (result && result !== "success") problems.push(`the last nightly run ended in ${result}`);
+  if (!last) return [...problems, "no nightly run recorded yet"];
+  const hours = (now - Date.parse(last.at)) / 3_600_000;
+  if (hours > overdueHours) problems.push(`the last nightly run was ${Math.floor(hours)} hours ago`);
+  if (last.incomplete) problems.push("the last nightly run could not apply or purge everything");
+  if (last.warnings?.length) problems.push(`the last nightly scan warned: ${last.warnings.join("; ")}`);
+  return problems;
 }
 
 async function auto(flags: Flags): Promise<{ value: { summary: string } & Record<string, unknown>; code: number }> {
@@ -157,13 +194,15 @@ async function auto(flags: Flags): Promise<{ value: { summary: string } & Record
   const waiting = report.findings.filter((finding) => eligible(finding) && finding.risk !== "low");
   const free = await freeBytes(paths.home);
   const waitingBytes = waiting.reduce((sum, finding) => sum + finding.bytes, 0);
-  const summary = `Moved ${gib(outcome?.bytes ?? 0)} to trash, purge freed ${gib(purged.freed)}, ${gib(free)} free. ${gib(waitingBytes)} waits for approval. Sizes before purge are uncompressed.`;
+  const summary = `Moved ${size(outcome?.bytes ?? 0)} to trash, purge freed ${size(purged.freed)}, ${size(free)} free. ${size(waitingBytes)} waits for approval. Sizes before purge are uncompressed.`;
   const low = free < ctx.config.warnFreeGb * 1024 ** 3;
-  if (waitingBytes > 10 * 1024 ** 3 || low) {
-    await run(["notify-send", ...(low ? ["-u", "critical"] : []), "keeper", summary]);
+  const warnings = report.warnings;
+  if (waitingBytes > 10 * 1024 ** 3 || low || warnings.length) {
+    const said = warnings.length ? `${summary} Scan warnings: ${warnings.join("; ")}` : summary;
+    await run(["notify-send", ...(low || warnings.length ? ["-u", "critical"] : []), "keeper", said]);
   }
   const incomplete = (outcome?.failed.length ?? 0) > 0 || purged.failed.length > 0;
-  audit(paths, "auto", { summary, incomplete });
+  audit(paths, "auto", { summary, incomplete, warnings });
   return {
     value: {
       at: new Date().toISOString(),
@@ -173,7 +212,7 @@ async function auto(flags: Flags): Promise<{ value: { summary: string } & Record
       purged,
       waiting: waiting.length,
       freshened: freshened.filter((note) => note !== undefined),
-      warnings: report.warnings,
+      warnings,
     },
     code: incomplete ? exit.partial : exit.ok,
   };
@@ -191,7 +230,7 @@ async function dispatch(
       const total = report.findings.filter(eligible).reduce((sum, finding) => sum + finding.bytes, 0);
       return {
         value: { ...report, next: "keeper plan [ID...] [--max-risk medium]" },
-        text: `${report.findings.map(line).join("\n")}\n\n${gib(total)} eligible, uncompressed`,
+        text: `${report.findings.map(line).join("\n")}\n\n${size(total)} eligible, uncompressed`,
       };
     }
     case "plan": {
@@ -208,17 +247,18 @@ async function dispatch(
       const plan = createPlan(paths, chosen, flags.staleDays);
       return {
         value: { ...plan, next: `keeper apply ${plan.id} --yes` },
-        text: `plan ${plan.id}: ${chosen.length} items, ${gib(plan.bytes)}`,
+        text: `plan ${plan.id}: ${chosen.length} items, ${size(plan.bytes)}`,
       };
     }
     case "apply": {
       const [id] = rest;
       if (!id) throw new UsageError("usage: keeper apply PLAN --yes");
+      if (!existsSync(join(paths.state, "plans", `${id}.json`))) throw new UsageError(`no plan ${id}`, "keeper plan");
       const plan = readPlan(paths, id);
       if (!flags.yes) {
         return {
           value: { status: "needs_confirmation", plan },
-          text: `plan ${id} would process ${plan.findingIds.length} items, ${gib(plan.bytes)}. Re-run with --yes.`,
+          text: `plan ${id} would process ${plan.findingIds.length} items, ${size(plan.bytes)}. Re-run with --yes.`,
           code: exit.needsConfirmation,
         };
       }
@@ -227,7 +267,7 @@ async function dispatch(
       const next = outcome.transaction
         ? `keeper undo ${outcome.transaction} to restore, or keeper purge --older-days 0 to free the space`
         : "keeper scan";
-      const moved = outcome.bytes > 0 ? `, ${gib(outcome.bytes)} moved` : "";
+      const moved = outcome.bytes > 0 ? `, ${size(outcome.bytes)} moved` : "";
       const lowered = outcome.reniced > 0 ? `, ${outcome.reniced} processes deprioritised` : "";
       return {
         value: { ...outcome, next: partial ? "keeper scan" : next },
@@ -258,21 +298,24 @@ async function dispatch(
       const result = await purge(paths, flags.olderDays);
       return {
         value: result,
-        text: `purged ${result.purged.length} transactions: ${gib(result.freed)} freed on disk, ${gib(result.bytes)} uncompressed`,
+        text: `purged ${result.purged.length} transactions: ${size(result.freed)} freed on disk, ${size(result.bytes)} uncompressed`,
       };
     }
     case "hold": {
       const [target] = rest;
       if (!target || !flags.reason) throw new UsageError("usage: keeper hold PATH --reason R [--days N]");
       const path = resolve(target);
-      const ledger = readLedger(paths);
+      if (!existsSync(path)) throw new UsageError(`${path} does not exist`);
       const hold: Hold = {
         path,
         until: new Date(Date.now() + flags.holdDays * 86_400_000).toISOString(),
         reason: flags.reason,
         actor: actor(),
       };
-      writeLedger(paths, { ...ledger, holds: [...ledger.holds.filter((item) => item.path !== path), hold] });
+      await updateLedger(paths, (ledger) => ({
+        ...ledger,
+        holds: [...ledger.holds.filter((item) => item.path !== path), hold],
+      }));
       audit(paths, "hold", hold);
       return { value: hold, text: `held ${path} until ${hold.until}` };
     }
@@ -280,10 +323,13 @@ async function dispatch(
       const [target] = rest;
       if (!target) throw new UsageError("usage: keeper claim PATH");
       const path = resolve(target);
+      if (!existsSync(path)) throw new UsageError(`${path} does not exist`);
       if (dangerous(path, paths.home)) throw new UsageError(`${path} is too broad to claim`);
-      const ledger = readLedger(paths);
       const claim: Claim = { path, actor: actor(), at: new Date().toISOString() };
-      writeLedger(paths, { ...ledger, claims: [...ledger.claims.filter((item) => item.path !== path), claim] });
+      await updateLedger(paths, (ledger) => ({
+        ...ledger,
+        claims: [...ledger.claims.filter((item) => item.path !== path), claim],
+      }));
       audit(paths, "claim", claim);
       return { value: claim, text: `claimed ${path}` };
     }
@@ -291,13 +337,17 @@ async function dispatch(
       const [target] = rest;
       if (!target) throw new UsageError("usage: keeper release PATH");
       const path = resolve(target);
-      const ledger = readLedger(paths);
-      writeLedger(paths, {
+      // Idempotent, so an agent can retry it; `released` says whether there was anything to drop.
+      const before = await updateLedger(paths, (ledger) => ({
         holds: ledger.holds.filter((item) => item.path !== path),
         claims: ledger.claims.filter((item) => item.path !== path),
-      });
+      }));
+      const released = [...before.holds, ...before.claims].some((item) => item.path === path);
       audit(paths, "release", { path });
-      return { value: { released: path }, text: `released ${path}` };
+      return {
+        value: { path, released },
+        text: released ? `released ${path}` : `${path} had no hold or claim, so nothing changed`,
+      };
     }
     case "log": {
       const entries = readAudit(paths, 50);
@@ -308,25 +358,30 @@ async function dispatch(
     case "status": {
       const trash = transactions(paths);
       const lastRun = readAudit(paths, 500)
-        .filter((entry): entry is { at: string; summary: string } => (entry as { event?: string }).event === "auto")
+        .filter((entry): entry is AutoRun => (entry as { event?: string }).event === "auto")
         .at(-1);
       const holds = readLedger(paths).holds.filter((hold) => Date.parse(hold.until) > Date.now());
       const schedule = await scheduleStatus();
+      const result = schedule === "systemd" ? await lastServiceResult() : undefined;
+      const problems = health(schedule, lastRun, result, Date.now());
       const value = {
         version: packageJson.version,
         free: await freeBytes(paths.home),
         schedule,
+        healthy: problems.length === 0,
+        problems,
         lastRun,
         holds,
         trash: trash.map((tx) => ({ id: tx.id, appliedAt: tx.appliedAt, paths: tx.entries.length })),
         missingTools: optionalTools.filter((tool) => !Bun.which(tool)),
-        next: schedule === "none" ? "keeper timer install" : "keeper scan",
+        next: schedule === "none" ? "keeper timer install" : problems.length ? "keeper log" : "keeper scan",
       };
       const last = lastRun ? `\nlast run ${lastRun.at}: ${lastRun.summary}` : "";
+      const verdict = problems.length ? `\nunhealthy: ${problems.join("; ")}` : "\nhealthy";
       const missing = value.missingTools.length ? `\nmissing: ${value.missingTools.join(", ")}` : "";
       return {
         value,
-        text: `${gib(value.free)} free, schedule ${schedule}, ${trash.length} transactions in trash, ${holds.length} holds${last}${missing}\nnext: ${value.next}`,
+        text: `${size(value.free)} free, schedule ${schedule}, ${trash.length} transactions in trash, ${holds.length} holds${last}${verdict}${missing}\nnext: ${value.next}`,
       };
     }
     case "auto": {
@@ -356,11 +411,11 @@ export async function runCli(args: readonly string[]): Promise<number | undefine
     console.log(help);
     return exit.ok;
   }
+  let json = !process.stdout.isTTY || args.includes("--json");
   if (args.includes("--version")) {
-    console.log(`keeper ${packageJson.version}`);
+    console.log(json ? JSON.stringify({ version: packageJson.version }) : `keeper ${packageJson.version}`);
     return exit.ok;
   }
-  let json = !process.stdout.isTTY || args.includes("--json");
   try {
     const flags = parse(args);
     json ||= flags.json;
@@ -376,10 +431,11 @@ export async function runCli(args: readonly string[]): Promise<number | undefine
     const usage = error instanceof UsageError;
     const busy = error instanceof BusyError;
     const message = error instanceof Error ? error.message : String(error);
+    const next = usage ? error.next : busy ? "retry once the other keeper run finishes" : "keeper status";
     console.error(
       json
-        ? JSON.stringify({ error: { code: usage ? "usage" : busy ? "busy" : "error", message } })
-        : `keeper: ${message}`,
+        ? JSON.stringify({ error: { code: usage ? "usage" : busy ? "busy" : "error", message, next } })
+        : `keeper: ${message}\nnext: ${next}`,
     );
     return usage ? exit.usage : busy ? exit.busy : exit.error;
   }

@@ -86,10 +86,12 @@ const keys = (view: View, showBlocked: boolean) =>
   view === "list"
     ? [
         "j/k move",
+        "pgup/pgdn page",
         "space select",
         "a all low risk",
         "enter apply",
         `b ${showBlocked ? "hide" : "show"} blocked`,
+        "h/l fold",
         "g space by category",
         "r rescan",
         "t schedule",
@@ -136,6 +138,8 @@ function legend(events: readonly (Event & { event: keyof typeof marks })[], room
 
 /** Space under this folds into one line, so the bars show where the disk actually went. */
 const smallBar = 100 * 1024 ** 2;
+/** A category with more rows than this starts folded, so a long scan opens as a short list of sections. */
+const groupFoldAt = 20;
 const labelWidth = 7;
 
 /** Holds selection only. Every safety rule stays in the scan and apply calls an agent would make. */
@@ -153,6 +157,7 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
   const [cursor, setCursor] = useState(0);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [showBlocked, setShowBlocked] = useState(false);
+  const [folded, setFolded] = useState<Map<Category, boolean>>(new Map());
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(true);
   const [progress, setProgress] = useState<Progress | undefined>();
@@ -192,28 +197,91 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
   const blocked = all.length - open.length;
   const rows = showBlocked ? [...open, ...all.filter((f) => !eligible(f))] : open;
   const chosen = rows.filter((finding) => selected.has(finding.id));
-  const at = Math.min(cursor, Math.max(rows.length - 1, 0));
+
+  // Findings gathered under their category, largest section first, so a long scan reads as a few sections rather than
+  // one wall of rows. A category with more rows than groupFoldAt starts folded; the rest start open, and h/l folds any.
+  const sections = (() => {
+    const byCategory = new Map<Category, Finding[]>();
+    for (const finding of rows) {
+      const items = byCategory.get(finding.category);
+      if (items) items.push(finding);
+      else byCategory.set(finding.category, [finding]);
+    }
+    return [...byCategory]
+      .map(([category, items]) => ({
+        category,
+        items,
+        bytes: items.reduce((sum, finding) => sum + finding.bytes, 0),
+        folded: folded.get(category) ?? items.length > groupFoldAt,
+      }))
+      .sort((a, b) => b.bytes - a.bytes);
+  })();
+  type Line = { kind: "group"; group: (typeof sections)[number] } | { kind: "finding"; finding: Finding };
+  const lines: Line[] = sections.flatMap((group) => [
+    { kind: "group", group } as const,
+    ...(group.folded ? [] : group.items.map((finding): Line => ({ kind: "finding", finding }))),
+  ]);
+  const at = Math.min(cursor, Math.max(lines.length - 1, 0));
 
   // Every view gets the same panel, so switching never moves the lines around it. The explanation keeps two lines
   // because blockers with their next step often wrap.
   // The list's key line is the longest, so every view reserves its height.
   const keyLines = Math.ceil(keys("list", showBlocked).join(" · ").length / Math.max(width - 2, 1));
   const panel = Math.max(3, height - 1 - 2 - 1 - (report?.warnings.length ? 1 : 0) - keyLines);
+  const pageSize = Math.max(1, panel - (report && !lines.length ? 1 : 0));
+
+  const setFold = (category: Category, value: boolean) => {
+    setFolded((now) => new Map(now).set(category, value));
+    // The header keeps its place when only the rows after it change, so this stays correct after the fold.
+    const header = lines.findIndex((line) => line.kind === "group" && line.group.category === category);
+    if (header >= 0) setCursor(header);
+  };
+  const selectGroup = (group: (typeof sections)[number]) => {
+    const ids = group.items.filter(eligible).map((finding) => finding.id);
+    if (!ids.length) {
+      const stopped = group.items.find((finding) => !eligible(finding));
+      setMessage(
+        stopped
+          ? `Blocked: ${stopped.blockers.join("; ") || "report only, nothing to apply"}`
+          : "Nothing in this category can be applied",
+      );
+      return;
+    }
+    const next = new Set(selected);
+    if (ids.every((id) => next.has(id))) for (const id of ids) next.delete(id);
+    else for (const id of ids) next.add(id);
+    setSelected(next);
+  };
 
   useKeyboard((key) => {
     if (key.name === "q" || key.name === "escape") renderer.destroy();
     if (key.name === "g") setView((now) => views[(views.indexOf(now) + 1) % views.length] as View);
     if (key.name === "r" && !busy) perform(Promise.resolve("Rescanned everything"), false);
     if (view !== "list") return;
-    const current = rows[at];
-    if (key.name === "down" || key.name === "j") setCursor(Math.min(at + 1, rows.length - 1));
+    const here = lines[at];
+    if (key.name === "down" || key.name === "j") setCursor(Math.min(at + 1, Math.max(lines.length - 1, 0)));
     if (key.name === "up" || key.name === "k") setCursor(Math.max(at - 1, 0));
+    if (key.name === "pagedown" || (key.ctrl && key.name === "d"))
+      setCursor(Math.min(at + pageSize, Math.max(lines.length - 1, 0)));
+    if (key.name === "pageup" || (key.ctrl && key.name === "u")) setCursor(Math.max(at - pageSize, 0));
+    if (key.name === "home") setCursor(0);
+    if (key.name === "end") setCursor(Math.max(lines.length - 1, 0));
     if (key.name === "b") {
       setShowBlocked(!showBlocked);
       setCursor(0);
     }
+    if (here?.kind === "group") {
+      if (key.name === "left" || key.name === "h") return setFold(here.group.category, true);
+      if (key.name === "right" || key.name === "l") return setFold(here.group.category, false);
+    }
+    if (here?.kind === "finding") {
+      if (key.name === "left" || key.name === "h") return setFold(here.finding.category, true);
+      if (key.name === "right" || key.name === "l") return setFold(here.finding.category, false);
+    }
     if (busy) return;
-    if (key.name === "space" && current) {
+    if (key.name === "space" && here) {
+      if (here.kind === "group") return selectGroup(here.group);
+      const current = here.finding;
       if (!eligible(current)) {
         setMessage(`Blocked: ${current.blockers.join("; ") || "report only, nothing to apply"}`);
         return;
@@ -241,9 +309,8 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
     if (key.name === "t") perform(actions.schedule());
   });
 
-  const pageSize = panel - (report && !rows.length ? 1 : 0);
-  const start = Math.max(0, Math.min(at - pageSize + 1, rows.length - pageSize));
-  const active = rows[at];
+  const start = Math.max(0, Math.min(at - pageSize + 1, lines.length - pageSize));
+  const active = lines[at];
   const total = outermost(chosen).reduce((sum, finding) => sum + finding.bytes, 0);
   const groups = chosen.filter((finding) => finding.action === "renice").length;
   const picked = [
@@ -283,7 +350,9 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
   const explanation =
     view === "list"
       ? active
-        ? active.blockers.join("; ") || active.reason
+        ? active.kind === "group"
+          ? `${count(active.group.items.length, "finding")}, ${size(active.group.bytes)}. ${active.group.folded ? "right/l expands" : "left/h folds"}, space selects all in the group`
+          : active.finding.blockers.join("; ") || active.finding.reason
         : ""
       : view === "space"
         ? "█ ready to clean now · ░ waiting on a blocker · b in the list shows each reason"
@@ -297,8 +366,35 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
           {blocked ? `Nothing is eligible. Press b to see ${count(blocked, "blocked finding")}.` : "Nothing to clean."}
         </text>
       ) : null}
-      {rows.slice(start, start + pageSize).map((finding, index) => {
+      {lines.slice(start, start + pageSize).map((line, index) => {
         const isCursor = index + start === at;
+        if (line.kind === "group") {
+          const group = line.group;
+          const eligibleItems = group.items.filter(eligible);
+          const selectedItems = eligibleItems.filter((finding) => selected.has(finding.id)).length;
+          const mark = eligibleItems.length && selectedItems === eligibleItems.length ? "[x]" : "[ ]";
+          const rowColor = isCursor ? color(theme.cursorText) : color(theme.accent);
+          const attributes =
+            (isCursor && !theme.cursor ? TextAttributes.INVERSE : 0) | (isCursor ? 0 : TextAttributes.BOLD);
+          return (
+            <box
+              key={`group-${group.category}`}
+              flexDirection="row"
+              backgroundColor={isCursor && theme.cursor ? theme.cursor : undefined}
+            >
+              <text wrapMode="none" fg={rowColor} attributes={attributes} flexShrink={0}>
+                {mark} {group.folded ? "▸" : "▾"} {group.category.padEnd(14)}
+              </text>
+              <text wrapMode="none" fg={isCursor ? rowColor : terminal} attributes={attributes} flexShrink={0}>
+                {count(group.items.length, "item").padStart(9)}
+              </text>
+              <text wrapMode="none" fg={isCursor ? rowColor : color(theme.size)} attributes={attributes} flexShrink={0}>
+                {size(group.bytes).padStart(8)}
+              </text>
+            </box>
+          );
+        }
+        const finding = line.finding;
         const ok = eligible(finding);
         const isSelected = selected.has(finding.id);
         const mark = !ok ? " - " : isSelected ? "[x]" : "[ ]";
@@ -480,7 +576,7 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
       <text wrapMode="none" fg={color(theme.accent)} attributes={TextAttributes.BOLD}>
         {clip(
           view === "list"
-            ? `keeper · ${open.length} eligible, ${blocked} blocked · ${chosen.length ? picked : "nothing selected"}`
+            ? `keeper · ${open.length} eligible, ${blocked} blocked · ${lines.length > pageSize ? `${start + 1}-${Math.min(start + pageSize, lines.length)}/${lines.length} · ` : ""}${chosen.length ? picked : "nothing selected"}`
             : view === "space"
               ? `keeper · space · ${size(sum(bars, "ready"))} ready now, ${size(sum(bars, "blocked"))} waiting`
               : `keeper · free space${headline()}`,

@@ -28,7 +28,7 @@ import {
 } from "./scanners";
 import { defaultPaths, holders, niceness, run } from "./system";
 import { units } from "./timer";
-import { eligible } from "./types";
+import { eligible, type Finding } from "./types";
 
 let home: string;
 let ctx: Context;
@@ -104,7 +104,7 @@ test("a pushed, clean, idle worktree is the only eligible one", async () => {
   const report = await scan({ ...ctx, live: [join(live, "src")] }, ["worktree"]);
   const by = (path: string) => report.findings.find((finding) => finding.paths[0] === path);
   expect(by(clean)?.blockers).toEqual([]);
-  expect(by(dirty)?.blockers.join()).toContain("uncommitted");
+  expect(by(dirty)?.blockers).toContain("1 uncommitted or untracked file");
   expect(by(live)?.blockers.join()).toContain("running process");
   expect(by(recent)?.blockers.join()).toContain("touched");
 });
@@ -114,7 +114,7 @@ test("a commit only on this machine blocks the worktree", async () => {
   await git(path, "commit", "-qm", "local", "--allow-empty");
   age(path);
   const report = await scan(ctx, ["worktree"]);
-  expect(report.findings[0]?.blockers.join()).toContain("on no remote");
+  expect(report.findings[0]?.blockers).toContain("1 commit on no remote");
 });
 
 test("build output is found in a dirty worktree only when ignored and stale", async () => {
@@ -639,4 +639,25 @@ test("health names each reason the nightly runs cannot be trusted, and nothing w
     "the last nightly run could not apply or purge everything",
     "the last nightly scan warned: docker: down",
   ]);
+});
+
+test("a plan counts a worktree's own build output once, inside the worktree", () => {
+  const finding = (id: string, path: string, bytes: number): Finding => ({
+    id,
+    category: id === "tree" ? "worktree" : "build",
+    title: id,
+    paths: [path],
+    packages: [],
+    bytes,
+    risk: "low",
+    action: "trash",
+    reason: "",
+    blockers: [],
+  });
+  const tree = finding("tree", "/w/feature", 4);
+  const output = finding("output", "/w/feature/node_modules", 3);
+  const sibling = finding("sibling", "/w/feature-two", 1);
+  const plan = createPlan(ctx.paths, [output, tree, sibling], 7);
+  expect(plan.findingIds).toEqual(["tree", "sibling"]);
+  expect(plan.bytes).toBe(5);
 });

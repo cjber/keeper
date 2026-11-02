@@ -107,3 +107,22 @@ export interface Reniced {
 export function eligible(finding: Finding): boolean {
   return finding.action !== "report" && finding.blockers.length === 0;
 }
+
+/** "1 file", "2 files": a count with its noun in the right number. */
+export function count(n: number, noun: string, plural = `${noun}s`): string {
+  return `${n} ${n === 1 ? noun : plural}`;
+}
+
+/**
+ * Drops findings whose every path sits inside another trashed finding, such as a worktree's own build output when
+ * the worktree is chosen too. Moving the parent takes them, so counting both would report the space twice.
+ */
+export function outermost(findings: readonly Finding[]): Finding[] {
+  const roots = findings
+    .filter((f) => f.action === "trash")
+    .flatMap((f) => f.paths.map((path) => ({ path, id: f.id })));
+  const inside = (f: Finding) =>
+    f.action === "trash" &&
+    f.paths.every((path) => roots.some((root) => root.id !== f.id && path.startsWith(`${root.path}/`)));
+  return findings.filter((f) => !inside(f));
+}

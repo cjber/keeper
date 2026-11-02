@@ -32,6 +32,5 @@ Maintainers run `bun scripts/release.ts patch|minor|major` on a branch, merge it
 on the merged commit and push the tag. The tag publishes the binaries, the GitHub release, the npm packages and both AUR
 packages.
 
-npm publishes through trusted publishing, which can only be configured on a package that exists. Before the first tag,
-run `bun run npm:first-publish` while logged in to npm, then add this repository's `release.yml` as the trusted
-publisher in each of the three packages' settings. The tag then skips the versions already on npm.
+npm publishes through trusted publishing: each of the three packages lists this repository's `release.yml` as its
+trusted publisher, so the release needs no npm token.

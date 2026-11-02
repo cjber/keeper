@@ -26,7 +26,12 @@ let binary;
 try {
   binary = require.resolve(name + "/bin/keeper");
 } catch {
-  console.error("keeper: no binary for linux " + process.arch + ". Supported: ${arches.join(", ")}.");
+  const supported = ${JSON.stringify(arches)}.includes(process.arch);
+  console.error(
+    supported
+      ? "keeper: " + name + " is missing. Reinstall @cillianb/keeper with optional dependencies enabled."
+      : "keeper: no binary for linux " + process.arch + ". Supported: ${arches.join(", ")}.",
+  );
   process.exit(1);
 }
 const result = spawnSync(binary, process.argv.slice(2), { stdio: "inherit" });

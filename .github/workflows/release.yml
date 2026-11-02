@@ -56,7 +56,7 @@ jobs:
           gh release create "$GITHUB_REF_NAME" dist/keeper-linux-x64 dist/keeper-linux-arm64 --verify-tag --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"
 
       # Trusted publishing: npm checks this workflow's OIDC identity, so there is no token. A version already on npm is
-      # skipped, which lets the first one be published by hand before trust can be configured on the packages.
+      # skipped, so a rerun after a later step failed does not fail here.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24 # ships npm 11, which trusted publishing needs

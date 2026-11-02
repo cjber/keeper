@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { lstat, readdir } from "node:fs/promises";
 import { availableParallelism, loadavg } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { readLedger } from "./ledger";
 import { ageDays, expandHome, holders, type Paths, run, sizes } from "./system";
-import { type Category, type Finding, type Scan, schemaVersion } from "./types";
+import { type Category, categories, type Finding, type Scan, schemaVersion } from "./types";
 
 export const defaultStaleDays = 7;
 const staleBuildDays = 3;
@@ -85,16 +86,35 @@ export interface Config {
   theme: Theme;
 }
 
-/** Colours as `#rrggbb` or a name the terminal knows, such as `cyan`. */
+/**
+ * Colours as `#rrggbb`, or a palette name such as `cyan` or `brightred`, which the terminal's own theme decides.
+ * Empty is the terminal's foreground: reverse video for the cursor, dim text for blocked rows.
+ */
 export interface Theme {
   cursor: string;
   cursorText: string;
   selected: string;
   blocked: string;
   accent: string;
+  size: string;
+  category: string;
+  low: string;
+  medium: string;
+  high: string;
 }
 
-export const defaultTheme: Theme = { cursor: "", cursorText: "", selected: "", blocked: "", accent: "" };
+export const defaultTheme: Theme = {
+  cursor: "",
+  cursorText: "",
+  selected: "green",
+  blocked: "",
+  accent: "cyan",
+  size: "",
+  category: "blue",
+  low: "green",
+  medium: "yellow",
+  high: "red",
+};
 
 export const defaultConfig: Config = {
   agentRoots: [],
@@ -229,28 +249,35 @@ async function inspectWorktree(
   lookup: PullRequestLookup,
 ): Promise<Finding> {
   const git = (...args: string[]) => run(["git", "--no-optional-locks", "-C", path, ...args]);
-  const valid = (await git("rev-parse", "--git-common-dir")).code === 0;
   const blockers: string[] = [];
-  const [status, ahead, head, branch, commonDir, gitDir, defaultBranch] = await Promise.all([
+  const [names, status, ahead, defaultBranch] = await Promise.all([
+    git(
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-common-dir",
+      "--absolute-git-dir",
+      "HEAD",
+      "--abbrev-ref",
+      "HEAD",
+    ),
     git("status", "--porcelain"),
     git("rev-list", "--count", "HEAD", "--not", "--remotes"),
-    git("rev-parse", "HEAD"),
-    git("rev-parse", "--abbrev-ref", "HEAD"),
-    git("rev-parse", "--path-format=absolute", "--git-common-dir"),
-    git("rev-parse", "--absolute-git-dir"),
     git("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"),
   ]);
+  // One rev-parse prints a line per query. Any failure, an unborn HEAD included, leaves the work unprovable.
+  const valid = names.code === 0;
+  const [commonDir = "", gitDir = "", head = "", branch = ""] = valid ? names.stdout.split("\n") : [];
   if (!valid) blockers.push("not a valid checkout, so its work cannot be checked");
   if (status.stdout) blockers.push(`${status.stdout.split("\n").length} uncommitted or untracked files`);
   if (holders(path, context.live)) blockers.push("in use by a running process");
-  const operation = unfinishedOperations.find((name) => gitDir.stdout && existsSync(join(gitDir.stdout, name)));
+  const operation = unfinishedOperations.find((name) => gitDir && existsSync(join(gitDir, name)));
   if (operation) blockers.push(`${operation} is in progress`);
-  const pullRequests = valid && commonDir.stdout ? await lookup(commonDir.stdout, path) : [];
-  const open = pullRequests.find((pr) => pr.state === "OPEN" && pr.headRefName === branch.stdout);
+  const pullRequests = valid && commonDir ? await lookup(commonDir, path) : [];
+  const open = pullRequests.find((pr) => pr.state === "OPEN" && pr.headRefName === branch);
   if (open) blockers.push(`PR #${open.number} is open`);
   // The commit must match too: a branch name gets reused, and a branch can gain commits after its PR merged.
   const merged = pullRequests.find(
-    (pr) => pr.state === "MERGED" && pr.headRefName === branch.stdout && pr.headRefOid === head.stdout,
+    (pr) => pr.state === "MERGED" && pr.headRefName === branch && pr.headRefOid === head,
   );
   // A merged branch is usually deleted from the remote, and the pull request is what still holds this commit.
   if (!merged && (ahead.code !== 0 || ahead.stdout !== "0")) {
@@ -259,19 +286,22 @@ async function inspectWorktree(
   const mainline = defaultBranch.stdout.replace(/^origin\//, "");
   const contained =
     Boolean(defaultBranch.stdout) &&
-    branch.stdout !== mainline &&
+    branch !== mainline &&
     (await git("merge-base", "--is-ancestor", "HEAD", defaultBranch.stdout)).code === 0;
   const proof = merged ? `Merged in PR #${merged.number}` : contained ? "Every commit is on the default branch" : "";
-  const gitIndex = commonDir.stdout ? entries(join(commonDir.stdout, "worktrees")) : [];
-  const touched = Math.min(ageDays(path, context.now), ...gitIndex.filter(sameWorktree(path)).map(headAge(context)));
+  // Commits and checkouts move logs/HEAD. The index will not do: any `git status` rewrites it.
+  const touched = Math.min(
+    ageDays(path, context.now),
+    gitDir ? headAge(gitDir, context.now) : Number.POSITIVE_INFINITY,
+  );
   // Only a merge outruns the age window. A branch just cut from main is also contained in it, and is about to be used.
   if (!merged && touched < context.staleDays) blockers.push(`touched ${Math.floor(touched)} days ago`);
   return {
-    id: findingId("worktree", path, `${head.stdout}\0${status.stdout}\0${proof}\0${open?.number ?? ""}`),
+    id: findingId("worktree", path, `${head}\0${status.stdout}\0${proof}\0${open?.number ?? ""}`),
     category: "worktree",
     risk: proof ? "low" : "medium",
     action: "trash",
-    title: `${relativeToRoot(path, context.paths.worktrees)} (${branch.stdout || "unknown branch"})`,
+    title: `${relativeToRoot(path, context.paths.worktrees)} (${branch || "unknown branch"})`,
     paths: [path],
     packages: [],
     bytes,
@@ -279,9 +309,9 @@ async function inspectWorktree(
       ? `${proof}, and nothing is uncommitted`
       : "Worktree with every commit on a remote and nothing uncommitted",
     blockers,
-    gitDir: commonDir.stdout || undefined,
-    branch: branch.stdout && branch.stdout !== "HEAD" ? branch.stdout : undefined,
-    head: head.stdout || undefined,
+    gitDir: commonDir || undefined,
+    branch: branch && branch !== "HEAD" ? branch : undefined,
+    head: head || undefined,
   };
 }
 
@@ -290,25 +320,12 @@ function relativeToRoot(path: string, roots: readonly string[]): string {
   return root ? path.slice(root.length + 1) : path;
 }
 
-/** Commits and checkouts move logs/HEAD. The index will not do: any `git status` rewrites it. */
-function sameWorktree(path: string): (admin: string) => boolean {
-  return (admin) => {
-    try {
-      return readFileSync(join(admin, "gitdir"), "utf8").trim() === join(path, ".git");
-    } catch {
-      return false;
-    }
-  };
-}
-
-function headAge(context: Context): (admin: string) => number {
-  return (admin) => {
-    try {
-      return ageDays(join(admin, "logs/HEAD"), context.now);
-    } catch {
-      return Number.POSITIVE_INFINITY;
-    }
-  };
+function headAge(gitDir: string, now: number): number {
+  try {
+    return ageDays(join(gitDir, "logs/HEAD"), now);
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
 }
 
 async function scanWorktrees(context: Context): Promise<Finding[]> {
@@ -342,7 +359,7 @@ function leftoverDirs(root: string): string[] {
 async function inspectLeftover(path: string, context: Context, bytes: number): Promise<Finding> {
   // Branch names with a slash nest worktrees a level deeper, so this one may be a parent of live checkouts.
   const nested = await run(["find", path, "-maxdepth", "3", "-name", ".git", "-print", "-quit"]);
-  const age = newestAge(path, context.now);
+  const age = await newestAge(path, context.now);
   const blockers: string[] = [];
   if (nested.stdout) blockers.push("contains a checkout");
   if (holders(path, context.live)) blockers.push("in use by a running process");
@@ -478,26 +495,32 @@ async function scanAgent(context: Context): Promise<Finding[]> {
   return found(await Promise.all(roots.map((path) => unlessGone(path, () => inspect(path)))));
 }
 
-/** Newest of a directory and its direct entries: a build or install touches those even when the top is unchanged. */
-function newestAge(path: string, now: number): number {
-  return Math.min(ageDays(path, now), ...entries(path).map((entry) => lstatAge(entry, now)));
-}
-
-function lstatAge(path: string, now: number): number {
-  try {
-    return (now - lstatSync(path).mtimeMs) / 86_400_000;
-  } catch {
-    return Number.POSITIVE_INFINITY;
-  }
+/** Newest of a directory and its direct entries, read async so a directory of thousands never stalls the wizard. */
+async function newestAge(path: string, now: number): Promise<number> {
+  const top = ageDays(path, now);
+  const names = await readdir(path).catch(() => []);
+  const ages = await Promise.all(
+    names.map((name) =>
+      lstat(join(path, name)).then(
+        (stat) => (now - stat.mtimeMs) / 86_400_000,
+        () => Number.POSITIVE_INFINITY,
+      ),
+    ),
+  );
+  return ages.reduce((min, age) => Math.min(min, age), top);
 }
 
 /**
  * A build rewrites files deep inside its output without touching anything near the top, so the top cannot show it idle.
- * Installers keep the mtimes in their tarballs, so a fresh install needs `newestAge` as well.
+ * Installers keep the mtimes in their tarballs, so the top level is checked as well, where a fresh install shows.
+ * The walk runs in `find` rather than here: statting a node_modules in process stalls the wizard for seconds.
+ * A failed walk, a vanished path included, counts as recent, so it is never offered.
  */
 async function hasRecentFile(path: string, days: number): Promise<boolean> {
-  const minutes = String(Math.ceil(days * 1440));
-  const found = await run([
+  const recent = `-${Math.ceil(days * 1440)}`;
+  const top = await run(["find", path, "-maxdepth", "1", "-mmin", recent, "-print", "-quit"]);
+  if (top.code !== 0 || top.stdout) return true;
+  const deep = await run([
     "find",
     path,
     "(",
@@ -508,11 +531,11 @@ async function hasRecentFile(path: string, days: number): Promise<boolean> {
     "l",
     ")",
     "-mmin",
-    `-${minutes}`,
+    recent,
     "-print",
     "-quit",
   ]);
-  return found.stdout !== "";
+  return deep.code !== 0 || deep.stdout !== "";
 }
 
 /** Build output is disposable even inside a worktree that must stay, which is where most of the space sits. */
@@ -531,11 +554,9 @@ async function scanBuild(context: Context): Promise<Finding[]> {
       .filter((path) => buildDirs.test(path));
     return [...top, ...nested].filter(isDirectory);
   });
-  const ages = await Promise.all(candidates.map((path) => unlessGone(path, () => newestAge(path, context.now))));
-  const stale = candidates.filter((_, index) => (ages[index] ?? 0) >= staleBuildDays);
   const ignored = (
     await Promise.all(
-      stale.map(async (path) => {
+      candidates.map(async (path) => {
         if (await hasRecentFile(path, staleBuildDays)) return undefined;
         const parent = dirname(path);
         const name = basename(path);
@@ -1049,15 +1070,26 @@ function overlaps(a: string, b: string): boolean {
   return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
 }
 
-export async function scan(context: Context, only?: readonly Category[]): Promise<Scan> {
-  const selected = only ?? (Object.keys(scanners) as Category[]);
+/** `done` hears each category as it finishes, with its finding count, or undefined when it failed. */
+export async function scan(
+  context: Context,
+  only: readonly Category[] = categories,
+  done?: (category: Category, findings: number | undefined) => void,
+): Promise<Scan> {
   const warnings: string[] = [];
   const results = await Promise.all(
-    selected.map((category) =>
-      scanners[category](context).catch((error) => {
-        warnings.push(`${category}: ${error}`);
-        return [] as Finding[];
-      }),
+    only.map((category) =>
+      scanners[category](context).then(
+        (findings) => {
+          done?.(category, findings.length);
+          return findings;
+        },
+        (error) => {
+          warnings.push(`${category}: ${error}`);
+          done?.(category, undefined);
+          return [] as Finding[];
+        },
+      ),
     ),
   );
   const holds = readLedger(context.paths).holds.filter((hold) => Date.parse(hold.until) > context.now);

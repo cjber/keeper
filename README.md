@@ -166,14 +166,20 @@ purgeHook = "~/bin/drop-worktree-db"
 # Have keeper auto return main checkouts to the default branch and fast-forward them.
 freshen = false
 
-# Wizard colours, as #rrggbb or a terminal colour name. Unset keeps your terminal theme:
-# reverse video for the cursor and dim text for blocked rows.
+# Wizard colours, as #rrggbb or a palette name such as cyan or brightred. Palette names use
+# your terminal theme's own colours. Empty is the terminal foreground: reverse video for the
+# cursor and dim text for blocked rows. These are the defaults:
 [theme]
-cursor = "#3b4252"
-cursorText = "#eceff4"
+cursor = ""
+cursorText = ""
 selected = "green"
-blocked = "#6b7280"
+blocked = ""
 accent = "cyan"
+size = ""
+category = "blue"
+low = "green"
+medium = "yellow"
+high = "red"
 ```
 
 If `purgeHook` exits non-zero, that transaction stays in the trash and purge tries again next time. `freshen` never

@@ -8,12 +8,13 @@ import { applyPlan, context, createPlan } from "./ops";
 import { defaultTheme, scan, type Theme } from "./scanners";
 import { defaultPaths } from "./system";
 import { installSystemd } from "./timer";
-import { eligible, type Finding, type Scan } from "./types";
+import { type Category, categories, eligible, type Finding, type Scan } from "./types";
 
 export interface Actions {
   /** The previous wizard scan, shown while a fresh one runs. Never acted on. */
   cached: () => Scan | undefined;
-  load: () => Promise<Scan>;
+  /** Scans afresh, reporting each category as it finishes, with its finding count or undefined on failure. */
+  load: (done?: (category: Category, findings: number | undefined) => void) => Promise<Scan>;
   apply: (findings: Finding[]) => Promise<string>;
   schedule: () => Promise<string>;
 }
@@ -28,8 +29,8 @@ export const liveActions: Actions = {
       return undefined;
     }
   },
-  load: async () => {
-    const result = await scan(context());
+  load: async (done) => {
+    const result = await scan(context(), categories, done);
     mkdirSync(defaultPaths().state, { recursive: true });
     writeFileSync(cachePath(), JSON.stringify(result));
     return result;
@@ -46,9 +47,21 @@ export const liveActions: Actions = {
 };
 
 const pageSize = 18;
-/** An unset theme colour is the terminal's own, rather than OpenTUI's fixed white. */
-const color = (value: string) => value || RGBA.defaultForeground();
+const spinner = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
+const palette = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"];
+/**
+ * A palette name becomes the terminal's own palette entry, so the colours follow its theme rather than fixed RGB.
+ * An unset colour is the terminal's foreground, rather than OpenTUI's fixed white.
+ */
+const color = (value: string) => {
+  const name = value.toLowerCase().replace(/^bright/, "");
+  const index = palette.indexOf(name);
+  if (index >= 0) return RGBA.fromIndex(index + (name === value.toLowerCase() ? 0 : 8));
+  return value || RGBA.defaultForeground();
+};
 const terminal = color("");
+/** Each category's state while a scan runs: undefined is still scanning, null failed, a number is its findings. */
+type Progress = Partial<Record<Category, number | null>>;
 const time = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 /** Holds selection only. Every safety rule stays in the scan and apply calls an agent would make. */
@@ -60,17 +73,32 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
   const [showBlocked, setShowBlocked] = useState(false);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(true);
+  const [progress, setProgress] = useState<Progress | undefined>();
+  const [frame, setFrame] = useState(0);
+
+  useEffect(() => {
+    if (!progress) return;
+    const timer = setInterval(() => setFrame((n) => n + 1), 80);
+    return () => clearInterval(timer);
+  }, [progress]);
 
   const perform = (work: Promise<string | undefined>) => {
     setBusy(true);
     work
       .then(async (done) => {
         setSelected(new Set());
-        setReport(await actions.load());
+        setProgress({});
+        const fresh = await actions.load((category, found) =>
+          setProgress((now) => ({ ...now, [category]: found ?? null })),
+        );
+        setReport(fresh);
         setMessage(done ?? "");
       })
       .catch((error) => setMessage(`Failed: ${error instanceof Error ? error.message : error}`))
-      .finally(() => setBusy(false));
+      .finally(() => {
+        setBusy(false);
+        setProgress(undefined);
+      });
   };
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: scan once on open; perform is recreated each render.
@@ -119,15 +147,31 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
   const total = chosen.reduce((sum, finding) => sum + finding.bytes, 0);
   const status = busy
     ? report
-      ? `Showing the scan from ${time(report.scannedAt)}. Rescanning...`
-      : "Scanning..."
+      ? `Showing the scan from ${time(report.scannedAt)} until the new one finishes`
+      : "Scanning"
     : message;
+  const riskColor = { low: theme.low, medium: theme.medium, high: theme.high };
 
   return (
     <box flexDirection="column" paddingLeft={1} paddingRight={1} flexGrow={1}>
       <text wrapMode="none" fg={color(theme.accent)} attributes={TextAttributes.BOLD}>
         keeper · {open.length} eligible, {blocked} blocked · {gib(total)} selected, uncompressed
       </text>
+      {progress ? (
+        <box flexDirection="row" flexWrap="wrap">
+          {categories.map((category) => {
+            const state = progress[category];
+            const mark = state === undefined ? spinner[frame % spinner.length] : state === null ? "✗" : "✓";
+            const fg = color(state === undefined ? theme.accent : state === null ? theme.high : theme.low);
+            return (
+              <text key={category} fg={fg} marginRight={2}>
+                {mark} {category}
+                {typeof state === "number" ? ` ${state}` : ""}
+              </text>
+            );
+          })}
+        </box>
+      ) : null}
       <box flexDirection="column" flexGrow={1}>
         {report && !rows.length ? (
           <text fg={terminal}>
@@ -139,22 +183,45 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
           const ok = eligible(finding);
           const isSelected = selected.has(finding.id);
           const mark = !ok ? " - " : isSelected ? "[x]" : "[ ]";
+          // The cursor row and blocked rows drop the column colours, so the cursor and the dimming read clearly.
+          const plain = isCursor || !ok;
+          const rowColor = isCursor ? color(theme.cursorText) : ok ? terminal : color(theme.blocked);
           const attributes =
             (isCursor && !theme.cursor ? TextAttributes.INVERSE : 0) | (!ok && !theme.blocked ? TextAttributes.DIM : 0);
-          const fg = isCursor ? color(theme.cursorText) : color(isSelected ? theme.selected : ok ? "" : theme.blocked);
+          const cell = (value: string) => (plain ? rowColor : color(value));
           return (
-            <box key={finding.id} backgroundColor={isCursor && theme.cursor ? theme.cursor : undefined}>
-              <text wrapMode="none" fg={fg} attributes={attributes}>
-                {mark} {measure(finding).padStart(7)} {finding.risk.padEnd(6)} {finding.title}
+            <box
+              key={finding.id}
+              flexDirection="row"
+              backgroundColor={isCursor && theme.cursor ? theme.cursor : undefined}
+            >
+              <text
+                wrapMode="none"
+                fg={plain ? rowColor : color(isSelected ? theme.selected : "")}
+                attributes={attributes}
+              >
+                {mark}{" "}
+              </text>
+              <text wrapMode="none" fg={cell(theme.size)} attributes={attributes | (plain ? 0 : TextAttributes.BOLD)}>
+                {measure(finding).padStart(8)}{" "}
+              </text>
+              <text wrapMode="none" fg={cell(riskColor[finding.risk])} attributes={attributes}>
+                {finding.risk.padEnd(7)}
+              </text>
+              <text wrapMode="none" fg={cell(theme.category)} attributes={attributes}>
+                {finding.category.padEnd(14)}
+              </text>
+              <text wrapMode="none" fg={rowColor} attributes={attributes} flexShrink={1}>
+                {finding.title}
               </text>
             </box>
           );
         })}
       </box>
       {active ? <text fg={terminal}>{active.blockers.join("; ") || active.reason}</text> : null}
-      <text fg={terminal}>{status}</text>
-      {report?.warnings.length ? <text fg={terminal}>Scan warnings: {report.warnings.join("; ")}</text> : null}
-      <text wrapMode="none" fg={terminal}>
+      <text fg={busy ? color(theme.accent) : terminal}>{status}</text>
+      {report?.warnings.length ? <text fg={color(theme.high)}>Scan warnings: {report.warnings.join("; ")}</text> : null}
+      <text wrapMode="none" fg={terminal} attributes={TextAttributes.DIM}>
         space select · a all low risk · enter apply · b {showBlocked ? "hide" : "show"} blocked · t schedule · q quit
       </text>
     </box>

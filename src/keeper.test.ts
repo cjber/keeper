@@ -502,7 +502,7 @@ test("undo refuses to overwrite a path that exists again, then finishes once it 
 test("a theme sets only the colours it names, and a misspelt one is an error", () => {
   mkdirSync(join(home, ".config/keeper"), { recursive: true });
   writeFileSync(ctx.paths.config, '[theme]\ncursor = "#333333"\n');
-  expect(loadConfig(ctx.paths).theme).toMatchObject({ cursor: "#333333", accent: "" });
+  expect(loadConfig(ctx.paths).theme).toMatchObject({ cursor: "#333333", accent: "cyan", blocked: "" });
   writeFileSync(ctx.paths.config, '[theme]\ncursour = "#333333"\n');
   expect(() => loadConfig(ctx.paths)).toThrow("theme.cursour");
 });

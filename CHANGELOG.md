@@ -22,8 +22,10 @@ First release.
   removed.
 - **Agent first.** JSON output when piped, one error shape, exit codes that name the next step, `keeper hold` and
   `keeper claim` for declaring intent, and `keeper schema` for the whole interface.
-- **A terminal wizard** that lists what you can act on first, follows your terminal theme, and opens on the previous
-  scan while a fresh one runs.
+- **A terminal wizard** that lists what you can act on first, colours risk and category with your terminal theme's
+  palette, opens on the previous scan, and shows each category's progress while a fresh one runs.
+- **Light on a busy machine.** Scans run a few processes at a time and walk large directories outside the process, so
+  the wizard stays responsive under heavy load.
 - **Runs nightly** with `keeper timer install`, applying only low-risk findings.
 - **Install from the AUR, npm or as an agent skill**: `paru -S keeper-bin`, `npm i -g @cillianb/keeper`, or
   `npx skills add cjber/keeper`.

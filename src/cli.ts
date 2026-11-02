@@ -112,10 +112,19 @@ export function gib(bytes: number): string {
   return `${(bytes / 1024 ** 3).toFixed(1)}G`;
 }
 
-/** Most findings free space, but a `load` finding frees none, so the size column shows what it does give back. */
+/** Short size for a table column: 512K, 340M, 2.3G. */
+export function size(bytes: number): string {
+  const units = ["B", "K", "M", "G", "T"];
+  const power = Math.min(Math.max(Math.floor(Math.log(bytes) / Math.log(1024)), 0), units.length - 1);
+  const value = bytes / 1024 ** power;
+  return `${power >= 3 ? value.toFixed(1) : Math.round(value)}${units[power]}`;
+}
+
+/** A `load` finding frees no space, so it shows the CPU it gives back. A prune frees an amount unknown until it runs. */
 export function measure(finding: Finding): string {
-  if (finding.bytes > 0) return gib(finding.bytes);
-  return finding.cpu === undefined ? gib(0) : `${Math.round(finding.cpu)}%`;
+  if (finding.bytes > 0) return size(finding.bytes);
+  if (finding.cpu !== undefined) return `${Math.round(finding.cpu)}% cpu`;
+  return "?";
 }
 
 /** Claims become deletable, so a slip here must not be able to take a home directory or a repo with it. */

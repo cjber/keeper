@@ -26,7 +26,7 @@ import {
   scan,
   worktreeDirs,
 } from "./scanners";
-import { defaultPaths, holders, niceness, run } from "./system";
+import { defaultPaths, holders, niceness, run, waitFor } from "./system";
 import { units } from "./timer";
 import { eligible, type Finding } from "./types";
 
@@ -217,6 +217,13 @@ test("purge keeps young trash and removes old trash", async () => {
   expect((await purge(ctx.paths, 14)).purged).toEqual([]);
   expect((await purge(ctx.paths, 0, Date.now() + 1000)).purged).toEqual([transaction as string]);
   expect(existsSync(join(ctx.paths.trash, transaction as string))).toBe(false);
+});
+
+test("waitFor returns on time from a command that ignores SIGTERM, as a stuck sync does", async () => {
+  const started = Date.now();
+  expect(await waitFor(["sh", "-c", "trap '' TERM; sleep 3"], 200)).toBe(false);
+  expect(Date.now() - started).toBeLessThan(1000);
+  expect(await waitFor(["true"], 1000)).toBe(true);
 });
 
 test("holders matches the path and children but not a sibling prefix", () => {

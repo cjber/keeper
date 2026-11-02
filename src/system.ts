@@ -29,6 +29,16 @@ export async function run(argv: string[], cwd?: string): Promise<Result> {
   }
 }
 
+/**
+ * Waits up to `ms` for a command and reports whether it finished. Unlike `timeout`, which waits for a child that
+ * ignores its signal, as a sync stuck on a busy disk does, this returns on time and leaves the command running.
+ */
+export async function waitFor(argv: string[], ms: number): Promise<boolean> {
+  const child = Bun.spawn(argv, { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  child.unref();
+  return Promise.race([child.exited.then(() => true), Bun.sleep(ms).then(() => false)]);
+}
+
 async function spawn(argv: string[], cwd?: string): Promise<Result> {
   try {
     const child = Bun.spawn(argv, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" });

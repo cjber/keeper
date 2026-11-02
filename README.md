@@ -167,9 +167,12 @@ The `apps` category reads a last-seen ledger that `keeper sample` records hourly
 to their owning package. Use is never judged from atime, and only packages with a `.desktop` launcher count as apps, so
 `git`, `ripgrep` or `docker` are never offered. The ledger keeps the last sample in each hour bucket, and coverage counts
 only the days that hold a sample. A timer that stopped or a machine that was off therefore leaves a gap, and the window
-extends instead of treating the missing days as watched. A package counts as unused only when the samples cover the
-whole `--app-stale-days` window (default 90) and it was not seen in it, so a fresh install shows each candidate as
-blocked until it has watched long enough.
+extends instead of treating the missing days as watched.
+
+A package is proven unused only once the samples cover the whole `--app-stale-days` window (default 90) and it was not
+seen in it. Until then the first run stays quiet: the largest apps not seen yet appear as candidates, still only
+removable by their id, so a big app can be dropped before the window fills. Lower `--app-stale-days` to the time
+actually sampled to judge every unseen app against it. With no samples at all, apps reports nothing.
 
 ## Commands
 

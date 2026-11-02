@@ -14,7 +14,7 @@ If `keeper` is not on `PATH`, ask the user before installing it with `paru -S ke
 3. Show the user the plan's size and items, then run `keeper apply PLAN --yes`.
 4. Done when exit code is 0. On 5, scan again and report what changed. On 4, make a new plan.
 
-An app is only a package with a `.desktop` launcher, and only when the ledger has sampled the whole window without a gap. `large` and `duplicates` skip game libraries, Wine prefixes, flatpak data and VM stores. If the user wants one of these removed, show the finding and ask before passing its id to `keeper plan`.
+An app is only a package with a `.desktop` launcher. Until the ledger has sampled the whole window without a gap, only the largest unseen apps appear, as candidates you can still remove by id; after the window they are proven unused. `large` and `duplicates` skip game libraries, Wine prefixes, flatpak data and VM stores. If the user wants one of these removed, show the finding and ask before passing its id to `keeper plan`.
 
 When the complaint is speed rather than space, scan the two health categories first:
 

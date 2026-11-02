@@ -9,6 +9,7 @@ import {
   type Context,
   defaultConfig,
   insideAppTree,
+  launcherOwners,
   scan,
 } from "./scanners";
 import { defaultPaths } from "./system";
@@ -93,10 +94,27 @@ test("apps: use is judged from the ledger, never atime, so a package seen runnin
   expect(appFindings([pkg("firefox")], usage, Date.now(), 90)).toEqual([]);
 });
 
-test("apps: before the ledger covers the window every candidate says so", () => {
-  const [finding] = appFindings([pkg("firefox")], usageWithDays(3), Date.now(), 90);
-  expect(finding?.blockers.join()).toContain("tracked for 3 of 90 days");
-  expect(finding && eligible(finding)).toBe(false);
+test("apps: with no samples yet, nothing is offered, so a first run is quiet", () => {
+  expect(appFindings([pkg("firefox")], undefined, Date.now(), 90)).toEqual([]);
+});
+
+test("apps: before the window is covered the largest unseen apps are quiet candidates, not blocked", () => {
+  const tiny = pkg("tiny", { bytes: 10 * 1024 ** 2 });
+  const big = pkg("big", { bytes: 2 * 1024 ** 3 });
+  const findings = appFindings([tiny, big], usageWithDays(3), Date.now(), 90);
+  expect(findings.map((finding) => finding.title)).toEqual(["big", "tiny"]);
+  expect(findings[0]).toMatchObject({ explicit: true, blockers: [] });
+  expect(findings[0] && eligible(findings[0])).toBe(true);
+  expect(findings[0] && bulkEligible(findings[0])).toBe(false);
+  expect(findings[0]?.reason).toContain("Candidate");
+  expect(findings[0]?.reason).toContain("3 days");
+});
+
+test("apps: the learning list is capped, so a first run stays short", () => {
+  const many = Array.from({ length: 30 }, (_, index) => pkg(`app${index}`, { bytes: (index + 1) * 1024 ** 2 }));
+  const findings = appFindings(many, usageWithDays(3), Date.now(), 90);
+  expect(findings).toHaveLength(15);
+  expect(findings[0]?.title).toBe("app29");
 });
 
 test("apps: a gap in samples extends the window instead of counting as watched", () => {
@@ -104,8 +122,8 @@ test("apps: a gap in samples extends the window instead of counting as watched",
   const usage = usageWithDays(10, [3, 4], now); // Ten days of samples with two days missing in the middle.
   expect(coveredDays(usage, now)).toBe(3);
   const [finding] = appFindings([pkg("firefox")], usage, now, 90);
-  expect(finding?.blockers.join()).toContain("tracked for 3 of 90 days");
-  expect(finding && eligible(finding)).toBe(false);
+  expect(finding?.reason).toContain("3 days");
+  expect(finding && eligible(finding)).toBe(true);
 });
 
 test("apps: only a .desktop launcher makes a package an app", () => {
@@ -118,6 +136,16 @@ test("apps: only a .desktop launcher makes a package an app", () => {
     ["git", ["/usr/bin/git"]],
   ]);
   expect(appCandidates(["firefox", "git"], metadata, files).map((app) => app.name)).toEqual(["firefox"]);
+});
+
+test("apps: launcherOwners maps only .desktop files to their package", () => {
+  const owners = launcherOwners([
+    "/usr/share/applications/firefox.desktop is owned by firefox 1.0-1",
+    "/usr/bin/firefox is owned by firefox 1.0-1",
+    "/usr/share/applications/kde/foo.desktop is owned by foo 2.0-1",
+  ]);
+  expect([...owners.keys()].sort()).toEqual(["firefox", "foo"]);
+  expect(owners.get("firefox")).toEqual(["/usr/share/applications/firefox.desktop"]);
 });
 
 test("apps: dependants, base members and system parts are blocked", () => {

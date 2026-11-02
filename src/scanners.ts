@@ -899,10 +899,16 @@ function humanSize(bytes: number): string {
   return `${power >= 3 ? value.toFixed(1) : Math.round(value)}${units[power]}`;
 }
 
-/** Whether a path sits inside a git checkout, by walking up to the nearest `.git`. */
-function hasGitAncestor(path: string, home: string): boolean {
+/** Whether a path sits inside a git checkout, by walking up to the nearest `.git`. The cache keeps a large walk cheap. */
+function hasGitAncestor(path: string, home: string, cache = new Map<string, boolean>()): boolean {
   for (let dir = dirname(path); dir === home || dir.startsWith(`${home}/`); dir = dirname(dir)) {
-    if (existsSync(join(dir, ".git"))) return true;
+    const known = cache.get(dir);
+    if (known === true) return true;
+    if (known === undefined) {
+      const found = existsSync(join(dir, ".git"));
+      cache.set(dir, found);
+      if (found) return true;
+    }
     if (dir === home) break;
   }
   return false;
@@ -951,9 +957,17 @@ const displayPackages = new Set([
   "uwsm",
 ]);
 
+/** During the learning window only the largest unseen apps are shown, so a first run is a shortlist, not a wall. */
+const appCandidateLimit = 15;
+
 /**
  * Packages as findings from what pacman reports and what the last-seen ledger remembers. Pure, so tests describe a
  * machine without touching pacman, and the no-atime rule holds by construction: nothing here reads atime.
+ *
+ * Before the samples cover the window an app cannot be proven unused. Rather than list every installed app as blocked,
+ * the largest unseen ones become candidates: still explicit, so only their id can ever remove them, but eligible so a
+ * person can act on a big app now instead of waiting out the window. Nothing is offered without at least one sample,
+ * because a gap means the watch stopped rather than an app being unused.
  */
 export function appFindings(
   packages: readonly AppPackage[],
@@ -962,18 +976,14 @@ export function appFindings(
   appStaleDays: number,
 ): Finding[] {
   const day = 86_400_000;
-  const coverage = usage ? coveredDays(usage, now) : 0;
-  const covered = usage !== undefined && coverage >= appStaleDays;
-  return packages.flatMap((pkg): Finding[] => {
-    const lastSeen = usage?.packages[pkg.name];
+  if (!usage) return [];
+  const coverage = coveredDays(usage, now);
+  if (coverage === 0) return [];
+  const covered = coverage >= appStaleDays;
+  const findings = packages.flatMap((pkg): Finding[] => {
+    const lastSeen = usage.packages[pkg.name];
     if (lastSeen && (now - Date.parse(lastSeen)) / day < appStaleDays) return [];
-    const idleDays = lastSeen ? (now - Date.parse(lastSeen)) / day : coverage;
     const blockers: string[] = [];
-    if (!covered) {
-      blockers.push(
-        `usage has only been tracked for ${Math.floor(coverage)} of ${appStaleDays} days, offered once the ledger covers the window`,
-      );
-    }
     if (pkg.requiredBy.length) {
       blockers.push(
         `${count(pkg.requiredBy.length, "installed package")} ${pkg.requiredBy.length === 1 ? "depends" : "depend"} on it`,
@@ -985,6 +995,10 @@ export function appFindings(
     if (firmwarePackages.test(pkg.name)) blockers.push("firmware the hardware may need");
     if (driverPackages.test(pkg.name)) blockers.push("a driver the hardware may need");
     if (displayPackages.has(pkg.name)) blockers.push("part of the display server or desktop session");
+    const idle = lastSeen ? Math.floor((now - Date.parse(lastSeen)) / day) : appStaleDays;
+    const reason = covered
+      ? `Not seen running ${lastSeen ? `${count(idle, "day")} ago` : `in ${count(appStaleDays, "day")}`}, ${humanSize(pkg.bytes)} installed. Removed through pacman, so reinstalling brings it back. Only planned by its id`
+      : `Candidate: not seen in ${count(coverage, "day")} of sampling, ${appStaleDays} needed to confirm, ${humanSize(pkg.bytes)} installed. Only an explicit id removes it`;
     return [
       {
         id: findingId("apps", pkg.name, lastSeen ?? "never"),
@@ -995,16 +1009,18 @@ export function appFindings(
         paths: pkg.paths,
         packages: [pkg.name],
         bytes: pkg.bytes,
-        reason: `Installed on purpose, ${humanSize(pkg.bytes)} installed, and ${
-          lastSeen
-            ? `last seen running ${count(Math.floor(idleDays), "day")} ago`
-            : "never seen running while usage was tracked"
-        }. Removed through pacman, so reinstalling brings it back. Only planned by its id`,
+        reason,
         explicit: true,
         blockers,
       } satisfies Finding,
     ];
   });
+  if (covered) return findings;
+  // Learning: only removable candidates, largest first, and only a short list, so the first run stays quiet.
+  return findings
+    .filter((finding) => finding.blockers.length === 0)
+    .sort((a, b) => b.bytes - a.bytes)
+    .slice(0, appCandidateLimit);
 }
 
 /** Explicitly installed packages, their size, dependants and groups, batched so a scan starts a few processes. */
@@ -1034,23 +1050,59 @@ function isDesktopLauncher(path: string): boolean {
   return path.startsWith("/usr/share/applications/") && path.endsWith(".desktop");
 }
 
-/** Which desktop launchers each package ships, so only apps with something to launch are judged. */
-async function packageLaunchers(names: readonly string[]): Promise<Map<string, string[]>> {
+/** `pacman -Qo` output as package to `.desktop` launcher paths, ignoring anything that is not a desktop launcher. */
+export function launcherOwners(lines: readonly string[]): Map<string, string[]> {
   const result = new Map<string, string[]>();
-  for (let start = 0; start < names.length; start += 200) {
-    const batch = names.slice(start, start + 200);
-    const output = await run(["pacman", "-Ql", ...batch]);
-    if (output.code !== 0) continue;
-    for (const line of output.stdout.split("\n")) {
-      const space = line.indexOf(" ");
-      if (space < 0) continue;
-      const name = line.slice(0, space);
-      const path = line.slice(space + 1);
-      if (!isDesktopLauncher(path)) continue;
-      result.set(name, [...(result.get(name) ?? []), path]);
-    }
+  for (const line of lines) {
+    const match = /^(.+) is owned by (\S+) /.exec(line);
+    const file = match?.[1];
+    const name = match?.[2];
+    if (!file || !name || !isDesktopLauncher(file)) continue;
+    result.set(name, [...(result.get(name) ?? []), file]);
   }
   return result;
+}
+
+/**
+ * Which desktop launchers each package owns. Reading the applications directory and asking pacman who owns each file is
+ * far cheaper than listing every file of every installed package, and it is exactly the `.desktop` set apps cares about.
+ */
+async function packageLaunchers(): Promise<Map<string, string[]>> {
+  const found = await run([
+    "find",
+    "/usr/share/applications",
+    "(",
+    "-type",
+    "f",
+    "-o",
+    "-type",
+    "l",
+    ")",
+    "-name",
+    "*.desktop",
+  ]);
+  if (found.code !== 0) return new Map();
+  const files = found.stdout.split("\n").filter(Boolean);
+  const lines: string[] = [];
+  for (let start = 0; start < files.length; start += 200) {
+    const batch = files.slice(start, start + 200);
+    const owners = await run(["pacman", "-Qo", "--", ...batch]);
+    if (owners.stdout) lines.push(...owners.stdout.split("\n"));
+  }
+  return launcherOwners(lines);
+}
+
+async function scanApps(context: Context): Promise<Finding[]> {
+  const appStaleDays = context.appStaleDays ?? defaultAppStaleDays;
+  const launchers = await packageLaunchers();
+  if (launchers.size === 0) return [];
+  const explicit = await run(["pacman", "-Qeq"]);
+  if (explicit.code !== 0) return [];
+  const installed = new Set(explicit.stdout.split("\n").filter(Boolean));
+  const names = [...launchers.keys()].filter((name) => installed.has(name));
+  if (names.length === 0) return [];
+  const metadata = await packageMetadata(names);
+  return appFindings(appCandidates(names, metadata, launchers), readUsage(context.paths), context.now, appStaleDays);
 }
 
 /** Joins package metadata and launchers into app candidates, so a CLI-only package can never become one. */
@@ -1065,16 +1117,6 @@ export function appCandidates(
     if (!meta || paths.length === 0) return [];
     return [{ name, bytes: meta.bytes, requiredBy: meta.requiredBy, groups: meta.groups, paths }];
   });
-}
-
-async function scanApps(context: Context): Promise<Finding[]> {
-  const appStaleDays = context.appStaleDays ?? defaultAppStaleDays;
-  const explicit = await run(["pacman", "-Qeq"]);
-  if (explicit.code !== 0) return [];
-  const names = explicit.stdout.split("\n").filter(Boolean);
-  if (names.length === 0) return [];
-  const [metadata, launchers] = await Promise.all([packageMetadata(names), packageLaunchers(names)]);
-  return appFindings(appCandidates(names, metadata, launchers), readUsage(context.paths), context.now, appStaleDays);
 }
 
 async function xdgDir(name: "DOWNLOAD" | "PICTURES", context: Context, fallback: string): Promise<string> {
@@ -1332,6 +1374,7 @@ async function scanLarge(context: Context): Promise<Finding[]> {
   if (walk.code !== 0) return [];
   const owned = await otherOwnedDirs(context);
   const appTrees = new Map<string, boolean>();
+  const gitTrees = new Map<string, boolean>();
   return walk.stdout.split("\n").flatMap((line): Finding[] => {
     const [size = "0", mtime = "0", ...rest] = line.split("\t");
     const path = rest.join("\t");
@@ -1340,7 +1383,7 @@ async function scanLarge(context: Context): Promise<Finding[]> {
     const age = (context.now - Number(mtime) * 1000) / 86_400_000;
     if (age < context.staleDays) return [];
     if (owned.some((dir) => path.startsWith(`${dir}/`))) return [];
-    if (hasGitAncestor(path, context.paths.home)) return [];
+    if (hasGitAncestor(path, context.paths.home, gitTrees)) return [];
     if (insideAppTree(path, context.paths.home, appTrees)) return [];
     return [
       {
@@ -1409,13 +1452,12 @@ async function scanDuplicates(context: Context): Promise<Finding[]> {
   if (walk.code !== 0) return [];
   const personal = await personalDirs(context);
   const appTrees = new Map<string, boolean>();
+  const gitTrees = new Map<string, boolean>();
   const files = walk.stdout.split("\n").flatMap((line): { path: string; bytes: number; mtime: number }[] => {
     const [size = "0", mtime = "0", ...rest] = line.split("\t");
     const path = rest.join("\t");
     const bytes = Number(size);
     if (!path || bytes === 0) return [];
-    if (hasGitAncestor(path, context.paths.home)) return [];
-    if (insideAppTree(path, context.paths.home, appTrees)) return [];
     return [{ path, bytes, mtime: Math.round(Number(mtime) * 1000) }];
   });
   const bySize = new Map<number, typeof files>();
@@ -1423,15 +1465,22 @@ async function scanDuplicates(context: Context): Promise<Finding[]> {
   const duplicates: { kept: string; copy: (typeof files)[number] }[] = [];
   for (const group of bySize.values()) {
     if (group.length < 2) continue;
+    // A file only matters once it shares a size with another, so the repo and app-tree walk runs on those few files.
+    const candidates = group.filter(
+      (file) =>
+        !hasGitAncestor(file.path, context.paths.home, gitTrees) &&
+        !insideAppTree(file.path, context.paths.home, appTrees),
+    );
+    if (candidates.length < 2) continue;
     const byPartial = new Map<string, typeof group>();
-    for (const file of group) {
+    for (const file of candidates) {
       const key = await partialHash(file.path);
       byPartial.set(key, [...(byPartial.get(key) ?? []), file]);
     }
-    for (const candidates of byPartial.values()) {
-      if (candidates.length < 2) continue;
-      const byFull = new Map<string, typeof candidates>();
-      for (const file of candidates) {
+    for (const partials of byPartial.values()) {
+      if (partials.length < 2) continue;
+      const byFull = new Map<string, typeof group>();
+      for (const file of partials) {
         const key = await sha256File(file.path);
         byFull.set(key, [...(byFull.get(key) ?? []), file]);
       }

@@ -56,28 +56,7 @@ jobs:
           bun scripts/changelog.ts "$VERSION" > "$RUNNER_TEMP/notes.md"
           gh release create "$GITHUB_REF_NAME" dist/keeper-linux-x64 dist/keeper-linux-arm64 --verify-tag --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"
 
-      # Trusted publishing: npm checks this workflow's OIDC identity, so there is no token. A version already on npm is
-      # skipped, so a rerun after a later step failed does not fail here.
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        if: ${{ !github.event.repository.private }}
-        with:
-          node-version: 24 # ships npm 11, which trusted publishing needs
-          registry-url: https://registry.npmjs.org
-          package-manager-cache: false
-      - name: Publish to npm
-        if: ${{ !github.event.repository.private }}
-        run: |
-          set -euo pipefail
-          bun scripts/render-npm.ts dist/npm
-          for dir in keeper-linux-x64 keeper-linux-arm64 keeper; do
-            name=$(jq -r .name "dist/npm/$dir/package.json")
-            if npm view "$name@$VERSION" version >/dev/null 2>&1; then
-              echo "$name@$VERSION is already published"
-              continue
-            fi
-            npm publish "dist/npm/$dir" --access public --provenance
-          done
-
+      # AUR goes before npm: a npm trusted-publisher problem must not skip the AUR packages, which need no such setup.
       - name: Render AUR packages
         if: ${{ !github.event.repository.private }}
         run: |
@@ -114,4 +93,26 @@ jobs:
             if git -C "aur-${pkgname}" diff --cached --quiet; then continue; fi
             git -C "aur-${pkgname}" commit -m "${pkgname} ${VERSION}"
             git -C "aur-${pkgname}" push origin HEAD:master
+          done
+
+      # Trusted publishing: npm checks this workflow's OIDC identity, so there is no token. A version already on npm is
+      # skipped, so a rerun after a later step failed does not fail here.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: ${{ !github.event.repository.private }}
+        with:
+          node-version: 24 # ships npm 11, which trusted publishing needs
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Publish to npm
+        if: ${{ !github.event.repository.private }}
+        run: |
+          set -euo pipefail
+          bun scripts/render-npm.ts dist/npm
+          for dir in keeper-linux-x64 keeper-linux-arm64 keeper; do
+            name=$(jq -r .name "dist/npm/$dir/package.json")
+            if npm view "$name@$VERSION" version >/dev/null 2>&1; then
+              echo "$name@$VERSION is already published"
+              continue
+            fi
+            npm publish "dist/npm/$dir" --access public --provenance
           done

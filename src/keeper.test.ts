@@ -384,6 +384,49 @@ test("a squash-merged branch deleted from the remote is still proven by its PR",
   expect(report.findings[0]).toMatchObject({ risk: "low", blockers: [] });
 });
 
+test("a branch behind its merged PR's head is proven, but one just cut from main is not", async () => {
+  const path = await worktree("behind");
+  await git(path, "commit", "-qm", "first", "--allow-empty");
+  const local = await git(path, "rev-parse", "HEAD");
+  // The PR gained a commit pushed from elsewhere, which this checkout fetched but never moved to.
+  await git(path, "commit", "-qm", "second", "--allow-empty");
+  const prHead = await git(path, "rev-parse", "HEAD");
+  await git(path, "reset", "-q", "--hard", local);
+  const report = await scan({ ...ctx, pullRequests: pull("MERGED", prHead, "b-behind") }, ["worktree"]);
+  expect(report.findings[0]).toMatchObject({ risk: "low", blockers: [] });
+  const fresh = await worktree("fresh");
+  const main = await git(fresh, "rev-parse", "HEAD");
+  await git(fresh, "commit", "-qm", "old work", "--allow-empty");
+  const oldHead = await git(fresh, "rev-parse", "HEAD");
+  await git(fresh, "reset", "-q", "--hard", main);
+  const reused = await scan({ ...ctx, pullRequests: pull("MERGED", oldHead, "b-fresh") }, ["worktree"]);
+  expect(reused.findings.find((finding) => finding.paths[0] === fresh)?.blockers.join()).toContain("touched");
+});
+
+test("a branch older than the newest page of PRs is looked up by name", async () => {
+  const path = await worktree("old");
+  const head = await git(path, "rev-parse", "HEAD");
+  const page = Array.from({ length: 1000 }, (_, i) => ({
+    number: i + 2000,
+    state: "OPEN" as const,
+    headRefName: `other-${i}`,
+    headRefOid: "x",
+  }));
+  const asked: (string | undefined)[] = [];
+  const report = await scan(
+    {
+      ...ctx,
+      pullRequests: async (_repo, branch) => {
+        asked.push(branch);
+        return branch ? [{ number: 7, state: "MERGED", headRefName: branch, headRefOid: head }] : page;
+      },
+    },
+    ["worktree"],
+  );
+  expect(asked).toEqual([undefined, "b-old"]);
+  expect(report.findings[0]?.reason).toContain("PR #7");
+});
+
 test("a reused branch name is not proof, because the commit differs", async () => {
   await worktree("reused");
   const report = await scan({ ...ctx, pullRequests: pull("MERGED", "0".repeat(40), "b-reused") }, ["worktree"]);

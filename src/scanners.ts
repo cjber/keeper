@@ -146,8 +146,8 @@ export interface Context {
   staleDays: number;
   /** Sampled processes, so a test never has to race a real machine. Absent means the scan reads /proc. */
   processes?: readonly ProcessInfo[];
-  /** Replaces the GitHub lookup in tests. */
-  pullRequests?: (repo: string) => Promise<PullRequest[]>;
+  /** Replaces the GitHub lookup in tests. With a branch, it lists only that branch's pull requests. */
+  pullRequests?: (repo: string, branch?: string) => Promise<PullRequest[]>;
   cores?: number;
   loadAverage?: number;
   /** Memory pressure and capped cgroups, so a test can describe a stalled machine without reproducing one. */
@@ -237,10 +237,15 @@ export function worktreeDirs(root: string): string[] {
     );
 }
 
+/** The newest pull requests in one call. A busy repository has more, so a branch missing here is looked up by name. */
+const pullRequestLimit = 1000;
+
 /** No gh, no auth or no network means no proof, which leaves a worktree behind the age window and approval. */
-async function listPullRequests(repo: string): Promise<PullRequest[]> {
+async function listPullRequests(repo: string, branch?: string): Promise<PullRequest[]> {
   const fields = "number,state,headRefName,headRefOid";
-  const result = await run(["gh", "pr", "list", "--state", "all", "--limit", "1000", "--json", fields], repo);
+  const filter = branch ? ["--head", branch] : [];
+  const command = ["gh", "pr", "list", "--state", "all", "--limit", String(pullRequestLimit), ...filter];
+  const result = await run([...command, "--json", fields], repo);
   if (result.code !== 0) return [];
   try {
     return JSON.parse(result.stdout) as PullRequest[];
@@ -252,7 +257,30 @@ async function listPullRequests(repo: string): Promise<PullRequest[]> {
 /** An operation in progress is unfinished work, however clean and pushed the tree looks. */
 const unfinishedOperations = ["rebase-merge", "rebase-apply", "BISECT_LOG", "MERGE_HEAD", "CHERRY_PICK_HEAD"];
 
-type PullRequestLookup = (commonDir: string, path: string) => Promise<PullRequest[]>;
+/**
+ * A merged pull request proves this checkout when it holds every local commit: the head is the PR's head, or an ancestor
+ * of it when the PR gained commits pushed from elsewhere. The commit test matters because branch names get reused, and
+ * a branch can gain commits after its PR merged. The ancestor test needs commits that no remote holds: without them the
+ * checkout has no work of its own, like a branch just cut from main under a reused name, so only the age window may
+ * judge it.
+ */
+async function findMerged(
+  pullRequests: readonly PullRequest[],
+  branch: string,
+  head: string,
+  git: (...args: string[]) => Promise<{ code: number }>,
+  ownCommits: boolean,
+): Promise<PullRequest | undefined> {
+  const candidates = pullRequests.filter((pr) => pr.state === "MERGED" && pr.headRefName === branch);
+  const exact = candidates.find((pr) => pr.headRefOid === head);
+  if (exact || !ownCommits) return exact;
+  for (const pr of candidates) {
+    if ((await git("merge-base", "--is-ancestor", "HEAD", pr.headRefOid)).code === 0) return pr;
+  }
+  return undefined;
+}
+
+type PullRequestLookup = (commonDir: string, path: string, branch: string) => Promise<PullRequest[]>;
 
 async function inspectWorktree(
   path: string,
@@ -289,13 +317,12 @@ async function inspectWorktree(
   if (holders(path, context.live)) blockers.push(inUse);
   const operation = unfinishedOperations.find((name) => gitDir && existsSync(join(gitDir, name)));
   if (operation) blockers.push(`${operation} is in progress, finish or abort it`);
-  const pullRequests = valid && commonDir ? await lookup(commonDir, path) : [];
+  const pullRequests = valid && commonDir ? await lookup(commonDir, path, branch) : [];
   const open = pullRequests.find((pr) => pr.state === "OPEN" && pr.headRefName === branch);
   if (open) blockers.push(`PR #${open.number} is open, merge or close it`);
-  // The commit must match too: a branch name gets reused, and a branch can gain commits after its PR merged.
-  const merged = pullRequests.find(
-    (pr) => pr.state === "MERGED" && pr.headRefName === branch && pr.headRefOid === head,
-  );
+  const ownCommits = ahead.code === 0 && Number(ahead.stdout) > 0;
+  const merged = await findMerged(pullRequests, branch, head, git, ownCommits);
+  const mainlineRef = defaultBranch.stdout;
   // A merged branch is usually deleted from the remote, and the pull request is what still holds this commit.
   if (!merged && (ahead.code !== 0 || ahead.stdout !== "0")) {
     blockers.push(
@@ -304,11 +331,11 @@ async function inspectWorktree(
         : "unknown commits on no remote, push the branch to keep the work",
     );
   }
-  const mainline = defaultBranch.stdout.replace(/^origin\//, "");
+  const mainline = mainlineRef.replace(/^origin\//, "");
   const contained =
-    Boolean(defaultBranch.stdout) &&
+    Boolean(mainlineRef) &&
     branch !== mainline &&
-    (await git("merge-base", "--is-ancestor", "HEAD", defaultBranch.stdout)).code === 0;
+    (await git("merge-base", "--is-ancestor", "HEAD", mainlineRef)).code === 0;
   const proof = merged ? `Merged in PR #${merged.number}` : contained ? "Every commit is on the default branch" : "";
   // Commits and checkouts move logs/HEAD. The index will not do: any `git status` rewrites it.
   const touched = Math.min(
@@ -354,10 +381,13 @@ async function scanWorktrees(context: Context): Promise<Finding[]> {
   const bytes = await sizes([...dirs, ...leftovers]);
   const fetch = context.pullRequests ?? listPullRequests;
   const known = new Map<string, Promise<PullRequest[]>>();
-  const lookup: PullRequestLookup = (commonDir, path) => {
+  const lookup: PullRequestLookup = async (commonDir, path, branch) => {
     const found = known.get(commonDir) ?? fetch(path);
     known.set(commonDir, found);
-    return found;
+    const all = await found;
+    // A full page means older pull requests went unlisted, so a branch it lacks gets a lookup of its own.
+    if (all.length < pullRequestLimit || branch === "HEAD" || all.some((pr) => pr.headRefName === branch)) return all;
+    return fetch(path, branch);
   };
   return found([
     ...(await Promise.all(

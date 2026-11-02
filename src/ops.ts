@@ -252,7 +252,10 @@ async function undoUnlocked(paths: Paths, id: string): Promise<Undone> {
 /** Deletion is final here, so git metadata for trashed worktrees is pruned only now and undo keeps working until then. */
 export interface Purged {
   purged: string[];
+  /** Uncompressed size of what was purged, which a compressing filesystem such as btrfs stores in far less. */
   bytes: number;
+  /** Measured gain in free space. Other writers on the machine can make it lower than what was truly released. */
+  freed: number;
   /** Transactions kept because the purge hook failed, so it can run again while their files still exist. */
   failed: string[];
 }
@@ -277,6 +280,7 @@ async function purgeUnlocked(paths: Paths, olderThanDays: number, now: number): 
   const { purgeHook } = loadConfig(paths);
   const purged: string[] = [];
   const failed: string[] = [];
+  const freeBefore = await freeBytes(paths.home);
   let bytes = 0;
   for (const tx of transactions(paths)) {
     // Clamped, because a file timestamp can land a fraction of a millisecond after the clock read and 0 means everything.
@@ -298,7 +302,9 @@ async function purgeUnlocked(paths: Paths, olderThanDays: number, now: number): 
     purged.push(tx.id);
     bytes += tx.entries.reduce((sum, entry) => sum + entry.bytes, 0);
   }
-  return { purged, bytes, failed };
+  // Copy-on-write filesystems release space when the transaction commits, so measuring now needs a sync.
+  await run(["sync", "--file-system", paths.home]);
+  return { purged, bytes, freed: Math.max(0, (await freeBytes(paths.home)) - freeBefore), failed };
 }
 
 export function withinRisk(finding: Finding, max: Risk): boolean {

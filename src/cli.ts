@@ -39,6 +39,7 @@ const help = `keeper keeps an Arch machine clean. Output is JSON when stdout is 
   keeper timer install [--cron]  schedule keeper auto daily
   keeper timer remove            remove the schedule
 
+Sizes are uncompressed, so btrfs with compression frees less than they show. Space returns at purge, which reports what it freed.
 Worktrees are low risk only with proof: a merged PR with the same commit, or every commit on the default branch.
 Exit codes: 0 ok, 1 error, 2 usage, 3 needs --yes, 4 plan is entirely stale, 5 partly applied, so scan again, 6 another run holds the lock, so retry.
 Set KEEPER_ACTOR to name yourself in holds, claims and the log.
@@ -130,6 +131,7 @@ export function schema() {
     risks,
     version: packageJson.version,
     finding: "id, category, risk, action, title, paths, packages, bytes, reason, blockers",
+    bytes: "uncompressed size, so a compressing filesystem frees less. Only purge's freed field is measured",
     eligible: "blockers is empty and action is not report",
     environment: { KEEPER_ACTOR: "name recorded in holds, claims and the log" },
     help,
@@ -155,7 +157,7 @@ async function auto(flags: Flags): Promise<{ value: { summary: string } & Record
   const waiting = report.findings.filter((finding) => eligible(finding) && finding.risk !== "low");
   const free = await freeBytes(paths.home);
   const waitingBytes = waiting.reduce((sum, finding) => sum + finding.bytes, 0);
-  const summary = `Moved ${gib(outcome?.bytes ?? 0)} to trash, purged ${gib(purged.bytes)}, ${gib(free)} free. ${gib(waitingBytes)} waits for approval.`;
+  const summary = `Moved ${gib(outcome?.bytes ?? 0)} to trash, purge freed ${gib(purged.freed)}, ${gib(free)} free. ${gib(waitingBytes)} waits for approval. Sizes before purge are uncompressed.`;
   const low = free < ctx.config.warnFreeGb * 1024 ** 3;
   if (waitingBytes > 10 * 1024 ** 3 || low) {
     await run(["notify-send", ...(low ? ["-u", "critical"] : []), "keeper", summary]);
@@ -189,7 +191,7 @@ async function dispatch(
       const total = report.findings.filter(eligible).reduce((sum, finding) => sum + finding.bytes, 0);
       return {
         value: { ...report, next: "keeper plan [ID...] [--max-risk medium]" },
-        text: `${report.findings.map(line).join("\n")}\n\n${gib(total)} eligible`,
+        text: `${report.findings.map(line).join("\n")}\n\n${gib(total)} eligible, uncompressed`,
       };
     }
     case "plan": {
@@ -254,7 +256,10 @@ async function dispatch(
     }
     case "purge": {
       const result = await purge(paths, flags.olderDays);
-      return { value: result, text: `purged ${result.purged.length} transactions, ${gib(result.bytes)}` };
+      return {
+        value: result,
+        text: `purged ${result.purged.length} transactions: ${gib(result.freed)} freed on disk, ${gib(result.bytes)} uncompressed`,
+      };
     }
     case "hold": {
       const [target] = rest;

@@ -34,6 +34,7 @@ export interface Finding {
   title: string;
   paths: string[];
   packages: string[];
+  /** Uncompressed size. Removing it can free far less on a compressing filesystem such as btrfs. */
   bytes: number;
   reason: string;
   /** Any entry here makes the finding ineligible for a plan. */

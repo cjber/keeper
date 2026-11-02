@@ -117,6 +117,7 @@ matter. Each blocker names what to do about it:
 | Blocker | To resolve it |
 | --- | --- |
 | Touched recently | Wait. It is offered once idle for the age window, 7 days by default, or `--stale-days N` |
+| Built recently | Wait. Build output is offered after 3 days without a build. It counts as build, not as its worktree |
 | Uncommitted or untracked files | Commit, stash or delete them |
 | Commits on no remote | Push them to keep the work. Once every commit is on the default branch it becomes low risk |
 | An open pull request | Merge or close it |

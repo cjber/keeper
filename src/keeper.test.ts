@@ -117,7 +117,7 @@ test("a commit only on this machine blocks the worktree", async () => {
   expect(report.findings[0]?.blockers).toContain("1 commit on no remote, push it to keep the work");
 });
 
-test("build output is found in a dirty worktree only when ignored and stale", async () => {
+test("build output is found in a dirty worktree only when ignored", async () => {
   const path = await worktree("build");
   writeFileSync(join(path, "wip"), "keep me");
   mkdirSync(join(path, "target"));
@@ -526,14 +526,15 @@ test("a failing purge hook keeps the transaction so it can retry", async () => {
   expect(readFileSync(seen, "utf8").trim().split("\n")).toEqual([path, path]);
 });
 
-test("a recent file deep in build output keeps it, though everything near the top is old", async () => {
+test("a recent file deep in build output blocks it, though everything near the top is old", async () => {
   const path = await worktree("deep");
   mkdirSync(join(path, "target/debug/deps"), { recursive: true });
   writeFileSync(join(path, "target/debug/deps/lib"), "new");
   for (const dir of ["target/debug/deps", "target/debug", "target"]) age(join(path, dir));
-  expect((await scan(ctx, ["build"])).findings).toEqual([]);
+  const recent = (await scan(ctx, ["build"])).findings;
+  expect(recent.map((finding) => finding.blockers)).toEqual([["built in the last 3 days, offered after 3 idle days"]]);
   age(join(path, "target/debug/deps/lib"));
-  expect((await scan(ctx, ["build"])).findings).toHaveLength(1);
+  expect((await scan(ctx, ["build"])).findings.map((finding) => finding.blockers)).toEqual([[]]);
 });
 
 test("an oversized log keeps its tail and its inode", async () => {

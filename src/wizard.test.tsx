@@ -167,7 +167,7 @@ test("opening reuses recent categories, and r rescans everything", async () => {
   renderer.destroy();
 });
 
-test("g cycles to space by category, then free space over time, keeping the key line in place", async () => {
+test("g cycles to space, then free space over time, keeping the key line in place", async () => {
   const hour = 3_600_000;
   const now = Date.now();
   const samples = [3, 2, 1].map((back, index) => ({
@@ -189,15 +189,16 @@ test("g cycles to space by category, then free space over time, keeping the key 
   });
   await settle();
   let frame = captureCharFrame();
-  expect(frame).toContain("space by category");
-  expect(frame).toMatch(/aur +█+░+ +1\.0G ready · +1\.0G blocked/);
+  expect(frame).toContain("keeper · space · 1.0G ready now, 1.0G waiting");
+  expect(frame).toMatch(/aur +1\.0G +1\.0G +█+░+/);
+  expect(frame).toMatch(/in use, offered once it stops +1 +1\.0G/);
   expect(keyRow(frame)).toBe(listKeys);
   await act(async () => {
     await mockInput.pressKey("g");
   });
   await settle();
   frame = captureCharFrame();
-  expect(frame).toContain("Free space: 110.0G of 500.0G, up 10.0G");
+  expect(frame).toContain("keeper · free space · 110.0G of 500.0G, up 10.0G in 3 hours");
   expect(frame).toContain("▲");
   expect(frame).toContain("moved 5.0G to trash");
   expect(keyRow(frame)).toBe(listKeys);

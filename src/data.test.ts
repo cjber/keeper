@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cachedScan, forget } from "./cache";
-import { freeChart, spaceBars } from "./charts";
+import { freeChart, spaceBars, waits } from "./charts";
 import { readEvents, readSamples, sample } from "./history";
 import { audit, writeLedger } from "./ledger";
 import { type Context, defaultConfig } from "./scanners";
@@ -95,7 +95,7 @@ test("events keep what changed free space, and the nightly runs", () => {
   ]);
 });
 
-test("the free space chart rises with the readings and marks events in their column", () => {
+test("the free space chart draws a line on round gridlines and marks events on the axis", () => {
   const now = Date.parse("2026-11-02T12:00:00Z");
   const at = (hoursBack: number) => new Date(now - hoursBack * 3_600_000).toISOString();
   const gig = 1024 ** 3;
@@ -104,21 +104,28 @@ test("the free space chart rises with the readings and marks events in their col
       { at: at(10), free: 100 * gig, size: 500 * gig },
       { at: at(0), free: 120 * gig, size: 500 * gig },
     ],
-    [{ at: at(5), event: "apply", bytes: gig }],
-    10,
-    4,
+    [
+      { at: at(5), event: "apply", bytes: gig },
+      { at: at(4), event: "auto", summary: "ran" },
+    ],
+    20,
+    6,
     now,
+    (bytes) => `${bytes / gig}G`,
   );
-  expect(chart?.rows).toHaveLength(4);
-  expect(chart?.rows.every((row) => row.text.length === 10)).toBe(true);
-  // Low on the left, reaching the top row at the right once the second reading lands.
-  expect(chart?.rows[0]?.text.at(-1)).not.toBe(" ");
-  expect(chart?.rows[0]?.text[0]).toBe(" ");
-  expect(chart?.markers[5]).toBe("apply");
-  expect(freeChart([{ at: at(0), free: gig, size: gig }], [], 10, 4, now)).toBeUndefined();
+  const text = (row: { runs: { text: string }[] }) => row.runs.map((run) => run.text).join("");
+  expect(chart?.rows.every((row) => text(row).length === 20)).toBe(true);
+  expect(chart?.rows.map((row) => row.label)).toEqual(["120G", "", "", "110G", "", "100G"]);
+  // Rising: the line starts in the bottom row and ends in the top one.
+  expect(chart?.rows.at(-1)?.runs[0]?.ink).toBe("line");
+  expect(chart?.rows[0]?.runs.at(-1)?.ink).toBe("line");
+  // Only the apply is marked, at its column on the axis. A nightly run leaves no mark.
+  expect(chart?.events.map((event) => event.event)).toEqual(["apply"]);
+  expect(chart?.axis.find((cell) => cell.kind)?.column).toBe(10);
+  expect(freeChart([{ at: at(0), free: gig, size: gig }], [], 10, 4, now, String)).toBeUndefined();
 });
 
-test("each space bar counts its own category, even when another category contains the path", () => {
+test("a path inside another category's finding counts once, under its own category", () => {
   const finding = (
     id: string,
     category: "worktree" | "build",
@@ -143,7 +150,35 @@ test("each space bar counts its own category, even when another category contain
     finding("busy", "worktree", "/w/b", 3, ["in use"]),
   ]);
   expect(bars).toEqual([
-    { category: "worktree", ready: 10, blocked: 3 },
+    { category: "worktree", ready: 6, blocked: 3 },
     { category: "build", ready: 4, blocked: 0 },
+  ]);
+});
+
+test("build output inside a blocked worktree counts as build, once, and waits groups by first blocker", () => {
+  const finding = (category: "worktree" | "build", path: string, bytes: number, blockers: string[]) => ({
+    id: path,
+    category,
+    risk: "low" as const,
+    action: "trash" as const,
+    title: path,
+    paths: [path],
+    packages: [],
+    bytes,
+    reason: "",
+    blockers,
+  });
+  const findings = [
+    finding("worktree", "/w/a", 100, ["PR #4 is open, merge or close it"]),
+    finding("build", "/w/a/target", 90, ["built in the last 3 days, offered after 3 idle days"]),
+    finding("worktree", "/w/b", 20, ["PR #9 is open, merge or close it", "touched today, offered after 7 idle days"]),
+  ];
+  expect(spaceBars(findings)).toEqual([
+    { category: "build", ready: 0, blocked: 90 },
+    { category: "worktree", ready: 0, blocked: 30 },
+  ]);
+  expect(waits(findings)).toEqual([
+    { reason: "built recently, offered once idle", count: 1, bytes: 90 },
+    { reason: "PR is open, merge or close it", count: 2, bytes: 30 },
   ]);
 });

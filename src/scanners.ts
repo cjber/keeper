@@ -5,7 +5,7 @@ import { availableParallelism, loadavg } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { readLedger } from "./ledger";
 import { ageDays, expandHome, holders, type Paths, run, sizes } from "./system";
-import { type Category, categories, type Finding, type Scan, schemaVersion } from "./types";
+import { type Category, categories, count, type Finding, type Scan, schemaVersion } from "./types";
 
 export const defaultStaleDays = 7;
 const staleBuildDays = 3;
@@ -209,7 +209,7 @@ async function unlessGone<T>(path: string, inspect: () => T | Promise<T>): Promi
 /** A file written after the scan's clock was read has a slightly negative age, which still means today. */
 function touchedAgo(days: number): string {
   const whole = Math.max(0, Math.floor(days));
-  return whole === 0 ? "touched today" : whole === 1 ? "touched 1 day ago" : `touched ${whole} days ago`;
+  return whole === 0 ? "touched today" : `touched ${count(whole, "day")} ago`;
 }
 
 const found = <T>(items: (T | undefined)[]): T[] => items.filter((item): item is T => item !== undefined);
@@ -274,7 +274,7 @@ async function inspectWorktree(
   const valid = names.code === 0;
   const [commonDir = "", gitDir = "", head = "", branch = ""] = valid ? names.stdout.split("\n") : [];
   if (!valid) blockers.push("not a valid checkout, so its work cannot be checked");
-  if (status.stdout) blockers.push(`${status.stdout.split("\n").length} uncommitted or untracked files`);
+  if (status.stdout) blockers.push(count(status.stdout.split("\n").length, "uncommitted or untracked file"));
   if (holders(path, context.live)) blockers.push("in use by a running process");
   const operation = unfinishedOperations.find((name) => gitDir && existsSync(join(gitDir, name)));
   if (operation) blockers.push(`${operation} is in progress`);
@@ -287,7 +287,9 @@ async function inspectWorktree(
   );
   // A merged branch is usually deleted from the remote, and the pull request is what still holds this commit.
   if (!merged && (ahead.code !== 0 || ahead.stdout !== "0")) {
-    blockers.push(ahead.stdout === "1" ? "1 commit on no remote" : `${ahead.stdout || "unknown"} commits on no remote`);
+    blockers.push(
+      ahead.stdout ? `${count(Number(ahead.stdout), "commit")} on no remote` : "unknown commits on no remote",
+    );
   }
   const mainline = defaultBranch.stdout.replace(/^origin\//, "");
   const contained =
@@ -460,7 +462,7 @@ async function scanOrphans(): Promise<Finding[]> {
       category: "orphans",
       risk: "medium",
       action: "remove-packages",
-      title: `${packages.length} orphaned packages`,
+      title: count(packages.length, "orphaned package"),
       paths: [],
       packages,
       bytes,
@@ -619,7 +621,7 @@ async function scanTranscripts(context: Context): Promise<Finding[]> {
       category: "transcripts",
       risk: "low",
       action: "trash",
-      title: `${files.length} agent transcripts over ${transcriptDays} days old`,
+      title: `${count(files.length, "agent transcript")} over ${count(transcriptDays, "day")} old`,
       paths: files.map(([, path]) => path),
       packages: [],
       bytes: files.reduce((sum, [size]) => sum + Number(size), 0),
@@ -752,7 +754,7 @@ export function dockerFindings(usage: DockerUsage, reclaimableBuildCache: number
       packages: [],
       // Docker applies the age filter itself, so how much of the reclaimable total goes is known only after it runs.
       bytes: 0,
-      reason: `${Math.round(reclaimableBuildCache / 1e9)}G reclaimable. Pruning drops entries unused for ${dockerCacheHours / 24} days; builds still reuse anything newer`,
+      reason: `${Math.round(reclaimableBuildCache / 1e9)}G reclaimable. Pruning drops entries unused for ${count(dockerCacheHours / 24, "day")}; builds still reuse anything newer`,
       blockers: [],
     });
   }

@@ -16,6 +16,7 @@ import { defaultPaths, expandHome, liveFiles, niceness, type Paths, run } from "
 import {
   eligible,
   type Finding,
+  outermost,
   type Plan,
   type Reniced,
   type Risk,
@@ -65,7 +66,8 @@ function writeJson(path: string, value: unknown): void {
 
 const newId = () => randomBytes(4).toString("hex");
 
-export function createPlan(paths: Paths, findings: readonly Finding[], staleDays: number, now = Date.now()): Plan {
+export function createPlan(paths: Paths, chosen: readonly Finding[], staleDays: number, now = Date.now()): Plan {
+  const findings = outermost(chosen);
   const plan: Plan = {
     schemaVersion,
     id: newId(),
@@ -322,8 +324,9 @@ async function purgeUnlocked(paths: Paths, olderThanDays: number, now: number): 
   }
   // Flushing a whole filesystem can take seconds, so only a purge that removed something measures.
   if (purged.length === 0) return { purged, bytes, freed: 0, failed };
-  // Copy-on-write filesystems release space when the transaction commits, so measuring now needs a sync.
-  await run(["sync", "--file-system", paths.home]);
+  // Copy-on-write filesystems release space when the transaction commits, so measuring now needs a sync. A busy
+  // disk can take far longer to flush, and the lock is held meanwhile, so past two seconds `freed` may undercount.
+  await run(["timeout", "2", "sync", "--file-system", paths.home]);
   return { purged, bytes, freed: Math.max(0, (await freeBytes(paths.home)) - freeBefore), failed };
 }
 

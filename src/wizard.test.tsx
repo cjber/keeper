@@ -71,7 +71,7 @@ test("lists eligible findings first and shows blocked ones on b", async () => {
 
 test("says why nothing is selectable instead of ignoring the key", async () => {
   const { captureCharFrame, mockInput, settle, renderer } = await open([finding("b", "low", ["in use"])]);
-  expect(captureCharFrame()).toContain("Press b to see the 1 blocked findings");
+  expect(captureCharFrame()).toContain("Press b to see 1 blocked finding.");
   await act(async () => {
     await mockInput.pressKey("a");
   });
@@ -100,8 +100,8 @@ test("shows the cached scan while rescanning but acts only on the fresh one", as
     scanning,
   );
   expect(captureCharFrame()).toContain("item old");
-  expect(captureCharFrame()).toContain("until the new one finishes");
-  expect(captureCharFrame()).toContain("✓ aur 1");
+  expect(captureCharFrame()).toContain("· showing ");
+  expect(captureCharFrame()).toMatch(/Scanning \d+\/\d+/);
   await act(async () => {
     await mockInput.pressKey("a");
     await mockInput.pressEnter();
@@ -112,7 +112,7 @@ test("shows the cached scan while rescanning but acts only on the fresh one", as
   await settle();
   expect(captureCharFrame()).toContain("item fresh");
   expect(captureCharFrame()).not.toContain("item old");
-  expect(captureCharFrame()).not.toContain("✓ aur");
+  expect(captureCharFrame()).not.toContain("Scanning");
   renderer.destroy();
 });
 

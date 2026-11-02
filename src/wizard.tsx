@@ -8,7 +8,7 @@ import { applyPlan, context, createPlan } from "./ops";
 import { defaultTheme, scan, type Theme } from "./scanners";
 import { defaultPaths } from "./system";
 import { installSystemd } from "./timer";
-import { type Category, categories, eligible, type Finding, type Scan } from "./types";
+import { type Category, categories, count, eligible, type Finding, outermost, type Scan } from "./types";
 
 export interface Actions {
   /** The previous wizard scan, shown while a fresh one runs. Never acted on. */
@@ -38,7 +38,15 @@ export const liveActions: Actions = {
   apply: async (findings) => {
     const ctx = context();
     const outcome = await applyPlan(createPlan(ctx.paths, findings, ctx.staleDays), ctx);
-    return `Moved ${size(outcome.bytes)} to trash. Undo with keeper undo ${outcome.transaction ?? "(nothing applied)"}. Stale: ${outcome.stale.length}, failed: ${outcome.failed.length}`;
+    return [
+      outcome.transaction
+        ? `Moved ${size(outcome.bytes)} to trash. Undo with keeper undo ${outcome.transaction}`
+        : "Nothing was moved",
+      outcome.stale.length ? `${count(outcome.stale.length, "finding")} skipped as changed since the scan` : "",
+      outcome.failed.length ? `${count(outcome.failed.length, "finding")} failed, see keeper log` : "",
+    ]
+      .filter(Boolean)
+      .join(". ");
   },
   schedule: async () => {
     await installSystemd(defaultPaths());
@@ -64,6 +72,15 @@ const terminal = color("");
 const clip = (text: string, room: number) => (text.length > room ? `${text.slice(0, Math.max(room - 1, 0))}…` : text);
 /** Each category's state while a scan runs: undefined is still scanning, null failed, a number is its findings. */
 type Progress = Partial<Record<Category, number | null>>;
+const keys = (showBlocked: boolean) => [
+  "j/k move",
+  "space select",
+  "a all low risk",
+  "enter apply",
+  `b ${showBlocked ? "hide" : "show"} blocked`,
+  "t schedule",
+  "q/esc quit",
+];
 const time = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 /** Holds selection only. Every safety rule stays in the scan and apply calls an agent would make. */
@@ -157,12 +174,21 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
 
   const start = Math.max(0, Math.min(at - pageSize + 1, rows.length - pageSize));
   const active = rows[at];
-  const total = chosen.reduce((sum, finding) => sum + finding.bytes, 0);
-  const status = busy
-    ? report
-      ? `Showing the scan from ${time(report.scannedAt)} until the new one finishes`
-      : "Scanning"
-    : message;
+  const total = outermost(chosen).reduce((sum, finding) => sum + finding.bytes, 0);
+  const shown = report ? ` · showing ${time(report.scannedAt)}` : "";
+  const scanning = () => {
+    const waiting = categories.filter((category) => progress?.[category] === undefined);
+    const failed = categories.filter((category) => progress?.[category] === null);
+    return [
+      `${spinner[frame % spinner.length]} Scanning ${categories.length - waiting.length}/${categories.length}${shown}`,
+      failed.length ? `failed: ${failed.join(", ")}` : "",
+      waiting.length ? `waiting on ${waiting.join(", ")}` : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  };
+  // One line at the bottom, so the list never moves when a scan starts or ends.
+  const status = clip(progress ? scanning() : busy ? `Working${shown}` : message, width - 2);
   const riskColor = { low: theme.low, medium: theme.medium, high: theme.high };
 
   return (
@@ -171,25 +197,12 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
         keeper · {open.length} eligible, {blocked} blocked ·{" "}
         {chosen.length ? `${size(total)} selected, uncompressed` : "nothing selected"}
       </text>
-      {progress ? (
-        <box flexDirection="row" flexWrap="wrap">
-          {categories.map((category) => {
-            const state = progress[category];
-            const mark = state === undefined ? spinner[frame % spinner.length] : state === null ? "✗" : "✓";
-            const fg = color(state === undefined ? theme.accent : state === null ? theme.high : theme.low);
-            return (
-              <text key={category} fg={fg} marginRight={2}>
-                {mark} {category}
-                {typeof state === "number" ? ` ${state}` : ""}
-              </text>
-            );
-          })}
-        </box>
-      ) : null}
       <box flexDirection="column" flexGrow={1}>
         {report && !rows.length ? (
           <text fg={terminal}>
-            {blocked ? `Nothing is eligible. Press b to see the ${blocked} blocked findings.` : "Nothing to clean."}
+            {blocked
+              ? `Nothing is eligible. Press b to see ${count(blocked, "blocked finding")}.`
+              : "Nothing to clean."}
           </text>
         ) : null}
         {rows.slice(start, start + pageSize).map((finding, index) => {
@@ -243,10 +256,15 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
       {active ? <text fg={terminal}>{active.blockers.join("; ") || active.reason}</text> : null}
       <text fg={busy ? color(theme.accent) : terminal}>{status}</text>
       {report?.warnings.length ? <text fg={color(theme.high)}>Scan warnings: {report.warnings.join("; ")}</text> : null}
-      <text fg={terminal} attributes={TextAttributes.DIM}>
-        j/k move · space select · a all low risk · enter apply · b {showBlocked ? "hide" : "show"} blocked · t schedule
-        · q/esc quit
-      </text>
+      {/* One text per binding, so a narrow terminal wraps between bindings rather than inside one. */}
+      <box flexDirection="row" flexWrap="wrap">
+        {keys(showBlocked).map((binding, index, all) => (
+          <text key={binding} wrapMode="none" fg={terminal} attributes={TextAttributes.DIM}>
+            {binding}
+            {index < all.length - 1 ? " · " : ""}
+          </text>
+        ))}
+      </box>
     </box>
   );
 }

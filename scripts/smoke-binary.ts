@@ -45,11 +45,11 @@ try {
   tmux("new-session", "-d", "-s", "wizard", "-x", "100", "-y", "24", `'${executable}'`);
   const deadline = Date.now() + 20_000;
   let screen = "";
-  while (Date.now() < deadline && !screen.includes("q quit")) {
+  while (Date.now() < deadline && !screen.includes("q/esc quit")) {
     await Bun.sleep(200);
     screen = tmux("capture-pane", "-p", "-t", "wizard").stdout.toString();
   }
-  if (!screen.includes("q quit")) throw new Error(`the wizard did not start: ${screen}`);
+  if (!screen.includes("q/esc quit")) throw new Error(`the wizard did not start: ${screen}`);
   tmux("send-keys", "-t", "wizard", "q");
   console.log("version, help, schema, status, scan, plan, apply, undo and the wizard passed");
 } finally {

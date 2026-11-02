@@ -12,17 +12,37 @@ import { join } from "node:path";
 import { type Paths, run } from "./system";
 
 /**
- * When keeper first recorded usage, and the last time a process from each package was seen. Coverage starts at
- * `since`, so an app is not judged unused until the ledger has existed for the whole window it is judged against.
+ * When keeper first recorded usage, the last time a process from each package was seen, and the hours it actually
+ * sampled. Coverage is counted from `samples`, never from `since`: a timer that stopped or a machine that was off
+ * leaves a gap, and that gap extends the window rather than counting as watched.
  */
 export interface UsageLedger {
   since: string;
   sampledAt: string;
+  /** ISO time of the last sample in each UTC hour bucket, `YYYY-MM-DDTHH`. Absent in ledgers from older versions. */
+  samples?: Record<string, string>;
   /** Package name to the last time one of its executables was running. */
   packages: Record<string, string>;
 }
 
 const usagePath = (paths: Paths) => join(paths.state, "last-seen.json");
+const day = 86_400_000;
+
+/** Complete days of coverage ending at `now`, counting only days that hold a sample. */
+export function coveredDays(ledger: UsageLedger, now: number): number {
+  if (!ledger.samples) return 0; // An older ledger has no evidence of gaps, so its coverage restarts.
+  const sampled = new Set(Object.keys(ledger.samples).map((bucket) => bucket.slice(0, 10)));
+  const today = new Date(now).toISOString().slice(0, 10);
+  let cursor = Date.parse(`${today}T00:00:00Z`);
+  // The sample due today may not have run yet, so an empty today does not by itself mean the watch stopped.
+  if (!sampled.has(today)) cursor -= day;
+  let days = 0;
+  while (sampled.has(new Date(cursor).toISOString().slice(0, 10))) {
+    days++;
+    cursor -= day;
+  }
+  return days;
+}
 
 export function readUsage(paths: Paths): UsageLedger | undefined {
   try {
@@ -111,7 +131,9 @@ export async function recordUsage(paths: Paths, options: UsageOptions = {}): Pro
   }
   const packages = { ...(previous?.packages ?? {}) };
   for (const packageName of new Set(owned.values())) packages[packageName] = at;
-  const ledger: UsageLedger = { since: previous?.since ?? at, sampledAt: at, packages };
+  const hour = at.slice(0, 13);
+  const samples = { ...(previous?.samples ?? {}), [hour]: at };
+  const ledger: UsageLedger = { since: previous?.since ?? at, sampledAt: at, samples, packages };
   writeUsage(paths, ledger);
   return ledger;
 }

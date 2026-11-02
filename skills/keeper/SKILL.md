@@ -10,9 +10,11 @@ Run `keeper --help` for the command list. Output is JSON when piped.
 If `keeper` is not on `PATH`, ask the user before installing it with `paru -S keeper-bin` (or `yay`). Nightly cleanup is opt-in: run `keeper timer install` only when the user asks for it. Done when `keeper status` exits 0.
 
 1. Run `keeper scan`. Findings with empty `blockers` and an action other than `report` are eligible. `--cached` reuses categories scanned in the last minutes to hours, which suits a quick look; `plan` and `apply` always rescan.
-2. Run `keeper plan`, adding `--max-risk medium` only when the user approved worktree or package removal, or renicing a command.
+2. Run `keeper plan`, adding `--max-risk medium` only when the user approved worktree or package removal, or renicing a command. Apps, large files, downloads, screenshots and duplicates always need their ids, because a risk ceiling sweep must never take an app or personal file.
 3. Show the user the plan's size and items, then run `keeper apply PLAN --yes`.
 4. Done when exit code is 0. On 5, scan again and report what changed. On 4, make a new plan.
+
+An app is only a package with a `.desktop` launcher, and only when the ledger has sampled the whole window without a gap. `large` and `duplicates` skip game libraries, Wine prefixes, flatpak data and VM stores. If the user wants one of these removed, show the finding and ask before passing its id to `keeper plan`.
 
 When the complaint is speed rather than space, scan the two health categories first:
 

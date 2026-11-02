@@ -5,11 +5,21 @@ import { cachedScan, forget, maxAge } from "./cache";
 import { freshen, primaryCheckouts } from "./freshen";
 import { readEvents, readSamples, sample } from "./history";
 import { actor, audit, BusyError, type Claim, type Hold, readAudit, readLedger, updateLedger } from "./ledger";
-import { applyPlan, context, createPlan, freeBytes, purge, readPlan, transactions, undo, withinRisk } from "./ops";
+import { applyPlan, bulkPlan, context, createPlan, freeBytes, purge, readPlan, transactions, undo } from "./ops";
 import { defaultAppStaleDays, defaultStaleDays } from "./scanners";
 import { defaultPaths, run } from "./system";
 import { installCron, installSystemd, lastServiceResult, removeSchedule, scheduleStatus } from "./timer";
-import { type Category, categories, count, eligible, type Finding, type Risk, risks, schemaVersion } from "./types";
+import {
+  bulkEligible,
+  type Category,
+  categories,
+  count,
+  eligible,
+  type Finding,
+  type Risk,
+  risks,
+  schemaVersion,
+} from "./types";
 import { recordUsage } from "./usage";
 
 /** Each code past 2 tells the caller one thing to do next. */
@@ -26,7 +36,7 @@ const help = `keeper keeps an Arch machine clean. Output is JSON when stdout is 
   keeper scan [--category C] [--stale-days N] [--app-stale-days N] [--cached]
                                  list findings; --cached reuses categories scanned recently
   keeper plan [ID...] [--category C] [--max-risk low|medium] [--stale-days N] [--app-stale-days N]
-                                 save a plan of eligible findings
+                                 save a plan of eligible findings; apps and personal files need their id
   keeper apply PLAN --yes        rescan, then apply what is unchanged
   keeper undo TX                 restore a transaction from trash
   keeper purge [--older-days N]  delete trash for good (default ${trashDays})
@@ -49,6 +59,8 @@ Worktrees are low risk only with proof: a merged PR with the same commit, or eve
 Exit codes: 0 ok, 1 error, 2 usage, 3 needs --yes, 4 plan is entirely stale, 5 partly applied, so scan again, 6 another run holds the lock, so retry.
 Set KEEPER_ACTOR to name yourself in holds, claims and the log.
 A load finding appears only while the machine is oversubscribed, and renicing needs --max-risk medium.
+Apps, large files, downloads, screenshots and duplicates are only planned by explicit id. A bare keeper plan never
+takes them, even with --max-risk medium, because only you can say which app or personal file may go.
 Categories: ${categories.join(", ")}.`;
 
 interface Flags {
@@ -157,7 +169,9 @@ export function schema() {
     risks,
     version: packageJson.version,
     finding:
-      "id, category, risk, action, title, paths, packages, bytes, reason, blockers; worktrees add gitDir, branch and head; load findings add cpu and pids",
+      "id, category, risk, action, title, paths, packages, bytes, reason, blockers, explicit; worktrees add gitDir, branch and head; load findings add cpu and pids",
+    explicit:
+      "true means a person has to name the finding's id in `keeper plan`. A plan with no ids never takes it, whatever --max-risk says",
     bytes: "uncompressed size, so a compressing filesystem frees less. Only purge's freed field is measured",
     eligible: "blockers is empty and action is not report",
     scan: "schemaVersion, scannedAt, categoryScannedAt (when each category was scanned), cached (categories reused), findings, warnings",
@@ -170,7 +184,8 @@ export function schema() {
 }
 
 function line(finding: Finding): string {
-  const state = finding.action === "report" ? "report" : finding.blockers.length ? "blocked" : "ready";
+  const state =
+    finding.action === "report" ? "report" : finding.blockers.length ? "blocked" : finding.explicit ? "by id" : "ready";
   const why = finding.blockers.length ? finding.blockers.join("; ") : finding.reason;
   return `${finding.id}  ${measure(finding).padStart(7)}  ${finding.risk.padEnd(6)} ${state.padEnd(7)} ${finding.title}\n    ${why}`;
 }
@@ -204,7 +219,7 @@ async function auto(flags: Flags): Promise<{ value: { summary: string } & Record
   const repos = ctx.config.freshen ? await primaryCheckouts(ctx) : [];
   const freshened = await Promise.all(repos.map(freshen));
   const report = await cachedScan(ctx, { reuse: false });
-  const ready = report.findings.filter((finding) => eligible(finding) && finding.risk === "low");
+  const ready = report.findings.filter((finding) => bulkEligible(finding) && finding.risk === "low");
   const paths = ctx.paths;
   const outcome = ready.length
     ? await applyPlan(createPlan(paths, ready, ctx.staleDays, ctx.appStaleDays), ctx)
@@ -252,7 +267,7 @@ async function dispatch(
       const total = report.findings.filter(eligible).reduce((sum, finding) => sum + finding.bytes, 0);
       return {
         value: { ...report, next: "keeper plan [ID...] [--max-risk medium]" },
-        text: `${report.findings.map(line).join("\n")}\n\n${size(total)} eligible, uncompressed${report.cached.length ? `. Reused from the cache: ${report.cached.join(", ")}` : ""}`,
+        text: `${report.findings.map(line).join("\n")}\n\n${size(total)} eligible, uncompressed${report.cached.length ? `. Reused from the cache: ${report.cached.join(", ")}` : ""}\nApps and personal files show by id and are only planned when you name them.`,
       };
     }
     case "plan": {
@@ -268,7 +283,7 @@ async function dispatch(
               throw new UsageError(`${id} is not eligible: ${finding.blockers.join("; ") || finding.action}`);
             return finding;
           })
-        : report.findings.filter((finding) => eligible(finding) && withinRisk(finding, flags.maxRisk));
+        : bulkPlan(report.findings, flags.maxRisk);
       const plan = createPlan(paths, chosen, flags.staleDays, flags.appStaleDays);
       return {
         value: { ...plan, next: `keeper apply ${plan.id} --yes` },

@@ -1,4 +1,4 @@
-export const schemaVersion = 5;
+export const schemaVersion = 6;
 
 export const categories = [
   "worktree",
@@ -57,6 +57,11 @@ export interface Finding {
   reason: string;
   /** Any entry here makes the finding ineligible for a plan. */
   blockers: string[];
+  /**
+   * Personal files and apps are only planned by explicit id. A bulk `keeper plan` with a risk ceiling never takes
+   * them, because a person deciding "medium risk is fine" has not seen which game data or app it would remove.
+   */
+  explicit?: true;
   /** Git common dir, so purge can prune the worktree's metadata and undo can still restore it first. */
   gitDir?: string;
   /** Branch and commit of a worktree, so purge deletes the local branch only if it has not moved. */
@@ -117,6 +122,11 @@ export interface Reniced {
 
 export function eligible(finding: Finding): boolean {
   return finding.action !== "report" && finding.blockers.length === 0;
+}
+
+/** Eligible for a plan with no ids. Personal files and apps are deliberately left out of that sweep. */
+export function bulkEligible(finding: Finding): boolean {
+  return eligible(finding) && finding.explicit !== true;
 }
 
 /** "1 file", "2 files": a count with its noun in the right number. */

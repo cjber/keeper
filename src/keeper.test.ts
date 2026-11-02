@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { dangerous, health, runCli, schema } from "./cli";
 import { freshen } from "./freshen";
 import { BusyError, type Ledger, readLedger, updateLedger, withLock, writeLedger } from "./ledger";
-import { applyPlan, context, createPlan, loadConfig, purge, undo } from "./ops";
+import { applyPlan, bulkPlan, context, createPlan, loadConfig, purge, undo } from "./ops";
 import {
   type Context,
   defaultConfig,
@@ -717,4 +717,32 @@ test("a plan counts a worktree's own build output once, inside the worktree", ()
   const plan = createPlan(ctx.paths, [output, tree, sibling], 7);
   expect(plan.findingIds).toEqual(["tree", "sibling"]);
   expect(plan.bytes).toBe(5);
+});
+
+test("a bulk plan never takes apps or personal files, whatever the risk ceiling", () => {
+  const finding = (id: string, category: Finding["category"], risk: Finding["risk"]): Finding => ({
+    id,
+    category,
+    title: id,
+    paths: [`/${id}`],
+    packages: [],
+    bytes: 1,
+    risk,
+    action: category === "apps" ? "remove-packages" : "trash",
+    reason: "",
+    blockers: [],
+    ...(category === "apps" || category === "large" || category === "duplicates" ? { explicit: true as const } : {}),
+  });
+  const chosen = bulkPlan(
+    [
+      finding("orphan", "orphans", "medium"),
+      finding("app", "apps", "medium"),
+      finding("large", "large", "low"),
+      finding("duplicate", "duplicates", "medium"),
+      finding("low", "agent", "low"),
+    ],
+    "medium",
+  );
+  expect(chosen.map((item) => item.id)).toEqual(["orphan", "low"]);
+  expect(schema().explicit).toContain("keeper plan");
 });

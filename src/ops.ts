@@ -16,6 +16,7 @@ import {
 } from "./scanners";
 import { defaultPaths, expandHome, liveFiles, niceness, type Paths, run, waitFor } from "./system";
 import {
+  bulkEligible,
   eligible,
   type Finding,
   outermost,
@@ -368,6 +369,14 @@ async function purgeUnlocked(paths: Paths, olderThanDays: number, now: number): 
 
 export function withinRisk(finding: Finding, max: Risk): boolean {
   return risks.indexOf(finding.risk) <= risks.indexOf(max);
+}
+
+/**
+ * What `keeper plan` takes without ids. Personal files and apps carry `explicit`, so no risk ceiling sweep can
+ * reach them: their ids are the only way in.
+ */
+export function bulkPlan(findings: readonly Finding[], max: Risk): Finding[] {
+  return findings.filter((finding) => bulkEligible(finding) && withinRisk(finding, max));
 }
 
 export async function freeBytes(path: string): Promise<number> {

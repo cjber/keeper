@@ -24,7 +24,7 @@ Every version needs a `CHANGELOG.md` entry. `python3 scripts/wordmark.py` regene
 - `src/scanners.ts`: read-only findings and their blockers
 - `src/ops.ts`: plans, apply, trash, undo, purge
 - `src/ledger.ts`: holds, claims, audit log, lock
-- `src/usage.ts`: last-seen ledger of running executables, folded to packages; written by `keeper sample`, read by `apps`
+- `src/usage.ts`: last-seen ledger of running executables, folded to packages; written by `keeper sample`, read by `apps`; coverage comes from the hours actually sampled, never from `since`
 - `src/cli.ts`: argument parsing, output, exit codes
 - `src/freshen.ts`: returns main checkouts to the default branch and fast-forwards them
 - `src/timer.ts`: systemd and cron schedules
@@ -37,6 +37,9 @@ Every version needs a `CHANGELOG.md` entry. `python3 scripts/wordmark.py` regene
 - Do not treat atime, or the git index mtime, as evidence of use.
 - `apply` rescans and matches ids. Never add a path that skips that check.
 - Only low-risk findings may run unattended. A worktree is low risk only with proof, and packages stay behind approval.
+- Apps and personal files (`apps`, `large`, `downloads`, `screenshots`, `duplicates`) carry `explicit`, so a plan with no ids never takes them, whatever `--max-risk` says. Only an explicit id selects them.
+- `large` and `duplicates` skip application trees: Wine prefixes, Steam, Lutris, Heroic, GOG, `~/Games` style libraries, flatpak data, VM stores, and any directory holding an install marker. A duplicate is offered only across different top-level personal document folders.
+- Apps are only packages with a `.desktop` launcher. A CLI-only package is out of scope, because the hourly sample rarely catches short-lived tools and daemons run as other users.
 - A merged PR proves a worktree only when its head is the local commit, or holds it as an ancestor while the checkout has unpushed commits, because branch names get reused. Only that proof outruns the age window: a branch just cut from main is contained in main too.
 - keeper never starts an LLM. The calling agent judges, and a hold is the only verdict it can give, so judgement can add a blocker but never clear one.
 - An agent's hold beats every scanner. Mutations go through `withLock` and write to the audit log.

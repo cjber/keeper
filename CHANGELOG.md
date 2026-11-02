@@ -24,7 +24,8 @@ First release.
   `keeper claim` for declaring intent, and `keeper schema` for the whole interface.
 - **A terminal wizard** that lists what you can act on first, colours risk and category with your terminal theme's
   palette, and opens in about a second by rescanning only the categories that are due. `g` switches to the disk each
-  category holds and to free space over time, marked with each apply, purge, undo and nightly run. `r` rescans all.
+  category holds, with why the rest waits, and to a line of free space over time marked with each apply, purge and
+  undo. `r` rescans all.
 - **Says how to unblock.** Every blocker names its next step: push the commits, merge or close the PR, wait out the
   age window, or `keeper release` the hold.
 - **Free space history.** keeper records free space whenever it runs and hourly with the timer, and

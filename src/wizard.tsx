@@ -2,7 +2,7 @@ import { RGBA, TextAttributes } from "@opentui/core";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import { useEffect, useState } from "react";
 import { type CachedScan, cachedScan, lastKnown } from "./cache";
-import { freeChart, markerRuns, marks, spaceBars } from "./charts";
+import { freeChart, marks, spaceBars, waits } from "./charts";
 import { measure, size } from "./cli";
 import { type Event, readEvents, readSamples, type Sample, sample } from "./history";
 import { applyPlan, context, createPlan } from "./ops";
@@ -96,15 +96,16 @@ const stamp = (iso: string | number) => {
   const date = new Date(iso);
   return `${two(date.getMonth() + 1)}-${two(date.getDate())} ${time(iso)}`;
 };
+const weekday = (iso: string) => new Date(iso).toLocaleDateString("en-GB", { weekday: "short" });
 const describe = (event: Event) =>
   event.event === "apply"
     ? `moved ${size(event.bytes ?? 0)} to trash`
     : event.event === "purge"
       ? `purge freed ${size(event.bytes ?? 0)}`
-      : event.event === "undo"
-        ? "undo restored a transaction"
-        : "nightly run";
-const legend = "▲ apply · ◆ purge · ↺ undo · · nightly run";
+      : "undo restored a transaction";
+/** Space under this folds into one line, so the bars show where the disk actually went. */
+const smallBar = 100 * 1024 ** 2;
+const labelWidth = 7;
 
 /** Holds selection only. Every safety rule stays in the scan and apply calls an agent would make. */
 export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; theme?: Theme }) {
@@ -234,14 +235,24 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
   // One line at the bottom, so the list never moves when a scan starts or ends.
   const status = clip(progress ? scanning() : busy ? `Working${shown}` : idle, width - 2);
   const riskColor = { low: theme.low, medium: theme.medium, high: theme.high };
+  const bars = view === "space" ? spaceBars(all) : [];
+  const sum = (rows: typeof bars, key: "ready" | "blocked") => rows.reduce((total, bar) => total + bar[key], 0);
+  // The graph views explain themselves, so this line holds the space key, or the events the chart marks.
+  const plotWidth = Math.max(width - 2 - labelWidth - 2, 2);
+  const plotted =
+    view === "history" ? freeChart(history.samples, history.events, plotWidth, panel - 2, Date.now(), size) : undefined;
   const explanation =
     view === "list"
       ? active
         ? active.blockers.join("; ") || active.reason
         : ""
       : view === "space"
-        ? "Disk each category holds: █ ready to clean now, ░ waiting on a blocker. In the list, b shows why each waits"
-        : `${legend}. Readings come from every keeper run and, with the timer on, every hour`;
+        ? "█ ready to clean now · ░ waiting on a blocker · b in the list shows each reason"
+        : (plotted?.events ?? [])
+            .slice(-4)
+            .reverse()
+            .map((event) => `${marks[event.event]} ${weekday(event.at)} ${time(event.at)}  ${describe(event)}`)
+            .join("    ") || "Readings come from every keeper run and, with the timer on, every hour";
 
   const list = (
     <>
@@ -301,33 +312,82 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
   );
 
   const space = () => {
-    const bars = spaceBars(all).slice(0, panel);
     if (!bars.length) return <text fg={terminal}>{report ? "No category holds disk worth showing." : "Scanning"}</text>;
-    const most = Math.max(...bars.map((bar) => bar.ready + bar.blocked));
-    // Label, then the sizes after the bar: " 12.3G ready · 140.0G blocked" is 30 columns.
-    const room = Math.max(width - 2 - 14 - 30, 4);
+    const big = bars.filter((bar) => bar.ready + bar.blocked >= smallBar);
+    const reasons = waits(all);
+    // Bars first, then why the rest waits, each trimmed to the rows the panel has.
+    // Narrow enough that each count stays next to its reason on a wide terminal.
+    const reasonWidth = Math.max(Math.min(width - 2, 64) - 15, 1);
+    const reasonRows = Math.min(reasons.length, Math.max(panel - big.length - 4, 0));
+    const shownBars = big.slice(0, Math.max(panel - 2 - (reasonRows ? reasonRows + 2 : 0), 1));
+    const folded = bars.length - shownBars.length;
+    const most = Math.max(...shownBars.map((bar) => bar.ready + bar.blocked));
+    const room = Math.max(width - 2 - 14 - 16 - 2, 4);
     const cells = (bytes: number) => (bytes > 0 ? Math.max(1, Math.round((bytes / most) * room)) : 0);
-    return bars.map((bar) => {
-      const ready = cells(bar.ready);
-      const waiting = Math.min(cells(bar.blocked), room - ready);
-      return (
-        <text key={bar.category} wrapMode="none" fg={terminal}>
-          <span fg={color(theme.category)}>{bar.category.padEnd(14)}</span>
-          <span fg={color(theme.low)}>{"█".repeat(ready)}</span>
-          <span fg={color(theme.blocked)}>{"░".repeat(waiting)}</span>
-          {" ".repeat(room - ready - waiting)} {size(bar.ready).padStart(6)} ready · {size(bar.blocked).padStart(6)}{" "}
-          blocked
+    const dim = color(theme.blocked);
+    return (
+      <>
+        <text wrapMode="none" fg={dim} attributes={theme.blocked ? 0 : TextAttributes.DIM}>
+          {"".padEnd(14)}
+          {"ready".padStart(7)}
+          {"waiting".padStart(9)}
         </text>
-      );
-    });
+        {shownBars.map((bar) => {
+          const ready = cells(bar.ready);
+          const waiting = Math.min(cells(bar.blocked), room - ready);
+          return (
+            <text key={bar.category} wrapMode="none" fg={terminal}>
+              <span fg={color(theme.category)}>{bar.category.padEnd(14)}</span>
+              {size(bar.ready).padStart(7)}
+              {size(bar.blocked).padStart(9)}
+              {"  "}
+              <span fg={color(theme.low)}>{"█".repeat(ready)}</span>
+              <span fg={dim}>{"░".repeat(waiting)}</span>
+            </text>
+          );
+        })}
+        {folded ? (
+          <text wrapMode="none" fg={dim} attributes={theme.blocked ? 0 : TextAttributes.DIM}>
+            {count(folded, "more category", "more categories")} under {size(smallBar)}
+          </text>
+        ) : null}
+        {reasonRows ? (
+          <>
+            <text> </text>
+            <text wrapMode="none" fg={color(theme.accent)} attributes={TextAttributes.BOLD}>
+              {clip("Why it waits", reasonWidth).padEnd(reasonWidth)}
+              {"count".padStart(6)}
+              {"size".padStart(9)}
+            </text>
+            {reasons.slice(0, reasonRows).map((wait) => (
+              <text key={wait.reason} wrapMode="none" fg={terminal}>
+                {clip(wait.reason, reasonWidth).padEnd(reasonWidth)}
+                {String(wait.count).padStart(6)}
+                {size(wait.bytes).padStart(9)}
+              </text>
+            ))}
+          </>
+        ) : null}
+      </>
+    );
+  };
+
+  const headline = () => {
+    const last = history.samples.at(-1);
+    if (!last) return "";
+    const first = plotted ? history.samples.find((sample) => Date.parse(sample.at) >= plotted.start) : undefined;
+    const change = first ? last.free - first.free : 0;
+    const span = Date.now() - Date.parse(first?.at ?? "");
+    const over =
+      span >= 2 * 86_400_000
+        ? count(Math.round(span / 86_400_000), "day")
+        : count(Math.max(1, Math.round(span / 3_600_000)), "hour");
+    const since = first ? `, ${change >= 0 ? "up" : "down"} ${size(Math.abs(change))} in ${over}` : "";
+    return ` · ${size(last.free)} of ${size(last.size)}${since}`;
   };
 
   const chart = () => {
-    const { samples, events } = history;
-    const last = samples.at(-1);
-    const legendLines = Math.min(3, events.length, Math.max(panel - 7, 0));
-    const axis = Math.max(width - 2 - 8, 2);
-    const plotted = freeChart(samples, events, axis, panel - 3 - legendLines, Date.now());
+    const last = history.samples.at(-1);
     if (!plotted || !last) {
       return (
         <>
@@ -338,51 +398,42 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
         </>
       );
     }
-    const first = samples.find((entry) => Date.parse(entry.at) >= plotted.start) ?? samples[0];
-    const change = first ? last.free - first.free : 0;
-    const markColor = { apply: theme.low, purge: theme.accent, undo: theme.medium, auto: "" };
-    const startLabel =
-      plotted.end - plotted.start > 2 * 86_400_000 ? stamp(plotted.start).slice(0, 5) : time(plotted.start);
+    const dim = { fg: terminal, attributes: TextAttributes.DIM };
+    const ink = { line: color(theme.accent), grid: terminal, rule: terminal, blank: terminal };
+    const markColor = { apply: theme.low, purge: theme.accent, undo: theme.medium };
     return (
       <>
-        <text wrapMode="none" fg={terminal}>
-          Free space: {size(last.free)} of {size(last.size)}, {change >= 0 ? "up" : "down"} {size(Math.abs(change))}{" "}
-          since {stamp(plotted.start)}
-        </text>
-        {plotted.rows.map((row) => (
-          <text key={`level-${row.level}`} wrapMode="none" fg={terminal}>
-            <span fg={terminal}>
-              {(row.level === plotted.rows.length - 1
-                ? size(plotted.top)
-                : row.level === 0
-                  ? size(plotted.bottom)
-                  : ""
-              ).padStart(7)}{" "}
-            </span>
-            <span fg={color(theme.accent)}>{row.text}</span>
+        {plotted.rows.map((row, index) => (
+          <text key={`row-${index === 0 ? "top" : index}`} wrapMode="none" fg={terminal}>
+            <span {...dim}>{row.label.padStart(labelWidth)} ┤</span>
+            {row.runs.map((run) => (
+              <span
+                key={`run-${run.column}`}
+                fg={ink[run.ink]}
+                attributes={run.ink === "line" ? 0 : TextAttributes.DIM}
+              >
+                {run.text}
+              </span>
+            ))}
           </text>
         ))}
         <text wrapMode="none" fg={terminal}>
-          {"        "}
-          {markerRuns(plotted.markers).map((run) => (
-            <span key={`marks-${run.column}`} fg={color(run.kind ? markColor[run.kind] : "")}>
-              {(run.kind ? marks[run.kind] : " ").repeat(run.width)}
+          <span {...dim}>
+            {"".padStart(labelWidth)} └{"─".repeat(plotWidth)}
+          </span>
+        </text>
+        <text wrapMode="none" fg={terminal}>
+          {"".padStart(labelWidth + 2)}
+          {plotted.axis.map((cell) => (
+            <span
+              key={`axis-${cell.column}`}
+              fg={cell.kind ? color(markColor[cell.kind]) : terminal}
+              attributes={cell.kind ? 0 : TextAttributes.DIM}
+            >
+              {cell.text}
             </span>
           ))}
         </text>
-        <text wrapMode="none" fg={terminal} attributes={TextAttributes.DIM}>
-          {"        "}
-          {startLabel}
-          {"now".padStart(Math.max(axis - startLabel.length, 3))}
-        </text>
-        {events
-          .slice(-legendLines)
-          .reverse()
-          .map((event) => (
-            <text key={`${event.at}-${event.event}`} wrapMode="none" fg={terminal}>
-              {marks[event.event]} {stamp(event.at)} {describe(event)}
-            </text>
-          ))}
       </>
     );
   };
@@ -393,7 +444,9 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
         {clip(
           view === "list"
             ? `keeper · ${open.length} eligible, ${blocked} blocked · ${chosen.length ? `${size(total)} selected, uncompressed` : "nothing selected"}`
-            : `keeper · ${view === "space" ? "space by category" : "free space over time"} · g for the next view`,
+            : view === "space"
+              ? `keeper · space · ${size(sum(bars, "ready"))} ready now, ${size(sum(bars, "blocked"))} waiting`
+              : `keeper · free space${headline()}`,
           width - 2,
         )}
       </text>

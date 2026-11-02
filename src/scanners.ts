@@ -604,21 +604,22 @@ async function scanBuild(context: Context): Promise<Finding[]> {
       .filter((path) => buildDirs.test(path));
     return [...top, ...nested].filter(isDirectory);
   });
+  // A recent build still counts, as blocked, so the space it holds shows as build output rather than as its worktree.
   const ignored = (
     await Promise.all(
       candidates.map(async (path) => {
-        if (await hasRecentFile(path, staleBuildDays)) return undefined;
         const parent = dirname(path);
         const name = basename(path);
         const check = await run(["git", "-C", parent, "check-ignore", "-q", name]);
         const tracked = await run(["git", "-C", parent, "ls-files", name]);
-        return check.code === 0 && tracked.code === 0 && tracked.stdout === "" ? path : undefined;
+        if (check.code !== 0 || tracked.code !== 0 || tracked.stdout !== "") return undefined;
+        return { path, recent: await hasRecentFile(path, staleBuildDays) };
       }),
     )
-  ).filter((path): path is string => path !== undefined);
-  const bytes = await sizes(ignored);
-  return ignored.map((path) => ({
-    id: findingId("build", path, String(bytes.get(path))),
+  ).filter((entry) => entry !== undefined);
+  const bytes = await sizes(ignored.map((entry) => entry.path));
+  return ignored.map(({ path, recent }) => ({
+    id: findingId("build", path, `${bytes.get(path)}\0${recent}`),
     category: "build",
     risk: "low",
     action: "trash",
@@ -627,7 +628,12 @@ async function scanBuild(context: Context): Promise<Finding[]> {
     packages: [],
     bytes: bytes.get(path) ?? 0,
     reason: "Git-ignored build output, restored by the next build or install",
-    blockers: holders(path, context.live) ? ["in use by a running process"] : [],
+    blockers: [
+      ...(holders(path, context.live) ? [inUse] : []),
+      ...(recent
+        ? [`built in the last ${count(staleBuildDays, "day")}, offered after ${count(staleBuildDays, "idle day")}`]
+        : []),
+    ],
   }));
 }
 

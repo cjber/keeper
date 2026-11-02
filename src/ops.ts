@@ -13,7 +13,7 @@ import {
   lowestPriority,
   scan,
 } from "./scanners";
-import { defaultPaths, expandHome, liveFiles, niceness, type Paths, run } from "./system";
+import { defaultPaths, expandHome, liveFiles, niceness, type Paths, run, waitFor } from "./system";
 import {
   eligible,
   type Finding,
@@ -337,7 +337,7 @@ async function purgeUnlocked(paths: Paths, olderThanDays: number, now: number): 
   if (purged.length === 0) return { purged, bytes, freed: 0, failed };
   // Copy-on-write filesystems release space when the transaction commits, so measuring now needs a sync. A busy
   // disk can take far longer to flush, and the lock is held meanwhile, so past two seconds `freed` may undercount.
-  await run(["timeout", "2", "sync", "--file-system", paths.home]);
+  await waitFor(["sync", "--file-system", paths.home], 2000);
   return { purged, bytes, freed: Math.max(0, (await freeBytes(paths.home)) - freeBefore), failed };
 }
 

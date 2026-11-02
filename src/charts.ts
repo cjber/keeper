@@ -1,27 +1,49 @@
 import type { Event, Sample } from "./history";
 import { type Category, eligible, type Finding, outermost } from "./types";
 
-const levels = " ▁▂▃▄▅▆▇█";
 const gigabyte = 1024 ** 3;
+const hour = 3_600_000;
+const day = 24 * hour;
 
-/** The mark each event leaves under the chart, newest wins a column, and a purge or apply outranks a nightly run. */
-export const marks: Record<Event["event"], string> = { purge: "◆", apply: "▲", undo: "↺", auto: "·" };
-const rank: Event["event"][] = ["auto", "undo", "apply", "purge"];
+/** The mark an event leaves on the time axis. Nightly runs leave none: one a day is noise, not news. */
+export const marks = { purge: "◆", apply: "▲", undo: "↺" } as const;
+type Marked = keyof typeof marks;
+const isMarked = (event: Event): event is Event & { event: Marked } => event.event in marks;
+/** When two events share a column, the one that changed the most space shows. */
+const rank: Marked[] = ["undo", "apply", "purge"];
+
+/** What a cell draws: the line itself, a gridline, an event's rule, or nothing. */
+export type Ink = "line" | "grid" | "rule" | "blank";
 
 export interface FreeChart {
-  /** Top row first, each exactly `columns` wide. `level` counts rows up from the axis, which identifies a row. */
-  rows: { level: number; text: string }[];
-  /** One entry per column: the event kind marked there, if any. */
-  markers: (Event["event"] | undefined)[];
+  /** Top row first. Each row is runs of one ink, keyed by the column they start at. */
+  rows: { label: string; runs: { column: number; ink: Ink; text: string }[] }[];
+  /** The axis under the chart: event marks, and day or hour labels where they fit between them. */
+  axis: { column: number; kind?: Marked; text: string }[];
+  /** The events drawn, oldest first. */
+  events: (Event & { event: Marked })[];
   top: number;
   bottom: number;
   start: number;
-  end: number;
 }
 
+/** 1, 2 or 5 times a power of ten, in bytes, so the gridlines land on round values. */
+function niceStep(range: number): number {
+  const magnitude = 10 ** Math.floor(Math.log10(range));
+  return [1, 2, 5, 10].map((factor) => factor * magnitude).find((candidate) => candidate >= range) ?? range;
+}
+
+/** Braille gives each cell a 2 by 4 grid of dots, so a line reads as a line rather than a filled wall. */
+const dots = [
+  [0x01, 0x08],
+  [0x02, 0x10],
+  [0x04, 0x20],
+  [0x40, 0x80],
+];
+
 /**
- * A column chart of free space from the first reading (or `days` back, if later) to now. Each column holds the last
- * reading at or before its end, so a gap between readings repeats the value rather than dropping to zero.
+ * A line of free space from the first reading (or `days` back, if later) to now. The last reading carries on to now,
+ * so the line ends where the axis does. Gridlines sit at the top, middle and bottom, on round values.
  */
 export function freeChart(
   samples: readonly Sample[],
@@ -29,59 +51,109 @@ export function freeChart(
   columns: number,
   height: number,
   now: number,
+  label: (bytes: number) => string,
   days = 30,
 ): FreeChart | undefined {
-  if (samples.length < 2 || columns < 2 || height < 1) return undefined;
-  const times = samples.map((sample) => Date.parse(sample.at));
-  const start = Math.max(times[0] as number, now - days * 86_400_000);
-  const end = Math.max(now, start + 3_600_000);
-  const span = (end - start) / columns;
-  const values: (number | undefined)[] = [];
-  let next = 0;
-  let current: number | undefined;
-  for (let column = 0; column < columns; column++) {
-    const edge = start + (column + 1) * span;
-    while (next < samples.length && (times[next] as number) <= edge) current = samples[next++]?.free;
-    values.push(current);
-  }
-  const known = values.filter((value): value is number => value !== undefined);
-  const low = Math.min(...known);
-  const high = Math.max(...known);
-  // Padding keeps a flat line off the floor and the ceiling, so a small change still shows.
-  const pad = Math.max((high - low) * 0.1, gigabyte);
-  const bottom = Math.max(0, low - pad);
-  const top = high + pad;
-  const steps = height * 8;
-  const rows = Array.from({ length: height }, (_, row) => {
-    const level = height - 1 - row;
-    const text = values
-      .map((value) => {
-        if (value === undefined) return " ";
-        const filled = Math.round(((value - bottom) / (top - bottom)) * steps) - level * 8;
-        return levels[Math.max(0, Math.min(8, filled))];
-      })
-      .join("");
-    return { level, text };
+  if (samples.length < 2 || columns < 2 || height < 3) return undefined;
+  const start = Math.max(Date.parse(samples[0]?.at ?? ""), now - days * day);
+  const end = Math.max(now, start + hour);
+  const shown = samples.filter((sample, index) => {
+    const next = samples[index + 1];
+    // The reading before the window still sets where the line starts.
+    return Date.parse(sample.at) >= start || (next !== undefined && Date.parse(next.at) > start);
   });
-  const markers: (Event["event"] | undefined)[] = Array.from({ length: columns }, () => undefined);
-  for (const event of events) {
-    const column = Math.floor((Date.parse(event.at) - start) / span);
-    if (column < 0 || column >= columns) continue;
-    const there = markers[column];
-    if (!there || rank.indexOf(event.event) > rank.indexOf(there)) markers[column] = event.event;
+  const values = shown.map((sample) => sample.free / gigabyte);
+  const low = Math.min(...values);
+  const high = Math.max(...values);
+  const step = niceStep(Math.max((high - low) / 4, 0.25)) * gigabyte;
+  const bottom = Math.max(0, Math.floor((low * gigabyte) / step) * step);
+  const ceiling = Math.max(Math.ceil((high * gigabyte) / step) * step, bottom + step);
+  // An even number of steps puts the middle gridline on a round value too.
+  const top = Math.round((ceiling - bottom) / step) % 2 ? ceiling + step : ceiling;
+  const width = columns * 2;
+  const depth = height * 4;
+  const x = (at: number) => Math.round(((Math.max(at, start) - start) / (end - start)) * (width - 1));
+  const y = (free: number) => Math.round(((top - free) / (top - bottom)) * (depth - 1));
+  const pixels = new Set<number>();
+  const points = [
+    ...shown.map((sample) => [x(Date.parse(sample.at)), y(sample.free)]),
+    [width - 1, y(shown.at(-1)?.free ?? 0)],
+  ];
+  points.reduce((from, to) => {
+    const [x0 = 0, y0 = 0] = from;
+    const [x1 = 0, y1 = 0] = to;
+    const steps = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0), 1);
+    for (let i = 0; i <= steps; i++) {
+      pixels.add(Math.round(y0 + ((y1 - y0) * i) / steps) * width + Math.round(x0 + ((x1 - x0) * i) / steps));
+    }
+    return to;
+  });
+
+  const drawn = events.filter(isMarked).filter((event) => Date.parse(event.at) >= start && Date.parse(event.at) <= end);
+  const markAt = new Map<number, Marked>();
+  for (const event of drawn) {
+    const column = Math.floor(x(Date.parse(event.at)) / 2);
+    const there = markAt.get(column);
+    if (!there || rank.indexOf(event.event) > rank.indexOf(there)) markAt.set(column, event.event);
   }
-  return { rows, markers, top, bottom, start, end };
+
+  const half = (top + bottom) / 2;
+  const middle = Math.floor(y(half) / 4);
+  const rows = Array.from({ length: height }, (_, row) => {
+    const gridline = row === 0 || row === middle || row === height - 1;
+    const cells = Array.from({ length: columns }, (_, column): [Ink, string] => {
+      let code = 0;
+      for (let dy = 0; dy < 4; dy++) {
+        for (let dx = 0; dx < 2; dx++) {
+          if (pixels.has((row * 4 + dy) * width + column * 2 + dx)) code |= dots[dy]?.[dx] ?? 0;
+        }
+      }
+      if (code) return ["line", String.fromCharCode(0x2800 + code)];
+      if (markAt.has(column)) return ["rule", "┊"];
+      return gridline ? ["grid", "┄"] : ["blank", " "];
+    });
+    const runs: FreeChart["rows"][number]["runs"] = [];
+    cells.forEach(([ink, text], column) => {
+      const last = runs.at(-1);
+      if (last && last.ink === ink) last.text += text;
+      else runs.push({ column, ink, text });
+    });
+    const tick = row === 0 ? top : row === height - 1 ? bottom : row === middle ? half : undefined;
+    return { label: tick === undefined ? "" : label(tick), runs };
+  });
+
+  return { rows, axis: timeAxis(start, end, columns, markAt), events: drawn, top, bottom, start };
 }
 
-/** Consecutive columns with the same mark, or none, so each run renders as one span keyed by where it starts. */
-export function markerRuns(markers: readonly (Event["event"] | undefined)[]) {
-  const runs: { column: number; kind: Event["event"] | undefined; width: number }[] = [];
-  markers.forEach((kind, column) => {
-    const last = runs.at(-1);
-    if (last && last.kind === kind) last.width++;
-    else runs.push({ column, kind, width: 1 });
+/** Weekday names at midnight over two days or more, otherwise hours. A label never covers an event's mark. */
+function timeAxis(start: number, end: number, columns: number, markAt: ReadonlyMap<number, Marked>) {
+  const column = (at: number) => Math.floor(((at - start) / (end - start)) * columns);
+  const taken: (Marked | string | undefined)[] = Array.from({ length: columns }, (_, at) => markAt.get(at));
+  const long = end - start >= 2 * day;
+  const every = long ? day : hour * Math.max(1, Math.ceil((end - start) / hour / Math.max(columns / 8, 1)));
+  const first = new Date(start);
+  if (long) first.setHours(24, 0, 0, 0);
+  else first.setMinutes(60, 0, 0);
+  for (let at = first.getTime(); at < end; at += every) {
+    const date = new Date(at);
+    const text = long
+      ? date.toLocaleDateString("en-GB", { weekday: "short" })
+      : `${String(date.getHours()).padStart(2, "0")}:00`;
+    const from = column(at);
+    // One free cell either side, so neighbouring labels and marks never touch.
+    if (from + text.length > columns) continue;
+    if (taken.slice(Math.max(from - 1, 0), from + text.length + 1).some(Boolean)) continue;
+    for (let i = 0; i < text.length; i++) taken[from + i] = text[i];
+  }
+  const axis: FreeChart["axis"] = [];
+  taken.forEach((cell, at) => {
+    const kind = cell && cell in marks ? (cell as Marked) : undefined;
+    const text = kind ? marks[kind] : (cell ?? " ");
+    const last = axis.at(-1);
+    if (last && !last.kind && !kind) last.text += text;
+    else axis.push({ column: at, kind, text });
   });
-  return runs;
+  return axis;
 }
 
 export interface Bar {
@@ -90,20 +162,73 @@ export interface Bar {
   blocked: number;
 }
 
+/**
+ * Bytes each finding holds on its own: a finding that contains another category's finding, like a worktree holding
+ * build output, leaves those bytes to the more specific one, so every byte is counted once.
+ */
+function ownBytes(findings: readonly Finding[]): Map<Finding, number> {
+  const disk = findings.filter((finding) => finding.category !== "load" && finding.category !== "memory");
+  const own = new Map(disk.map((finding) => [finding, finding.bytes]));
+  for (const inner of disk) {
+    for (const outer of disk) {
+      if (outer === inner || outer.category === inner.category) continue;
+      if (inner.paths.some((path) => outer.paths.some((parent) => path.startsWith(`${parent}/`)))) {
+        own.set(outer, Math.max(0, (own.get(outer) ?? 0) - inner.bytes));
+      }
+    }
+  }
+  return own;
+}
+
 /** Disk held per category, split into what can go now and what waits on a blocker. Load and memory hold no disk. */
 export function spaceBars(findings: readonly Finding[]): Bar[] {
+  const own = ownBytes(findings);
   const bars = new Map<Category, Bar>();
-  for (const finding of findings) {
-    if (finding.category === "load" || finding.category === "memory" || finding.bytes <= 0) continue;
+  for (const [finding, bytes] of own) {
+    if (bytes <= 0) continue;
     const bar = bars.get(finding.category) ?? { category: finding.category, ready: 0, blocked: 0 };
     bars.set(finding.category, bar);
-    if (!eligible(finding)) bar.blocked += finding.bytes;
+    if (!eligible(finding)) bar.blocked += bytes;
   }
-  // Each bar counts its own category: nested paths within it once, as applying would, but a build folder inside a
-  // worktree still counts as build, since that is the category that offers it.
+  // Ready space within a category counts nested paths once, as applying would.
   for (const bar of bars.values()) {
-    const own = findings.filter((finding) => finding.category === bar.category && eligible(finding));
-    bar.ready = outermost(own).reduce((sum, finding) => sum + finding.bytes, 0);
+    const ready = outermost(
+      [...own.keys()].filter((finding) => finding.category === bar.category && eligible(finding)),
+    );
+    bar.ready = ready.reduce((sum, finding) => sum + (own.get(finding) ?? 0), 0);
   }
   return [...bars.values()].sort((a, b) => b.ready + b.blocked - (a.ready + a.blocked));
+}
+
+/** Each blocker reworded without its numbers, so findings waiting on the same thing group together. */
+const reasons: [RegExp, string][] = [
+  [/^PR #\d+ is open/, "PR is open, merge or close it"],
+  [/on no remote/, "commits on no remote, push them"],
+  [/uncommitted or untracked/, "uncommitted files, commit or stash them"],
+  [/^touched/, "touched recently, offered once idle"],
+  [/^built/, "built recently, offered once idle"],
+  [/^in use|is running|operation is running|build is running/, "in use, offered once it stops"],
+  [/^held by/, "held, keeper release PATH ends it"],
+  [/is in progress/, "git operation in progress, finish or abort it"],
+];
+
+export interface Wait {
+  reason: string;
+  count: number;
+  bytes: number;
+}
+
+/** Why space waits, by each finding's first blocker, largest first. A finding counts once, so the sizes add up. */
+export function waits(findings: readonly Finding[]): Wait[] {
+  const groups = new Map<string, Wait>();
+  for (const [finding, bytes] of ownBytes(findings)) {
+    const first = finding.blockers[0];
+    if (!first || bytes <= 0) continue;
+    const reason = reasons.find(([pattern]) => pattern.test(first))?.[1] ?? first.replace(/\d+/g, "N");
+    const group = groups.get(reason) ?? { reason, count: 0, bytes: 0 };
+    group.count++;
+    group.bytes += bytes;
+    groups.set(reason, group);
+  }
+  return [...groups.values()].sort((a, b) => b.bytes - a.bytes);
 }

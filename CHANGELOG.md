@@ -14,6 +14,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   `mkdtemp` directories are one finding per name pattern. `keeper auto` applies it, since it is low risk.
 - **Large plans move faster.** Apply and undo move paths in batches, so a finding with thousands of paths takes seconds
   rather than minutes.
+- **`keeper --help` points agents to the skill.** It names `npx skills add cjber/keeper`, and keeper.cjber.dev serves
+  an `llms.txt` for agents.
 
 ## [0.2.1] - 2026-11-02
 

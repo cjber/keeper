@@ -1,0 +1,12 @@
+{
+  "name": "keeper",
+  "description": "Free disk space or clean up an Arch machine with the keeper CLI, and diagnose a machine that is too loaded or too low on memory to use. keeper proves work is finished before removing it, moves everything to an undoable trash, and returns JSON to agents.",
+  "author": {
+    "name": "Cillian Berragan",
+    "url": "https://github.com/cjber"
+  },
+  "homepage": "https://keeper.cjber.dev",
+  "repository": "https://github.com/cjber/keeper",
+  "license": "MIT",
+  "keywords": ["agent-skills", "arch-linux", "cleanup", "disk-space", "worktrees", "aur", "maintenance"]
+}

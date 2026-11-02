@@ -7,6 +7,8 @@ description: Free disk space or clean up an Arch machine with the keeper CLI, co
 
 Run `keeper --help` for the command list. Output is JSON when piped.
 
+If `keeper` is not on `PATH`, ask the user before installing it with `paru -S keeper-bin` (or `yay`). Nightly cleanup is opt-in: run `keeper timer install` only when the user asks for it. Done when `keeper status` exits 0.
+
 1. Run `keeper scan`. Findings with empty `blockers` and an action other than `report` are eligible.
 2. Run `keeper plan`, adding `--max-risk medium` only when the user approved worktree or package removal, or renicing a command.
 3. Show the user the plan's size and items, then run `keeper apply PLAN --yes`.
@@ -25,5 +27,7 @@ Protect work and declare scratch as you go, because this is how keeper knows int
 - Creating scratch outside a repo: `keeper claim PATH`.
 - Set `KEEPER_ACTOR` to your session name so `keeper log` shows who did what.
 - Exit code 6 means another run holds the lock, so wait and retry.
+
+Unused Docker volumes are a `report` finding because they can hold database data and removing one cannot be undone. List their Compose projects for the user, and run `docker volume rm` only on the volumes they name.
 
 Treat a blocker as final: never remove a blocked path by hand. Exit code 3 means `--yes` is missing, and that needs the user's approval when the plan includes medium-risk items.

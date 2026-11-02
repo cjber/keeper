@@ -34,20 +34,31 @@ behind, moves it to a trash you can undo, and proves its work before it touches 
 ## Install
 
 ```sh
-paru -S keeper-bin    # standalone binary
-# or: paru -S keeper  # Bun source package
+paru -S keeper-bin               # standalone binary
+# or: paru -S keeper             # Bun source package
+# or: npm i -g @cillianb/keeper  # same binary from npm, x64 and arm64
 ```
+
+`npx @cillianb/keeper scan` runs it once without installing. Install it before `keeper timer install`, so the schedule
+points at a path that stays put.
 
 ## Set up with your agent
 
-Copy the skill into your agent's skills directory, then give it this prompt:
+Install the skill for any agent that reads [Agent Skills](https://agentskills.io):
+
+```sh
+npx skills add cjber/keeper
+```
+
+In Claude Code you can use the plugin instead: `/plugin marketplace add cjber/keeper`, then `/plugin install keeper@keeper`.
+If keeper itself is missing, the skill asks before installing it. Then give your agent this prompt:
 
 ```text
 Run keeper status, then keeper scan. Show me what is eligible and what is blocked, and why.
 Plan the low-risk items, then ask me before applying anything else.
 ```
 
-The skill is at [`skills/keeper/SKILL.md`](skills/keeper/SKILL.md). The source package installs it to
+The skill is at [`skills/keeper/SKILL.md`](skills/keeper/SKILL.md). The source package also installs it to
 `/usr/lib/keeper/skills`, and the binary package to `/usr/share/doc/keeper-bin/skills`.
 
 ## How it works
@@ -88,7 +99,8 @@ until `keeper purge`, which reports the measured change in free space as `freed`
 | `agent` | Output in configured roots, and paths agents claimed as scratch | low |
 | `build` | Git-ignored `target`, `node_modules`, `.next`, `.turbo` and `.venv` with no file written for 3 days | low |
 | `transcripts` | Claude Code and Codex transcripts over 14 days old | low |
-| `uv-cache` | Entries `uv cache prune` can remove | low |
+| `package-cache` | Unreferenced uv and pnpm entries, and npm and bun caches over 2G | low |
+| `docker` | Dangling images and build cache unused for 7 days; unused volumes are reported only | low, volumes report only |
 | `logs` | Configured logs over 50M, cut to their last 5M | low |
 | `snapshots` | Timeshift snapshots, which keep deleted data on disk | report only |
 | `load` | Commands holding the CPU while the machine is oversubscribed | medium |
@@ -153,6 +165,15 @@ warnFreeGb = 20
 purgeHook = "~/bin/drop-worktree-db"
 # Have keeper auto return main checkouts to the default branch and fast-forward them.
 freshen = false
+
+# Wizard colours, as #rrggbb or a terminal colour name. Unset keeps your terminal theme:
+# reverse video for the cursor and dim text for blocked rows.
+[theme]
+cursor = "#3b4252"
+cursorText = "#eceff4"
+selected = "green"
+blocked = "#6b7280"
+accent = "cyan"
 ```
 
 If `purgeHook` exits non-zero, that transaction stays in the trash and purge tries again next time. `freshen` never

@@ -1,4 +1,4 @@
-export const schemaVersion = 3;
+export const schemaVersion = 4;
 
 export const categories = [
   "worktree",
@@ -8,7 +8,8 @@ export const categories = [
   "agent",
   "build",
   "transcripts",
-  "uv-cache",
+  "package-cache",
+  "docker",
   "snapshots",
   "logs",
   "load",
@@ -23,7 +24,19 @@ export type Risk = (typeof risks)[number];
  * `report` findings carry evidence for a person and can never be planned.
  * `renice` is the only action that changes no data, which is why it is medium risk rather than low: `auto` runs it never.
  */
-export type Action = "trash" | "paccache" | "remove-packages" | "uv-prune" | "renice" | "truncate" | "report";
+export type Action =
+  | "trash"
+  | "paccache"
+  | "remove-packages"
+  | "uv-prune"
+  | "pnpm-prune"
+  | "npm-clean"
+  | "bun-clean"
+  | "docker-image-prune"
+  | "docker-builder-prune"
+  | "renice"
+  | "truncate"
+  | "report";
 
 export interface Finding {
   /** Hash of category, target and state, so an id stops matching once the thing it judged changes. */

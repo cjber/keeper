@@ -7,6 +7,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  truncateSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -16,7 +17,15 @@ import { dangerous, runCli, schema } from "./cli";
 import { freshen } from "./freshen";
 import { BusyError, withLock, writeLedger } from "./ledger";
 import { applyPlan, context, createPlan, loadConfig, purge, undo } from "./ops";
-import { type Context, defaultConfig, type ProcessInfo, type PullRequest, scan, worktreeDirs } from "./scanners";
+import {
+  type Context,
+  defaultConfig,
+  dockerFindings,
+  type ProcessInfo,
+  type PullRequest,
+  scan,
+  worktreeDirs,
+} from "./scanners";
 import { defaultPaths, holders, niceness, run } from "./system";
 import { units } from "./timer";
 import { eligible } from "./types";
@@ -64,6 +73,7 @@ beforeEach(() => {
     live: [],
     now: Date.now(),
     staleDays: 7,
+    docker: async () => undefined,
   };
   ctx.paths.state = join(home, "state");
 });
@@ -329,6 +339,23 @@ test("a merged PR for this exact commit proves a recent worktree done", async ()
   expect(report.findings[0]?.reason).toContain("PR #7");
 });
 
+test("a worktree removed mid-scan drops out without hiding the others", async () => {
+  const kept = await worktree("kept");
+  const gone = await worktree("gone");
+  const report = await scan(
+    {
+      ...ctx,
+      pullRequests: async (path) => {
+        if (path === gone) rmSync(gone, { recursive: true, force: true });
+        return [];
+      },
+    },
+    ["worktree"],
+  );
+  expect(report.warnings).toEqual([]);
+  expect(report.findings.map((finding) => finding.paths[0])).toEqual([kept]);
+});
+
 test("a squash-merged branch deleted from the remote is still proven by its PR", async () => {
   const path = await worktree("squashed");
   await git(path, "commit", "-qm", "work", "--allow-empty");
@@ -472,6 +499,14 @@ test("undo refuses to overwrite a path that exists again, then finishes once it 
   expect((await undo(ctx.paths, transaction as string)).restored).toEqual([batch]);
 });
 
+test("a theme sets only the colours it names, and a misspelt one is an error", () => {
+  mkdirSync(join(home, ".config/keeper"), { recursive: true });
+  writeFileSync(ctx.paths.config, '[theme]\ncursor = "#333333"\n');
+  expect(loadConfig(ctx.paths).theme).toMatchObject({ cursor: "#333333", accent: "" });
+  writeFileSync(ctx.paths.config, '[theme]\ncursour = "#333333"\n');
+  expect(() => loadConfig(ctx.paths)).toThrow("theme.cursour");
+});
+
 test("a misspelt config key is an error, and configured roots replace the defaults", () => {
   mkdirSync(join(home, ".config/keeper"), { recursive: true });
   writeFileSync(ctx.paths.config, 'worktreeRoot = ["~/w"]\n');
@@ -533,4 +568,47 @@ test("every keeper command the docs name exists in the CLI", async () => {
     const text = readFileSync(join(import.meta.dir, "..", file), "utf8");
     for (const [, command] of text.matchAll(/`keeper ([a-z]+)/g)) expect(help).toContain(`keeper ${command}`);
   }
+});
+
+test("package caches: prunable ones always offered, cleared-whole ones only once large", async () => {
+  mkdirSync(join(home, ".npm/_cacache"), { recursive: true });
+  // du -b counts apparent size, so a sparse file stands in for gigabytes of downloads.
+  writeFileSync(join(home, ".npm/_cacache/blob"), "");
+  truncateSync(join(home, ".npm/_cacache/blob"), 3 * 1024 ** 3);
+  mkdirSync(join(home, ".bun/install/cache"), { recursive: true });
+  writeFileSync(join(home, ".bun/install/cache/small"), "x");
+  mkdirSync(join(home, ".local/share/pnpm/store"), { recursive: true });
+  const { findings } = await scan(ctx, ["package-cache"]);
+  const byTitle = Object.fromEntries(findings.map((finding) => [finding.title, finding]));
+  expect(byTitle["npm cache"]).toMatchObject({ action: "npm-clean", bytes: 3 * 1024 ** 3, risk: "low" });
+  expect(byTitle["pnpm cache"]).toMatchObject({ action: "pnpm-prune", bytes: 0 });
+  expect(byTitle["bun cache"]).toBeUndefined();
+});
+
+test("docker: dangling images and build cache are prunable, unused volumes are only reported", () => {
+  const volume = (name: string, links: string, project?: string) => ({
+    Name: name,
+    Links: links,
+    Size: "1.5GB",
+    Labels: project ? `com.docker.compose.project=${project},com.docker.compose.volume=db` : "",
+  });
+  const findings = dockerFindings(
+    {
+      Images: [
+        { Repository: "<none>", Containers: "0", Size: "200MB" },
+        { Repository: "postgres", Containers: "1", Size: "400MB" },
+      ],
+      Volumes: [volume("a_db", "0", "app-wt1"), volume("b_db", "0", "app-wt2"), volume("live", "1", "app")],
+    },
+    2e9,
+  );
+  expect(findings.map((finding) => [finding.action, finding.risk])).toEqual([
+    ["docker-image-prune", "low"],
+    ["docker-builder-prune", "low"],
+    ["report", "high"],
+  ]);
+  expect(findings[0]?.bytes).toBe(200e6);
+  expect(findings[2]).toMatchObject({ title: "2 unused docker volumes", bytes: 3e9 });
+  expect(findings[2]?.reason).toContain("app-wt1, app-wt2");
+  expect(dockerFindings({ Images: null, Volumes: null }, 0)).toEqual([]);
 });

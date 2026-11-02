@@ -11,8 +11,6 @@ bunx biome ci .
 bunx tsc --noEmit
 bun test
 bun scripts/changelog.ts --check
-python3 .sift/gate.py --base origin/main
-python3 .sift/agents.py check
 bun install --frozen-lockfile --os linux --cpu "*" --libc "*" && bun scripts/build.ts
 bun scripts/smoke-binary.ts dist/keeper-linux-x64
 ```

@@ -29,4 +29,8 @@ Tests must never touch real data. Build a scratch home as `src/keeper.test.ts` d
 ## Releasing
 
 Maintainers run `bun scripts/release.ts patch|minor|major` on a branch, merge it, then run `bun scripts/release.ts tag`
-on the merged commit and push the tag. The tag publishes the binaries, the GitHub release and both AUR packages.
+on the merged commit and push the tag. The tag publishes the binaries, the GitHub release, the npm packages and both AUR
+packages.
+
+npm publishes through trusted publishing: each of the three packages lists this repository's `release.yml` as its
+trusted publisher, so the release needs no npm token.

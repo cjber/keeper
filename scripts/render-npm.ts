@@ -1,13 +1,14 @@
 /**
- * Renders the npm packages from the compiled binaries in dist/: @cjber/keeper holds a small Node launcher, and one
+ * Renders the npm packages from the compiled binaries in dist/: @cillianb/keeper holds a small Node launcher, and one
  * package per CPU holds its binary. npm installs only the package matching the machine through optionalDependencies,
- * so `npx @cjber/keeper` needs neither Bun nor a build step.
+ * so `npx @cillianb/keeper` needs neither Bun nor a build step.
  */
 import { chmodSync, copyFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const out = process.argv[2] ?? "dist/npm";
 const pkg = await Bun.file("package.json").json();
+const name = "@cillianb/keeper";
 const arches = ["x64", "arm64"] as const;
 const common = {
   version: pkg.version,
@@ -20,7 +21,7 @@ const common = {
 
 const launcher = `#!/usr/bin/env node
 const { spawnSync } = require("node:child_process");
-const name = "@cjber/keeper-linux-" + process.arch;
+const name = "${name}-linux-" + process.arch;
 let binary;
 try {
   binary = require.resolve(name + "/bin/keeper");
@@ -43,10 +44,10 @@ writeFileSync(
   join(main, "package.json"),
   `${JSON.stringify(
     {
-      name: "@cjber/keeper",
+      name,
       ...common,
       bin: { keeper: "bin/keeper.js" },
-      optionalDependencies: Object.fromEntries(arches.map((a) => [`@cjber/keeper-linux-${a}`, pkg.version])),
+      optionalDependencies: Object.fromEntries(arches.map((a) => [`${name}-linux-${a}`, pkg.version])),
     },
     null,
     2,
@@ -61,6 +62,6 @@ for (const arch of arches) {
   copyFileSync("LICENSE", join(dir, "LICENSE"));
   writeFileSync(
     join(dir, "package.json"),
-    `${JSON.stringify({ name: `@cjber/keeper-linux-${arch}`, ...common, cpu: [arch], preferUnplugged: true }, null, 2)}\n`,
+    `${JSON.stringify({ name: `${name}-linux-${arch}`, ...common, cpu: [arch], preferUnplugged: true }, null, 2)}\n`,
   );
 }

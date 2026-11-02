@@ -25,5 +25,5 @@ First release.
 - **A terminal wizard** that lists what you can act on first, follows your terminal theme, and opens on the previous
   scan while a fresh one runs.
 - **Runs nightly** with `keeper timer install`, applying only low-risk findings.
-- **Install from the AUR, npm or as an agent skill**: `paru -S keeper-bin`, `npm i -g @cjber/keeper`, or
+- **Install from the AUR, npm or as an agent skill**: `paru -S keeper-bin`, `npm i -g @cillianb/keeper`, or
   `npx skills add cjber/keeper`.

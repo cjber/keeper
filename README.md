@@ -34,12 +34,12 @@ behind, moves it to a trash you can undo, and proves its work before it touches 
 ## Install
 
 ```sh
-paru -S keeper-bin            # standalone binary
-# or: paru -S keeper          # Bun source package
-# or: npm i -g @cjber/keeper  # same binary from npm, x64 and arm64
+paru -S keeper-bin               # standalone binary
+# or: paru -S keeper             # Bun source package
+# or: npm i -g @cillianb/keeper  # same binary from npm, x64 and arm64
 ```
 
-`npx @cjber/keeper scan` runs it once without installing. Install it before `keeper timer install`, so the schedule
+`npx @cillianb/keeper scan` runs it once without installing. Install it before `keeper timer install`, so the schedule
 points at a path that stays put.
 
 ## Set up with your agent

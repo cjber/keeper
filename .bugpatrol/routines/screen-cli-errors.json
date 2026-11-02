@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "id": "screen-cli-errors",
+  "description": "JSON error output and exit codes of keeper subcommands when piped.",
+  "platform": "cli",
+  "requires": [
+    "screen-wizard-list"
+  ],
+  "steps": [
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui show | cat -v | head -12",
+      "at": "terminal||e3b0c44298fc"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui keys j && .bugpatrol/sandbox/tui text | head -12",
+      "at": "terminal||e3b0c44298fc"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui keys space >/dev/null; .bugpatrol/sandbox/tui text | sed -n '1,4p;27,30p'",
+      "at": "terminal||e3b0c44298fc"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui keys a >/dev/null; .bugpatrol/sandbox/tui text | sed -n '1,9p;27,30p'",
+      "at": "terminal||e3b0c44298fc"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui keys b >/dev/null; .bugpatrol/sandbox/tui text",
+      "at": "terminal||e3b0c44298fc"
+    },
+    {
+      "kind": "run",
+      "command": "for i in 1 2 3 4 5 6 7 8; do .bugpatrol/sandbox/tui keys j >/dev/null; .bugpatrol/sandbox/tui text | sed -n '28p'; done; .bugpatrol/sandbox/tui show | sed -n '9,14p' | cat -v",
+      "at": "terminal||e3b0c44298fc"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui resize 80 24 >/dev/null; sleep 1; .bugpatrol/sandbox/tui text",
+      "at": "terminal||e3b0c44298fc"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui resize 60 20 >/dev/null; sleep 1; .bugpatrol/sandbox/tui text",
+      "at": "terminal||e3b0c44298fc"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui resize 100 30 >/dev/null; sleep 1; .bugpatrol/sandbox/tui keys t >/dev/null; .bugpatrol/sandbox/tui text | tail -6",
+      "at": "terminal||e3b0c44298fc"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui keys Enter >/dev/null; sleep 3; .bugpatrol/sandbox/tui text",
+      "at": "terminal||e3b0c44298fc"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui keys a >/dev/null; .bugpatrol/sandbox/tui text | sed -n '1,4p;28,30p'; .bugpatrol/sandbox/tui keys t >/dev/null; sleep 4; .bugpatrol/sandbox/tui text | sed -n '1,4p;28,30p'",
+      "at": "terminal||e3b0c44298fc"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui keys a >/dev/null; .bugpatrol/sandbox/tui keys Enter; sleep 4; .bugpatrol/sandbox/tui text",
+      "at": "terminal||e3b0c44298fc"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui keys q; .bugpatrol/sandbox/tui stop; .bugpatrol/sandbox/keeper schema | head -c 4000",
+      "at": "terminal||e3b0c44298fc"
+    },
+    {
+      "kind": "run",
+      "command": "K=.bugpatrol/sandbox/keeper; for c in \"bogus\" \"scan --category nope\" \"scan --stale-days abc\" \"apply nosuchplan --yes\" \"undo deadbeef\" \"hold /tmp/keeper-patrol/home\" \"release /tmp/keeper-patrol/home/nothing\" \"plan --max-risk high\" \"purge --older-days -1\"; do echo \"== $c\"; $K $c | cat; echo \"exit=${pipestatus[1]}\"; done 2>&1",
+      "at": "terminal||e3b0c44298fc"
+    },
+    {
+      "kind": "run",
+      "command": "bash -c 'K=.bugpatrol/sandbox/keeper; for c in \"bogus\" \"apply nosuchplan --yes\" \"undo deadbeef\" \"release /tmp/keeper-patrol/home/nothing\" \"plan\" \"status\" \"log\"; do $K $c >/tmp/keeper-patrol/o.txt 2>/tmp/keeper-patrol/e.txt; echo \"== $c exit=$? stdout=$(head -c 300 /tmp/keeper-patrol/o.txt) stderr=$(head -c 200 /tmp/keeper-patrol/e.txt)\"; done'",
+      "at": "terminal||e3b0c44298fc"
+    },
+    {
+      "kind": "run",
+      "command": "grep -iE \"systemctl|crontab\" /tmp/keeper-patrol/stub-calls.log | tail -8; ls /tmp/keeper-patrol/home/.config/systemd/user 2>&1",
+      "at": "terminal||e3b0c44298fc"
+    }
+  ],
+  "screenId": "cli-errors",
+  "createdAt": "2026-11-02T10:29:23.972Z",
+  "updatedAt": "2026-11-02T10:29:23.972Z"
+}

@@ -1,0 +1,18 @@
+# Mergepatrol reads this file from the default branch. The dashboard opens a PR to change it.
+version: 1
+label: mergepatrol
+batch_size: 4
+resolver:
+  provider: anthropic
+  model: claude-opus-5-5
+  effort: medium
+# Run in Mergepatrol's sandbox after an agent resolves a conflict or commits a fix, before anything is pushed.
+# They mirror CI's check job; the binary builds still run in CI on the head Mergepatrol pushes.
+# The job image has no Bun, so the first command installs the version the repo is developed on.
+verify:
+  - curl -fsSL https://bun.sh/install | bash -s bun-v1.4.4
+  - ~/.bun/bin/bun install --frozen-lockfile
+  - PATH="$HOME/.bun/bin:$PATH" bun run gate
+fix_ci:
+  enabled: true
+  attempts: 2

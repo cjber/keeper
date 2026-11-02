@@ -206,6 +206,12 @@ async function unlessGone<T>(path: string, inspect: () => T | Promise<T>): Promi
   }
 }
 
+/** A file written after the scan's clock was read has a slightly negative age, which still means today. */
+function touchedAgo(days: number): string {
+  const whole = Math.max(0, Math.floor(days));
+  return whole === 0 ? "touched today" : whole === 1 ? "touched 1 day ago" : `touched ${whole} days ago`;
+}
+
 const found = <T>(items: (T | undefined)[]): T[] => items.filter((item): item is T => item !== undefined);
 
 function isDirectory(path: string): boolean {
@@ -281,7 +287,7 @@ async function inspectWorktree(
   );
   // A merged branch is usually deleted from the remote, and the pull request is what still holds this commit.
   if (!merged && (ahead.code !== 0 || ahead.stdout !== "0")) {
-    blockers.push(`${ahead.stdout || "unknown"} commits on no remote`);
+    blockers.push(ahead.stdout === "1" ? "1 commit on no remote" : `${ahead.stdout || "unknown"} commits on no remote`);
   }
   const mainline = defaultBranch.stdout.replace(/^origin\//, "");
   const contained =
@@ -295,7 +301,7 @@ async function inspectWorktree(
     gitDir ? headAge(gitDir, context.now) : Number.POSITIVE_INFINITY,
   );
   // Only a merge outruns the age window. A branch just cut from main is also contained in it, and is about to be used.
-  if (!merged && touched < context.staleDays) blockers.push(`touched ${Math.floor(touched)} days ago`);
+  if (!merged && touched < context.staleDays) blockers.push(touchedAgo(touched));
   return {
     id: findingId("worktree", path, `${head}\0${status.stdout}\0${proof}\0${open?.number ?? ""}`),
     category: "worktree",
@@ -362,7 +368,7 @@ async function inspectLeftover(path: string, context: Context, bytes: number): P
   const blockers: string[] = [];
   if (nested.stdout) blockers.push("contains a checkout");
   if (holders(path, context.live)) blockers.push("in use by a running process");
-  if (age < context.staleDays) blockers.push(`touched ${Math.floor(age)} days ago`);
+  if (age < context.staleDays) blockers.push(touchedAgo(age));
   return {
     id: findingId("worktree", path, `leftover\0${bytes}`),
     category: "worktree",
@@ -477,7 +483,7 @@ async function scanAgent(context: Context): Promise<Finding[]> {
     const age = ageDays(path, context.now);
     const blockers: string[] = [];
     if (holders(path, context.live)) blockers.push("in use by a running process");
-    if (age < context.staleDays) blockers.push(`touched ${Math.floor(age)} days ago`);
+    if (age < context.staleDays) blockers.push(touchedAgo(age));
     return {
       id: findingId("agent", path, `${statSync(path).mtimeMs}`),
       category: "agent",
@@ -925,7 +931,7 @@ async function scanLoad(context: Context): Promise<Finding[]> {
         bytes: 0,
         cpu: Math.round(cpu),
         pids,
-        reason: `${Math.round(cpu)}% of one core while load is ${loadAverage.toFixed(1)} on ${cores} cores. Renicing keeps the work and hands the CPU back to whatever you are typing into`,
+        reason: `${Math.round(cpu)}% of one core while load is ${loadAverage.toFixed(1)} on ${cores} cores. Lowering its priority keeps it running and gives the CPU back to the apps you are using`,
         blockers,
       } satisfies Finding,
     ];

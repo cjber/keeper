@@ -1,9 +1,9 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { RGBA, TextAttributes } from "@opentui/core";
-import { useKeyboard, useRenderer } from "@opentui/react";
+import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import { useEffect, useState } from "react";
-import { gib, measure } from "./cli";
+import { measure, size } from "./cli";
 import { applyPlan, context, createPlan } from "./ops";
 import { defaultTheme, scan, type Theme } from "./scanners";
 import { defaultPaths } from "./system";
@@ -38,7 +38,7 @@ export const liveActions: Actions = {
   apply: async (findings) => {
     const ctx = context();
     const outcome = await applyPlan(createPlan(ctx.paths, findings, ctx.staleDays), ctx);
-    return `Moved ${gib(outcome.bytes)} to trash. Undo with keeper undo ${outcome.transaction ?? "(nothing applied)"}. Stale: ${outcome.stale.length}, failed: ${outcome.failed.length}`;
+    return `Moved ${size(outcome.bytes)} to trash. Undo with keeper undo ${outcome.transaction ?? "(nothing applied)"}. Stale: ${outcome.stale.length}, failed: ${outcome.failed.length}`;
   },
   schedule: async () => {
     await installSystemd(defaultPaths());
@@ -60,6 +60,8 @@ const color = (value: string) => {
   return value || RGBA.defaultForeground();
 };
 const terminal = color("");
+/** Ends a title that does not fit in an ellipsis, so a cut reads as a cut. */
+const clip = (text: string, room: number) => (text.length > room ? `${text.slice(0, Math.max(room - 1, 0))}…` : text);
 /** Each category's state while a scan runs: undefined is still scanning, null failed, a number is its findings. */
 type Progress = Partial<Record<Category, number | null>>;
 const time = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -67,6 +69,11 @@ const time = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-di
 /** Holds selection only. Every safety rule stays in the scan and apply calls an agent would make. */
 export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; theme?: Theme }) {
   const renderer = useRenderer();
+  const { width } = useTerminalDimensions();
+  // Below this the category column goes, so the title keeps room to say what the row is.
+  const wide = width >= 80;
+  // Padding, mark, size and risk columns, then the category column when it shows.
+  const titleWidth = width - 2 - 4 - 9 - 7 - (wide ? 14 : 0);
   const [report, setReport] = useState<Scan | undefined>(actions.cached);
   const [cursor, setCursor] = useState(0);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -86,7 +93,6 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
     setBusy(true);
     work
       .then(async (done) => {
-        setSelected(new Set());
         setProgress({});
         const fresh = await actions.load((category, found) =>
           setProgress((now) => ({ ...now, [category]: found ?? null })),
@@ -131,13 +137,20 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
       setSelected(next);
     }
     if (key.name === "a") {
+      // Adds to the selection, so medium-risk rows picked by hand stay picked.
       const low = open.filter((f) => f.risk === "low").map((f) => f.id);
-      setSelected(new Set(low));
+      setSelected(new Set([...selected, ...low]));
       setMessage(low.length ? `Selected ${low.length} low-risk findings` : "No low-risk finding is eligible");
     }
     if (key.name === "return") {
-      if (chosen.length) perform(actions.apply(chosen));
-      else setMessage("Select findings with space or a first");
+      if (chosen.length) {
+        perform(
+          actions.apply(chosen).then((done) => {
+            setSelected(new Set());
+            return done;
+          }),
+        );
+      } else setMessage("Select findings with space or a first");
     }
     if (key.name === "t") perform(actions.schedule());
   });
@@ -155,7 +168,8 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
   return (
     <box flexDirection="column" paddingLeft={1} paddingRight={1} flexGrow={1}>
       <text wrapMode="none" fg={color(theme.accent)} attributes={TextAttributes.BOLD}>
-        keeper · {open.length} eligible, {blocked} blocked · {gib(total)} selected, uncompressed
+        keeper · {open.length} eligible, {blocked} blocked ·{" "}
+        {chosen.length ? `${size(total)} selected, uncompressed` : "nothing selected"}
       </text>
       {progress ? (
         <box flexDirection="row" flexWrap="wrap">
@@ -199,20 +213,28 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
                 wrapMode="none"
                 fg={plain ? rowColor : color(isSelected ? theme.selected : "")}
                 attributes={attributes}
+                flexShrink={0}
               >
                 {mark}{" "}
               </text>
-              <text wrapMode="none" fg={cell(theme.size)} attributes={attributes | (plain ? 0 : TextAttributes.BOLD)}>
+              <text
+                wrapMode="none"
+                fg={cell(theme.size)}
+                attributes={attributes | (plain ? 0 : TextAttributes.BOLD)}
+                flexShrink={0}
+              >
                 {measure(finding).padStart(8)}{" "}
               </text>
-              <text wrapMode="none" fg={cell(riskColor[finding.risk])} attributes={attributes}>
+              <text wrapMode="none" fg={cell(riskColor[finding.risk])} attributes={attributes} flexShrink={0}>
                 {finding.risk.padEnd(7)}
               </text>
-              <text wrapMode="none" fg={cell(theme.category)} attributes={attributes}>
-                {finding.category.padEnd(14)}
-              </text>
+              {wide ? (
+                <text wrapMode="none" fg={cell(theme.category)} attributes={attributes} flexShrink={0}>
+                  {finding.category.padEnd(14)}
+                </text>
+              ) : null}
               <text wrapMode="none" fg={rowColor} attributes={attributes} flexShrink={1}>
-                {finding.title}
+                {clip(finding.title, titleWidth)}
               </text>
             </box>
           );
@@ -221,8 +243,9 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
       {active ? <text fg={terminal}>{active.blockers.join("; ") || active.reason}</text> : null}
       <text fg={busy ? color(theme.accent) : terminal}>{status}</text>
       {report?.warnings.length ? <text fg={color(theme.high)}>Scan warnings: {report.warnings.join("; ")}</text> : null}
-      <text wrapMode="none" fg={terminal} attributes={TextAttributes.DIM}>
-        space select · a all low risk · enter apply · b {showBlocked ? "hide" : "show"} blocked · t schedule · q quit
+      <text fg={terminal} attributes={TextAttributes.DIM}>
+        j/k move · space select · a all low risk · enter apply · b {showBlocked ? "hide" : "show"} blocked · t schedule
+        · q/esc quit
       </text>
     </box>
   );

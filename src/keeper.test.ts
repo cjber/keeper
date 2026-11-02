@@ -114,7 +114,7 @@ test("a commit only on this machine blocks the worktree", async () => {
   await git(path, "commit", "-qm", "local", "--allow-empty");
   age(path);
   const report = await scan(ctx, ["worktree"]);
-  expect(report.findings[0]?.blockers.join()).toContain("commits on no remote");
+  expect(report.findings[0]?.blockers.join()).toContain("on no remote");
 });
 
 test("build output is found in a dirty worktree only when ignored and stale", async () => {
@@ -361,7 +361,7 @@ test("a squash-merged branch deleted from the remote is still proven by its PR",
   await git(path, "commit", "-qm", "work", "--allow-empty");
   const head = await git(path, "rev-parse", "HEAD");
   const unproven = await scan(ctx, ["worktree"]);
-  expect(unproven.findings[0]?.blockers.join()).toContain("commits on no remote");
+  expect(unproven.findings[0]?.blockers.join()).toContain("on no remote");
   const report = await scan({ ...ctx, pullRequests: pull("MERGED", head, "b-squashed") }, ["worktree"]);
   expect(report.findings[0]).toMatchObject({ risk: "low", blockers: [] });
 });

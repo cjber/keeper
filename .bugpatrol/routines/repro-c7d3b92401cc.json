@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "id": "repro-c7d3b92401cc",
+  "description": "Reproduces: Sizes under 50M show as \"0.0G\" in the wizard header, apply message and CLI",
+  "platform": "cli",
+  "requires": [
+    "enter-app"
+  ],
+  "steps": [
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui show | cat -v | head -12"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui keys j && .bugpatrol/sandbox/tui text | head -12"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui keys space >/dev/null; .bugpatrol/sandbox/tui text | sed -n '1,4p;27,30p'"
+    },
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui keys a >/dev/null; .bugpatrol/sandbox/tui text | sed -n '1,9p;27,30p'"
+    }
+  ],
+  "screenId": "wizard-list",
+  "bug": {
+    "shows": "0.0G selected"
+  },
+  "createdAt": "2026-11-02T10:32:10.678Z",
+  "updatedAt": "2026-11-02T10:32:10.678Z"
+}

@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "id": "repro-876c928f95e0",
+  "description": "Reproduces: CLI errors leak raw ENOENT text and misleading messages with no next step",
+  "platform": "cli",
+  "requires": [
+    "screen-cli-errors"
+  ],
+  "steps": [],
+  "screenId": "cli-errors",
+  "createdAt": "2026-11-02T10:32:29.036Z",
+  "updatedAt": "2026-11-02T10:32:29.036Z"
+}

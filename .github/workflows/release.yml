@@ -2,7 +2,8 @@ name: Release
 
 # Pushing a vX.Y.Z tag (see scripts/release.ts) publishes a GitHub release, the npm packages and both AUR packages. The
 # npm step uses trusted publishing, configured on each package for this workflow, and a public repository for
-# provenance. The AUR step needs AUR_SSH_PRIVATE_KEY: the private half of a key on the maintainer's AUR account.
+# provenance. The AUR step needs AUR_SSH_PRIVATE_KEY: the private half of a key on the maintainer's AUR account. While
+# the repository is private only the GitHub release runs: npm provenance and the AUR source download both need it public.
 on:
   push:
     tags: ["v*.*.*"]
@@ -58,11 +59,13 @@ jobs:
       # Trusted publishing: npm checks this workflow's OIDC identity, so there is no token. A version already on npm is
       # skipped, so a rerun after a later step failed does not fail here.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: ${{ !github.event.repository.private }}
         with:
           node-version: 24 # ships npm 11, which trusted publishing needs
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
       - name: Publish to npm
+        if: ${{ !github.event.repository.private }}
         run: |
           set -euo pipefail
           bun scripts/render-npm.ts dist/npm
@@ -76,12 +79,14 @@ jobs:
           done
 
       - name: Render AUR packages
+        if: ${{ !github.event.repository.private }}
         run: |
           set -euo pipefail
           curl -fsSL -o source.tar.gz "https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
           bun scripts/render-aur.ts --version "$VERSION" --sha256 "$(sha256sum source.tar.gz | cut -d' ' -f1)" --bin-x64-sha256 "$(sha256sum dist/keeper-linux-x64 | cut -d' ' -f1)" --bin-arm64-sha256 "$(sha256sum dist/keeper-linux-arm64 | cut -d' ' -f1)" --out aur
 
       - name: Push to AUR
+        if: ${{ !github.event.repository.private }}
         env:
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
         run: |

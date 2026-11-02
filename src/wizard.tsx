@@ -175,11 +175,20 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
   const start = Math.max(0, Math.min(at - pageSize + 1, rows.length - pageSize));
   const active = rows[at];
   const total = outermost(chosen).reduce((sum, finding) => sum + finding.bytes, 0);
-  const status = busy
-    ? report
-      ? `Showing the scan from ${time(report.scannedAt)} until the new one finishes`
-      : "Scanning"
-    : message;
+  const shown = report ? ` · showing ${time(report.scannedAt)}` : "";
+  const scanning = () => {
+    const waiting = categories.filter((category) => progress?.[category] === undefined);
+    const failed = categories.filter((category) => progress?.[category] === null);
+    return [
+      `${spinner[frame % spinner.length]} Scanning ${categories.length - waiting.length}/${categories.length}${shown}`,
+      failed.length ? `failed: ${failed.join(", ")}` : "",
+      waiting.length ? `waiting on ${waiting.join(", ")}` : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  };
+  // One line at the bottom, so the list never moves when a scan starts or ends.
+  const status = clip(progress ? scanning() : busy ? `Working${shown}` : message, width - 2);
   const riskColor = { low: theme.low, medium: theme.medium, high: theme.high };
 
   return (
@@ -188,21 +197,6 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
         keeper · {open.length} eligible, {blocked} blocked ·{" "}
         {chosen.length ? `${size(total)} selected, uncompressed` : "nothing selected"}
       </text>
-      {progress ? (
-        <box flexDirection="row" flexWrap="wrap">
-          {categories.map((category) => {
-            const state = progress[category];
-            const mark = state === undefined ? spinner[frame % spinner.length] : state === null ? "✗" : "✓";
-            const fg = color(state === undefined ? theme.accent : state === null ? theme.high : theme.low);
-            return (
-              <text key={category} fg={fg} marginRight={2}>
-                {mark} {category}
-                {typeof state === "number" ? ` ${state}` : ""}
-              </text>
-            );
-          })}
-        </box>
-      ) : null}
       <box flexDirection="column" flexGrow={1}>
         {report && !rows.length ? (
           <text fg={terminal}>

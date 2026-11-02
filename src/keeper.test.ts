@@ -329,6 +329,23 @@ test("a merged PR for this exact commit proves a recent worktree done", async ()
   expect(report.findings[0]?.reason).toContain("PR #7");
 });
 
+test("a worktree removed mid-scan drops out without hiding the others", async () => {
+  const kept = await worktree("kept");
+  const gone = await worktree("gone");
+  const report = await scan(
+    {
+      ...ctx,
+      pullRequests: async (path) => {
+        if (path === gone) rmSync(gone, { recursive: true, force: true });
+        return [];
+      },
+    },
+    ["worktree"],
+  );
+  expect(report.warnings).toEqual([]);
+  expect(report.findings.map((finding) => finding.paths[0])).toEqual([kept]);
+});
+
 test("a squash-merged branch deleted from the remote is still proven by its PR", async () => {
   const path = await worktree("squashed");
   await git(path, "commit", "-qm", "work", "--allow-empty");
@@ -470,6 +487,14 @@ test("undo refuses to overwrite a path that exists again, then finishes once it 
   await expect(undo(ctx.paths, transaction as string)).rejects.toThrow("exist again");
   rmSync(batch, { recursive: true });
   expect((await undo(ctx.paths, transaction as string)).restored).toEqual([batch]);
+});
+
+test("a theme sets only the colours it names, and a misspelt one is an error", () => {
+  mkdirSync(join(home, ".config/keeper"), { recursive: true });
+  writeFileSync(ctx.paths.config, '[theme]\ncursor = "#333333"\n');
+  expect(loadConfig(ctx.paths).theme).toMatchObject({ cursor: "#333333", accent: "" });
+  writeFileSync(ctx.paths.config, '[theme]\ncursour = "#333333"\n');
+  expect(() => loadConfig(ctx.paths)).toThrow("theme.cursour");
 });
 
 test("a misspelt config key is an error, and configured roots replace the defaults", () => {

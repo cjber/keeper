@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "keeper",
+  "description": "keeper: keeps an Arch machine clean, with your agent doing the deciding.",
+  "owner": {
+    "name": "Cillian Berragan",
+    "url": "https://github.com/cjber"
+  },
+  "plugins": [
+    {
+      "name": "keeper",
+      "description": "Free disk space and diagnose a slow machine with the keeper CLI: stale worktrees, AUR clones, caches, build output and agent leftovers.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}

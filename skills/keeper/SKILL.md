@@ -7,6 +7,8 @@ description: Free disk space or clean up an Arch machine with the keeper CLI, co
 
 Run `keeper --help` for the command list. Output is JSON when piped.
 
+If `keeper` is not on `PATH`, ask the user before installing it with `paru -S keeper-bin` (or `yay`). Nightly cleanup is opt-in: run `keeper timer install` only when the user asks for it. Done when `keeper status` exits 0.
+
 1. Run `keeper scan`. Findings with empty `blockers` and an action other than `report` are eligible.
 2. Run `keeper plan`, adding `--max-risk medium` only when the user approved worktree or package removal, or renicing a command.
 3. Show the user the plan's size and items, then run `keeper apply PLAN --yes`.

@@ -20,10 +20,20 @@ const finding = (id: string, risk: Finding["risk"], blockers: string[] = []): Fi
   blockers,
 });
 
-async function open(findings: Finding[]) {
+async function open(findings: Finding[], cached?: Finding[], load: Promise<void> = Promise.resolve()) {
   const applied = mock<Actions["apply"]>(async () => "applied");
+  const report = (items: Finding[]) => ({
+    schemaVersion: 3,
+    scannedAt: new Date(0).toISOString(),
+    findings: items,
+    warnings: [],
+  });
   const actions: Actions = {
-    load: async () => ({ schemaVersion: 3, scannedAt: "", findings, warnings: [] }),
+    cached: () => (cached ? report(cached) : undefined),
+    load: async () => {
+      await load;
+      return report(findings);
+    },
     apply: applied,
     schedule: async () => "scheduled",
   };
@@ -41,12 +51,65 @@ async function open(findings: Finding[]) {
   return { ...setup, applied, settle };
 }
 
-test("lists findings, marks blocked ones and shows the keys", async () => {
-  const { captureCharFrame, renderer } = await open([finding("a", "low"), finding("b", "medium", ["in use"])]);
+test("lists eligible findings first and shows blocked ones on b", async () => {
+  const { captureCharFrame, mockInput, settle, renderer } = await open([
+    finding("b", "medium", ["in use"]),
+    finding("a", "low"),
+  ]);
+  expect(captureCharFrame()).toContain("1 eligible, 1 blocked");
+  expect(captureCharFrame()).not.toContain("item b");
+  await act(async () => {
+    await mockInput.pressKey("b");
+  });
+  await settle();
   const frame = captureCharFrame();
-  expect(frame).toContain("[ ]");
+  expect(frame.indexOf("item a")).toBeLessThan(frame.indexOf("item b"));
   expect(frame).toContain(" - ");
-  expect(frame).toContain("q quit");
+  renderer.destroy();
+});
+
+test("says why nothing is selectable instead of ignoring the key", async () => {
+  const { captureCharFrame, mockInput, settle, renderer } = await open([finding("b", "low", ["in use"])]);
+  expect(captureCharFrame()).toContain("Press b to see the 1 blocked findings");
+  await act(async () => {
+    await mockInput.pressKey("a");
+  });
+  await settle();
+  expect(captureCharFrame()).toContain("No low-risk finding is eligible");
+  await act(async () => {
+    await mockInput.pressKey("b");
+  });
+  await settle();
+  await act(async () => {
+    await mockInput.pressKey(" ");
+  });
+  await settle();
+  expect(captureCharFrame()).toContain("Blocked: in use");
+  renderer.destroy();
+});
+
+test("shows the cached scan while rescanning but acts only on the fresh one", async () => {
+  let finish!: () => void;
+  const scanning = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const { captureCharFrame, mockInput, applied, settle, renderer } = await open(
+    [finding("fresh", "low")],
+    [finding("old", "low")],
+    scanning,
+  );
+  expect(captureCharFrame()).toContain("item old");
+  expect(captureCharFrame()).toContain("Rescanning...");
+  await act(async () => {
+    await mockInput.pressKey("a");
+    await mockInput.pressEnter();
+  });
+  await settle();
+  expect(applied).not.toHaveBeenCalled();
+  finish();
+  await settle();
+  expect(captureCharFrame()).toContain("item fresh");
+  expect(captureCharFrame()).not.toContain("item old");
   renderer.destroy();
 });
 

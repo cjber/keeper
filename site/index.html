@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>keeper</title>
+<meta name="description" content="keeper keeps an Arch machine clean, with your agent doing the deciding. It proves work is finished before removing it, and everything goes to a trash you can undo.">
+<meta property="og:title" content="keeper">
+<meta property="og:description" content="Keeps an Arch machine clean, with your agent doing the deciding.">
+<meta property="og:image" content="https://keeper.cjber.dev/icon.png">
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --ink: #17150f;
+  --paper: #f5f2ea;
+  --muted: #6b665a;
+  --rule: #ddd7c8;
+  --panel: #ece7db;
+  --accent: #4f6b3a;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #f5f2ea;
+    --paper: #17150f;
+    --muted: #a39d8e;
+    --rule: #343026;
+    --panel: #211e16;
+    --accent: #9cbd7f;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 15px/1.65 "Geist Mono", ui-monospace, monospace;
+}
+main { max-width: 760px; margin: 0 auto; padding: 72px 16px 48px; }
+header { text-align: center; margin-bottom: 64px; }
+header img { width: min(320px, 70vw); height: auto; }
+.tagline { font-size: 18px; font-weight: 500; margin: 24px 0 8px; }
+.lede { color: var(--muted); margin: 0 auto; max-width: 560px; }
+.links { margin-top: 24px; display: flex; gap: 20px; justify-content: center; }
+a { color: var(--ink); text-underline-offset: 3px; }
+a:hover { color: var(--accent); }
+h2 {
+  font-size: 13px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--muted); margin: 56px 0 16px; padding-bottom: 8px; border-bottom: 1px solid var(--rule);
+}
+pre {
+  background: var(--panel); border-radius: 8px; padding: 14px 16px; margin: 12px 0;
+  overflow-x: auto; font: inherit; font-size: 14px;
+}
+.prompt::before { content: "$ "; color: var(--accent); user-select: none; }
+.comment { color: var(--muted); }
+code { font: inherit; }
+p code, li code { background: var(--panel); padding: 1px 5px; border-radius: 4px; font-size: 14px; }
+ul.points { list-style: none; padding: 0; margin: 0; }
+ul.points li { padding: 12px 0; border-bottom: 1px solid var(--rule); }
+ul.points li:last-child { border-bottom: 0; }
+ul.points strong { display: block; font-weight: 600; }
+ul.points span { color: var(--muted); }
+ol.flow { list-style: none; padding: 0; margin: 0; counter-reset: step; }
+ol.flow li { counter-increment: step; display: grid; grid-template-columns: 2.2em 9em 1fr; gap: 8px; padding: 8px 0; }
+ol.flow li::before { content: counter(step); color: var(--accent); font-weight: 600; }
+ol.flow code { font-weight: 600; }
+ol.flow span { color: var(--muted); }
+@media (max-width: 560px) {
+  ol.flow li { grid-template-columns: 2.2em 1fr; }
+  ol.flow span { grid-column: 2; }
+}
+footer { margin-top: 72px; color: var(--muted); font-size: 13px; text-align: center; }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="wordmark-dark.svg">
+    <img src="wordmark.svg" alt="keeper" width="320" height="125">
+  </picture>
+  <p class="tagline">Keeps an Arch machine clean, with your agent doing the deciding.</p>
+  <p class="lede">Coding agents leave worktrees, build output, caches and transcripts behind. keeper finds what is safe to remove, proves it, and moves it to a trash you can undo.</p>
+  <nav class="links">
+    <a href="https://github.com/cjber/keeper">GitHub</a>
+    <a href="https://github.com/cjber/keeper/blob/main/skills/keeper/SKILL.md">Skill</a>
+    <a href="https://github.com/cjber/keeper/blob/main/CHANGELOG.md">Changelog</a>
+  </nav>
+</header>
+
+<h2>Install</h2>
+<pre><code><span class="prompt">paru -S keeper-bin</span>          <span class="comment"># standalone binary</span>
+<span class="prompt">npm i -g @cjber/keeper</span>      <span class="comment"># or from npm</span>
+<span class="prompt">npx skills add cjber/keeper</span> <span class="comment"># skill for your agent</span></code></pre>
+<p>In Claude Code, the plugin works too: <code>/plugin marketplace add cjber/keeper</code>, then <code>/plugin install keeper@keeper</code>. Then ask your agent:</p>
+<pre><code>Run keeper status, then keeper scan. Show me what is eligible and what is blocked,
+and why. Plan the low-risk items, then ask me before applying anything else.</code></pre>
+<p>To run it yourself, <code>keeper</code> opens a terminal wizard, and <code>keeper timer install</code> cleans up low-risk items every night.</p>
+
+<h2>Why keeper</h2>
+<ul class="points">
+  <li><strong>It proves before it removes.</strong><span>A worktree counts as finished only when a merged pull request has the exact commit it sits on, or every commit is on the default branch. Anything else waits for approval.</span></li>
+  <li><strong>Agents are the primary user.</strong><span>Every command returns JSON when piped, and each exit code names the next step. The wizard is a thin layer over the same calls.</span></li>
+  <li><strong>Agents can protect their work.</strong><span><code>keeper hold</code> outranks every scanner until it expires, so a session can mark a worktree it will return to.</span></li>
+  <li><strong>Nothing is final until purge.</strong><span>Paths move to a trash and <code>keeper undo</code> restores them. Branches are deleted only at purge, and only if they have not moved.</span></li>
+  <li><strong>It renices instead of killing.</strong><span>When the machine is overloaded, keeper names the commands holding the CPU and lowers their priority, so the work survives.</span></li>
+</ul>
+
+<h2>How it works</h2>
+<ol class="flow">
+  <li><code>scan</code><span>Read-only. Every finding, with the blockers that keep it.</span></li>
+  <li><code>review</code><span>Optional. Your agent reads PRs and history, and holds unfinished work.</span></li>
+  <li><code>plan</code><span>Saves the eligible findings up to a risk level.</span></li>
+  <li><code>apply</code><span>Rescans, then moves only what is unchanged to the trash.</span></li>
+  <li><code>purge</code><span>Deletes old trash for good and reports the space it freed.</span></li>
+</ol>
+
+<h2>What it cleans</h2>
+<p>Stale worktrees, AUR build clones, the pacman cache, orphaned packages, agent leftovers, build output, old transcripts, the uv cache, snapshots and logs. It also reports CPU load and memory pressure.</p>
+
+<footer>MIT licensed. Made by <a href="https://cjber.dev">cjber</a>.</footer>
+</main>
+</body>
+</html>

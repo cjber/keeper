@@ -7,6 +7,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+- **The wizard shows what you can act on.** Eligible findings come first and blocked ones are hidden until you press
+  `b`. Keys that cannot act on the current row now say why. It opens on the previous scan while a fresh one runs, and
+  selects nothing until that scan finishes.
+- **The wizard follows your terminal theme.** Text uses the terminal's own colours, and a `[theme]` table in the config
+  sets custom ones.
+- **A path deleted during a scan no longer hides its category.** Agents remove their own worktrees and scratch at any
+  time; such a path now drops out instead of failing every other worktree, agent or build finding.
+- **Install from npm or as an agent skill.** `npm i -g @cjber/keeper` installs the binary, `npx skills add cjber/keeper`
+  the skill, and the repository is a Claude Code plugin marketplace.
+
 - **Purge reports what it really freed.** `freed` is the measured change in free space, and sizes elsewhere are labelled
   uncompressed, because on btrfs with compression they can be several times what a removal gives back.
 

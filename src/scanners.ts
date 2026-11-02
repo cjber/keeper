@@ -81,7 +81,20 @@ export interface Config {
   purgeHook: string;
   /** Have `keeper auto` return primary checkouts to their default branch and fast-forward them. */
   freshen: boolean;
+  /** Wizard colours. Empty keeps the terminal's own: reverse video for the cursor, dim for blocked rows. */
+  theme: Theme;
 }
+
+/** Colours as `#rrggbb` or a name the terminal knows, such as `cyan`. */
+export interface Theme {
+  cursor: string;
+  cursorText: string;
+  selected: string;
+  blocked: string;
+  accent: string;
+}
+
+export const defaultTheme: Theme = { cursor: "", cursorText: "", selected: "", blocked: "", accent: "" };
 
 export const defaultConfig: Config = {
   agentRoots: [],
@@ -93,6 +106,7 @@ export const defaultConfig: Config = {
   warnFreeGb: 20,
   purgeHook: "",
   freshen: false,
+  theme: defaultTheme,
 };
 
 /** One pull request as `gh pr list` reports it. */
@@ -159,6 +173,18 @@ function entries(path: string): string[] {
     return [];
   }
 }
+
+/** Agents delete their own worktrees and scratch at any time, so a path that vanishes mid-scan is dropped, not fatal. */
+async function unlessGone<T>(path: string, inspect: () => T | Promise<T>): Promise<T | undefined> {
+  try {
+    return await inspect();
+  } catch (error) {
+    if (existsSync(path)) throw error;
+    return undefined;
+  }
+}
+
+const found = <T>(items: (T | undefined)[]): T[] => items.filter((item): item is T => item !== undefined);
 
 function isDirectory(path: string): boolean {
   try {
@@ -294,10 +320,14 @@ async function scanWorktrees(context: Context): Promise<Finding[]> {
     known.set(commonDir, found);
     return found;
   };
-  return [
-    ...(await Promise.all(dirs.map((dir) => inspectWorktree(dir, context, bytes.get(dir) ?? 0, lookup)))),
-    ...(await Promise.all(leftovers.map((dir) => inspectLeftover(dir, context, bytes.get(dir) ?? 0)))),
-  ];
+  return found([
+    ...(await Promise.all(
+      dirs.map((dir) => unlessGone(dir, () => inspectWorktree(dir, context, bytes.get(dir) ?? 0, lookup))),
+    )),
+    ...(await Promise.all(
+      leftovers.map((dir) => unlessGone(dir, () => inspectLeftover(dir, context, bytes.get(dir) ?? 0))),
+    )),
+  ]);
 }
 
 /** A directory beside worktrees that is not a checkout, usually what a manual removal left behind. */
@@ -425,7 +455,7 @@ async function scanAgent(context: Context): Promise<Finding[]> {
   const claimed = readLedger(context.paths).claims.map((claim) => claim.path);
   const roots = [...new Set([...context.config.agentRoots.map(expand), ...claimed, ...cached])].filter(existsSync);
   const bytes = await sizes(roots);
-  return roots.map((path) => {
+  const inspect = (path: string): Finding => {
     const age = ageDays(path, context.now);
     const blockers: string[] = [];
     if (holders(path, context.live)) blockers.push("in use by a running process");
@@ -442,7 +472,8 @@ async function scanAgent(context: Context): Promise<Finding[]> {
       reason: "Allowlisted agent output",
       blockers,
     } satisfies Finding;
-  });
+  };
+  return found(await Promise.all(roots.map((path) => unlessGone(path, () => inspect(path)))));
 }
 
 /** Newest of a directory and its direct entries: a build or install touches those even when the top is unchanged. */
@@ -498,7 +529,8 @@ async function scanBuild(context: Context): Promise<Finding[]> {
       .filter((path) => buildDirs.test(path));
     return [...top, ...nested].filter(isDirectory);
   });
-  const stale = candidates.filter((path) => newestAge(path, context.now) >= staleBuildDays);
+  const ages = await Promise.all(candidates.map((path) => unlessGone(path, () => newestAge(path, context.now))));
+  const stale = candidates.filter((_, index) => (ages[index] ?? 0) >= staleBuildDays);
   const ignored = (
     await Promise.all(
       stale.map(async (path) => {

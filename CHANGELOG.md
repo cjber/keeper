@@ -7,6 +7,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+- **AUR publishes before npm.** The release workflow renders and pushes the AUR packages before it publishes to npm, so
+  a npm trusted-publisher problem can no longer skip them.
+
 ## [0.2.0] - 2026-11-02
 
 - **The wizard groups long scans.** Findings are listed under their category with a count and size, a category with

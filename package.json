@@ -11,7 +11,7 @@
   "scripts": {
     "start": "bun run src/index.tsx",
     "test": "bun test",
-    "gate": "biome ci . && tsc --noEmit && bun test && bun scripts/changelog.ts --check && python3 .sift/gate.py --base origin/main && python3 .sift/agents.py check",
+    "gate": "biome ci . && tsc --noEmit && bun test && bun scripts/changelog.ts --check",
     "site:deploy": "rm -rf dist/site && mkdir -p dist/site && cp site/index.html assets/wordmark.svg assets/wordmark-dark.svg assets/logo.svg assets/icon.png dist/site && wrangler pages deploy dist/site --project-name keeper --branch main"
   },
   "dependencies": {

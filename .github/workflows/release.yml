@@ -54,7 +54,12 @@ jobs:
         run: |
           set -euo pipefail
           bun scripts/changelog.ts "$VERSION" > "$RUNNER_TEMP/notes.md"
-          gh release create "$GITHUB_REF_NAME" dist/keeper-linux-x64 dist/keeper-linux-arm64 --verify-tag --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"
+          # A rerun after a later step failed finds the release already there: refresh its binaries instead.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/keeper-linux-x64 dist/keeper-linux-arm64 --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/keeper-linux-x64 dist/keeper-linux-arm64 --verify-tag --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"
+          fi
 
       # AUR goes before npm: a npm trusted-publisher problem must not skip the AUR packages, which need no such setup.
       - name: Render AUR packages

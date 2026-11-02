@@ -5,9 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>keeper</title>
 <meta name="description" content="keeper keeps an Arch machine clean, with your agent doing the deciding. It proves work is finished before removing it, and everything goes to a trash you can undo.">
+<link rel="canonical" href="https://keeper.cjber.dev/">
 <meta property="og:title" content="keeper">
 <meta property="og:description" content="Keeps an Arch machine clean, with your agent doing the deciding.">
+<meta property="og:url" content="https://keeper.cjber.dev/">
 <meta property="og:image" content="https://keeper.cjber.dev/icon.png">
+<meta property="og:type" content="website">
 <link rel="icon" href="logo.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -52,6 +55,10 @@ h2 {
   font-size: 13px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
   color: var(--muted); margin: 56px 0 16px; padding-bottom: 8px; border-bottom: 1px solid var(--rule);
 }
+h3 {
+  font-size: 12px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--muted); margin: 32px 0 8px;
+}
 pre {
   background: var(--panel); border-radius: 8px; padding: 14px 16px; margin: 12px 0;
   overflow-x: auto; font: inherit; font-size: 14px;
@@ -64,6 +71,7 @@ ul.points { list-style: none; padding: 0; margin: 0; }
 ul.points li { padding: 12px 0; border-bottom: 1px solid var(--rule); }
 ul.points li:last-child { border-bottom: 0; }
 ul.points strong { display: block; font-weight: 600; }
+ul.points strong code, ul.points span code { background: none; padding: 0; }
 ul.points span { color: var(--muted); }
 ol.flow { list-style: none; padding: 0; margin: 0; counter-reset: step; }
 ol.flow li { counter-increment: step; display: grid; grid-template-columns: 2.2em 9em 1fr; gap: 8px; padding: 8px 0; }
@@ -96,35 +104,92 @@ footer { margin-top: 72px; color: var(--muted); font-size: 13px; text-align: cen
 </header>
 
 <h2>Install</h2>
-<pre><code><span class="prompt">paru -S keeper-bin</span>          <span class="comment"># standalone binary</span>
-<span class="prompt">npm i -g @cillianb/keeper</span>   <span class="comment"># or from npm</span>
-<span class="prompt">npx skills add cjber/keeper</span> <span class="comment"># skill for your agent</span></code></pre>
-<p>In Claude Code, the plugin works too: <code>/plugin marketplace add cjber/keeper</code>, then <code>/plugin install keeper@keeper</code>. Then ask your agent:</p>
+<pre><code><span class="prompt">paru -S keeper-bin</span>       <span class="comment"># standalone binary</span>
+<span class="prompt">paru -S keeper</span>           <span class="comment"># Bun source package</span>
+<span class="prompt">npm i -g @cillianb/keeper</span> <span class="comment"># same binary from npm, x64 and arm64</span></code></pre>
+<p>The AUR has both packages, and npm ships the same binary for x64 and arm64. To run it once without installing, use <code>npx @cillianb/keeper scan</code>. Install it before <code>keeper timer install</code>, so the schedule points at a path that stays put.</p>
+<p>keeper needs <code>git</code> and <code>pacman-contrib</code>. <a href="https://cli.github.com">gh</a> adds pull request proof, <code>expac</code> sizes orphans, <code>notify-send</code> delivers notifications and <code>uv</code> prunes its cache. <code>keeper status</code> lists any that are missing. Removing packages and running <code>paccache</code> use <code>sudo -n</code>, so they need passwordless sudo for those commands.</p>
+
+<h2>Set up with your agent</h2>
+<pre><code><span class="prompt">npx skills add cjber/keeper</span> <span class="comment"># skill for any agent that reads Agent Skills</span></code></pre>
+<p>The skill is at <a href="https://github.com/cjber/keeper/blob/main/skills/keeper/SKILL.md">skills/keeper/SKILL.md</a>. The source package also installs it to <code>/usr/lib/keeper/skills</code>, and the binary package to <code>/usr/share/doc/keeper-bin/skills</code>. In Claude Code, the plugin works too: <code>/plugin marketplace add cjber/keeper</code>, then <code>/plugin install keeper@keeper</code>. Then ask your agent:</p>
 <pre class="wrap"><code>Run keeper status, then keeper scan. Show me what is eligible and what is blocked, and why. Plan the low-risk items, then ask me before applying anything else.</code></pre>
-<p>To run it yourself, <code>keeper</code> opens a terminal wizard, and <code>keeper timer install</code> cleans up low-risk items every night.</p>
 
 <h2>Why keeper</h2>
 <ul class="points">
-  <li><strong>It proves before it removes.</strong><span>A worktree counts as finished only when a merged pull request has the exact commit it sits on, or every commit is on the default branch. Anything else waits for approval.</span></li>
+  <li><strong>It proves before it removes.</strong><span>A worktree counts as finished only when a merged pull request holds every commit it has, or when every commit is on the default branch. Anything else waits for approval.</span></li>
   <li><strong>Agents are the primary user.</strong><span>Every command returns JSON when piped, and each exit code names the next step. The wizard is a thin layer over the same calls.</span></li>
   <li><strong>Agents can protect their work.</strong><span><code>keeper hold</code> outranks every scanner until it expires, so a session can mark a worktree it will return to.</span></li>
-  <li><strong>Nothing is final until purge.</strong><span>Paths move to a trash and <code>keeper undo</code> restores them. Branches are deleted only at purge, and only if they have not moved.</span></li>
-  <li><strong>It renices instead of killing.</strong><span>When the machine is overloaded, keeper names the commands holding the CPU and lowers their priority, so the work survives.</span></li>
+  <li><strong>Nothing is final until purge.</strong><span>Paths move to a trash, and <code>keeper undo</code> restores them. Local branches are deleted only at purge, and only if they have not moved.</span></li>
+  <li><strong>It renices instead of killing.</strong><span>When the machine is overloaded, keeper names the commands holding the CPU and can lower their priority, so the work survives.</span></li>
+  <li><strong>Apps are judged from real use.</strong><span><code>keeper sample</code> records which executables are running, folded to their package. Only packages with a <code>.desktop</code> launcher count as apps, and atime is never used.</span></li>
 </ul>
 
 <h2>How it works</h2>
 <ol class="flow">
   <li><code>scan</code><span>Read-only. Every finding, with the blockers that keep it.</span></li>
-  <li><code>review</code><span>Optional. Your agent reads PRs and history, and holds unfinished work.</span></li>
-  <li><code>plan</code><span>Saves the eligible findings up to a risk level.</span></li>
-  <li><code>apply</code><span>Rescans, then moves only what is unchanged to the trash.</span></li>
-  <li><code>purge</code><span>Deletes old trash for good and reports the space it freed.</span></li>
+  <li><code>agent review</code><span>Optional. Your agent reads PRs and history, then adds holds on unfinished work.</span></li>
+  <li><code>plan</code><span>Saves the eligible findings you chose. Apps and personal files need their id, and medium risk needs <code>--max-risk medium</code>.</span></li>
+  <li><code>apply</code><span>Rescans, then applies the plan. <code>keeper apply PLAN --yes</code> skips anything that changed since the plan.</span></li>
+  <li><code>undo</code><span>Restores a transaction from the trash.</span></li>
+  <li><code>purge</code><span>Deletes trash over 14 days old for good and reports the measured space freed.</span></li>
 </ol>
+<p>To run it yourself, <code>keeper</code> opens a terminal wizard over the same calls. Findings are grouped by category with a count and size. A category with many rows starts folded: <code>h</code> and <code>l</code> fold or expand it, <code>pgup</code> and <code>pgdn</code> page through a long list, and <code>space</code> on a category header selects the eligible findings in the whole section. <code>b</code> shows blocked findings, <code>g</code> switches between the list, space by category and free space history, and <code>r</code> rescans everything. <code>keeper timer install</code> then cleans up low-risk items every night.</p>
 
-<h2>What it cleans</h2>
-<p>Stale worktrees, AUR build clones, the pacman cache, orphaned packages, agent leftovers, build output, old transcripts, uv, pnpm, npm and bun caches, Docker images and build cache, snapshots and logs. It reports unused Docker volumes, CPU load and memory pressure, and leaves those calls to you.</p>
+<h2>Commands</h2>
+<ul class="points">
+  <li><strong><code>keeper</code></strong><span>Opens the wizard in a terminal.</span></li>
+  <li><strong><code>keeper status</code></strong><span>Free space, schedule, last run, whether the nightly runs are healthy, holds, trash and missing tools.</span></li>
+  <li><strong><code>keeper scan</code></strong><span>Lists findings and their blockers. <code>--cached</code> reuses recently scanned categories.</span></li>
+  <li><strong><code>keeper plan</code></strong><span>Saves a plan of eligible findings. Apps and personal files need their id. Add <code>--max-risk medium</code> once medium risk is approved.</span></li>
+  <li><strong><code>keeper apply PLAN --yes</code></strong><span>Rescans, then applies what is unchanged.</span></li>
+  <li><strong><code>keeper undo TX</code></strong><span>Restores a transaction from trash.</span></li>
+  <li><strong><code>keeper purge</code></strong><span>Deletes trash over 14 days old for good.</span></li>
+  <li><strong><code>keeper hold PATH --reason R</code></strong><span>Protects a path for 7 days, or <code>--days N</code>.</span></li>
+  <li><strong><code>keeper claim PATH</code></strong><span>Declares your own scratch disposable once stale.</span></li>
+  <li><strong><code>keeper release PATH</code></strong><span>Drops a hold or claim.</span></li>
+  <li><strong><code>keeper log</code></strong><span>Shows recent mutations and who made them.</span></li>
+  <li><strong><code>keeper history</code></strong><span>Free space readings and the events that changed it, over 30 days or <code>--days N</code>.</span></li>
+  <li><strong><code>keeper sample</code></strong><span>Records free space and which executables are running, as the hourly timer does.</span></li>
+  <li><strong><code>keeper schema</code></strong><span>Describes the CLI as JSON.</span></li>
+  <li><strong><code>keeper auto</code></strong><span>Applies low-risk findings, purges old trash and notifies.</span></li>
+  <li><strong><code>keeper timer install</code></strong><span>Schedules <code>keeper auto</code> daily and <code>keeper sample</code> hourly with systemd, or <code>--cron</code>.</span></li>
+  <li><strong><code>keeper timer remove</code></strong><span>Removes the schedule.</span></li>
+</ul>
+<p>Set <code>KEEPER_ACTOR</code> to name yourself in holds, claims and the log.</p>
 
-<footer>MIT licensed. Made by <a href="https://cjber.dev">cjber</a>.</footer>
+<h2>What it finds</h2>
+<p>Each scan category, with its risk. Only low-risk findings can run unattended, and report-only findings are never removed.</p>
+<h3>Code and system</h3>
+<ul class="points">
+  <li><strong><code>worktree</code></strong><span>Clean, pushed worktrees and stray directories in a worktree root. Low risk with proof, otherwise medium.</span></li>
+  <li><strong><code>aur</code></strong><span>Clones of uninstalled packages, and build output in the others. Low.</span></li>
+  <li><strong><code>pacman-cache</code></strong><span>Old package versions, keeping the newest. Low.</span></li>
+  <li><strong><code>orphans</code></strong><span>Dependencies nothing requires. Medium.</span></li>
+  <li><strong><code>agent</code></strong><span>Output in configured roots, and paths agents claimed as scratch. Low.</span></li>
+  <li><strong><code>build</code></strong><span>Git-ignored <code>target</code>, <code>node_modules</code>, <code>.next</code>, <code>.turbo</code> and <code>.venv</code> with no file written for 3 days. Low.</span></li>
+  <li><strong><code>transcripts</code></strong><span>Claude Code and Codex transcripts over 14 days old. Low.</span></li>
+  <li><strong><code>package-cache</code></strong><span>Unreferenced uv and pnpm entries, and npm and bun caches over 2G. Low.</span></li>
+  <li><strong><code>docker</code></strong><span>Dangling images and build cache unused for 7 days. Unused volumes are reported only. Low, volumes report only.</span></li>
+  <li><strong><code>logs</code></strong><span>Configured logs over 50M, cut to their last 5M. Low.</span></li>
+  <li><strong><code>snapshots</code></strong><span>Timeshift snapshots, which keep deleted data on disk. Report only.</span></li>
+  <li><strong><code>load</code></strong><span>Commands holding the CPU while the machine is oversubscribed. Medium.</span></li>
+  <li><strong><code>memory</code></strong><span>Cgroups at their <code>memory.high</code> cap, and memory pressure. Report only.</span></li>
+</ul>
+<h3>Personal and application data</h3>
+<ul class="points">
+  <li><strong><code>apps</code></strong><span>Explicitly installed packages that ship a <code>.desktop</code> launcher and were not seen running for 90 days. Medium, by id only.</span></li>
+  <li><strong><code>large</code></strong><span>Files over 500M under <code>$HOME</code>, stale, outside git repos, dotdirs, downloads, screenshots and application trees. Medium, by id only.</span></li>
+  <li><strong><code>downloads</code></strong><span>Stale downloads, finished installers, and partials. Partials over a day old are low. Low or medium, by id only.</span></li>
+  <li><strong><code>screenshots</code></strong><span>Stale images in the Pictures <code>Screenshots</code> and grim/hyprshot folders. Medium, by id only.</span></li>
+  <li><strong><code>duplicates</code></strong><span>Identical files in different personal document trees, keeping the newest copy and offering the rest. Medium, by id only.</span></li>
+</ul>
+<p>Apps, large files, downloads, screenshots and duplicates are personal or application data, so they are only planned when you name their id. <code>keeper plan</code> with no ids never takes them, even with <code>--max-risk medium</code>.</p>
+<p><code>large</code> and <code>duplicates</code> skip application trees: anything under a Wine prefix, a Steam, Lutris, Heroic or GOG library, a <code>~/Games</code> style library, flatpak data or a VM store, and any directory holding an install marker such as a <code>.exe</code>, <code>.toc</code> or <code>.pak</code>. A duplicate is offered only when the copy keeper keeps is in a different top-level folder of your own documents: <code>Documents</code>, <code>Pictures</code>, <code>Music</code>, <code>Videos</code>, <code>Downloads</code> or <code>Desktop</code>.</p>
+<p>These block a worktree whatever its age: uncommitted files, commits on no remote, a running process inside it, an open pull request, a rebase, merge, bisect or cherry-pick in progress, and any hold.</p>
+<p>Sizes in scans and plans are uncompressed. Trash sits on the same disk, so nothing is freed until <code>keeper purge</code>, which reports the measured change in free space as <code>freed</code>.</p>
+
+<footer>MIT licensed. <a href="https://github.com/cjber/keeper">GitHub</a> and <a href="https://cjber.dev">cjber.dev</a><br>Made by Cillian Berragan</footer>
 </main>
 </body>
 </html>

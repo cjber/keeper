@@ -7,6 +7,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  truncateSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -16,7 +17,15 @@ import { dangerous, runCli, schema } from "./cli";
 import { freshen } from "./freshen";
 import { BusyError, withLock, writeLedger } from "./ledger";
 import { applyPlan, context, createPlan, loadConfig, purge, undo } from "./ops";
-import { type Context, defaultConfig, type ProcessInfo, type PullRequest, scan, worktreeDirs } from "./scanners";
+import {
+  type Context,
+  defaultConfig,
+  dockerFindings,
+  type ProcessInfo,
+  type PullRequest,
+  scan,
+  worktreeDirs,
+} from "./scanners";
 import { defaultPaths, holders, niceness, run } from "./system";
 import { units } from "./timer";
 import { eligible } from "./types";
@@ -64,6 +73,7 @@ beforeEach(() => {
     live: [],
     now: Date.now(),
     staleDays: 7,
+    docker: async () => undefined,
   };
   ctx.paths.state = join(home, "state");
 });
@@ -558,4 +568,47 @@ test("every keeper command the docs name exists in the CLI", async () => {
     const text = readFileSync(join(import.meta.dir, "..", file), "utf8");
     for (const [, command] of text.matchAll(/`keeper ([a-z]+)/g)) expect(help).toContain(`keeper ${command}`);
   }
+});
+
+test("package caches: prunable ones always offered, cleared-whole ones only once large", async () => {
+  mkdirSync(join(home, ".npm/_cacache"), { recursive: true });
+  // du -b counts apparent size, so a sparse file stands in for gigabytes of downloads.
+  writeFileSync(join(home, ".npm/_cacache/blob"), "");
+  truncateSync(join(home, ".npm/_cacache/blob"), 3 * 1024 ** 3);
+  mkdirSync(join(home, ".bun/install/cache"), { recursive: true });
+  writeFileSync(join(home, ".bun/install/cache/small"), "x");
+  mkdirSync(join(home, ".local/share/pnpm/store"), { recursive: true });
+  const { findings } = await scan(ctx, ["package-cache"]);
+  const byTitle = Object.fromEntries(findings.map((finding) => [finding.title, finding]));
+  expect(byTitle["npm cache"]).toMatchObject({ action: "npm-clean", bytes: 3 * 1024 ** 3, risk: "low" });
+  expect(byTitle["pnpm cache"]).toMatchObject({ action: "pnpm-prune", bytes: 0 });
+  expect(byTitle["bun cache"]).toBeUndefined();
+});
+
+test("docker: dangling images and build cache are prunable, unused volumes are only reported", () => {
+  const volume = (name: string, links: string, project?: string) => ({
+    Name: name,
+    Links: links,
+    Size: "1.5GB",
+    Labels: project ? `com.docker.compose.project=${project},com.docker.compose.volume=db` : "",
+  });
+  const findings = dockerFindings(
+    {
+      Images: [
+        { Repository: "<none>", Containers: "0", Size: "200MB" },
+        { Repository: "postgres", Containers: "1", Size: "400MB" },
+      ],
+      Volumes: [volume("a_db", "0", "app-wt1"), volume("b_db", "0", "app-wt2"), volume("live", "1", "app")],
+    },
+    2e9,
+  );
+  expect(findings.map((finding) => [finding.action, finding.risk])).toEqual([
+    ["docker-image-prune", "low"],
+    ["docker-builder-prune", "low"],
+    ["report", "high"],
+  ]);
+  expect(findings[0]?.bytes).toBe(200e6);
+  expect(findings[2]).toMatchObject({ title: "2 unused docker volumes", bytes: 3e9 });
+  expect(findings[2]?.reason).toContain("app-wt1, app-wt2");
+  expect(dockerFindings({ Images: null, Volumes: null }, 0)).toEqual([]);
 });

@@ -133,6 +133,8 @@ export interface Context {
   /** Memory pressure and capped cgroups, so a test can describe a stalled machine without reproducing one. */
   pressure?: MemoryPressure;
   cgroups?: readonly CgroupUsage[];
+  /** Docker usage and reclaimable build cache, so a test never queries the machine's daemon. Undefined means no docker. */
+  docker?: () => Promise<[DockerUsage, number] | undefined>;
 }
 
 /** Percent of the last ten seconds spent stalled on memory, as `/proc/pressure/memory` reports it. */
@@ -601,25 +603,152 @@ async function scanTranscripts(context: Context): Promise<Finding[]> {
   ];
 }
 
-async function scanUv(context: Context): Promise<Finding[]> {
-  const cache = join(context.paths.home, ".cache/uv");
-  if (!existsSync(cache)) return [];
-  const bytes = (await sizes([cache])).get(cache) ?? 0;
-  return [
-    {
-      id: findingId("uv-cache", cache, String(bytes)),
-      category: "uv-cache",
+/** A cache only some tools can prune. The rest are cleared whole, so they are offered only once they grow large. */
+interface PackageCache {
+  tool: string;
+  path: string;
+  action: Finding["action"];
+  prunes: boolean;
+}
+
+const packageCaches: PackageCache[] = [
+  { tool: "uv", path: ".cache/uv", action: "uv-prune", prunes: true },
+  { tool: "pnpm", path: ".local/share/pnpm/store", action: "pnpm-prune", prunes: true },
+  { tool: "npm", path: ".npm/_cacache", action: "npm-clean", prunes: false },
+  { tool: "bun", path: ".bun/install/cache", action: "bun-clean", prunes: false },
+];
+
+const cleanAboveBytes = 2 * 1024 ** 3;
+
+/** Whether the tool is running, not counting keeper itself, which runs under bun from source. */
+async function running(tool: string): Promise<boolean> {
+  const own = new Set([process.pid, process.ppid]);
+  const found = await run(["pgrep", "-x", tool === "npm" ? "npm|npx|npm exec.*" : tool]);
+  return found.stdout.split("\n").some((pid) => pid && !own.has(Number(pid)));
+}
+
+async function scanPackageCaches(context: Context): Promise<Finding[]> {
+  const present = packageCaches.filter((cache) => existsSync(join(context.paths.home, cache.path)));
+  const bytes = await sizes(present.map((cache) => join(context.paths.home, cache.path)));
+  const findings = await Promise.all(
+    present.map(async (cache): Promise<Finding | undefined> => {
+      const path = join(context.paths.home, cache.path);
+      const size = bytes.get(path) ?? 0;
+      if (!cache.prunes && size < cleanAboveBytes) return undefined;
+      const gib = Math.round(size / 1024 ** 3);
+      return {
+        id: findingId("package-cache", path, String(size)),
+        category: "package-cache",
+        risk: "low",
+        action: cache.action,
+        title: `${cache.tool} cache`,
+        paths: [],
+        packages: [],
+        // A prune frees an unknown share; a clean frees the lot.
+        bytes: cache.prunes ? 0 : size,
+        reason: cache.prunes
+          ? `Cache holds ${gib}G. Pruning removes entries nothing references, so the amount freed is unknown until it runs`
+          : `Cache holds ${gib}G of downloads that ${cache.tool} fetches again on the next install`,
+        // Clearing a cache under a running install can break that install, and uv refuses while it holds the lock.
+        blockers: (await running(cache.tool)) ? [`${cache.tool} is running`] : [],
+      };
+    }),
+  );
+  return found(findings);
+}
+
+/** Build cache unused for a week is dropped; newer layers are what the next build reuses. */
+export const dockerCacheHours = 168;
+
+function dockerBytes(size: string): number {
+  const match = /^([\d.]+)\s*([kMGT]?B)/.exec(size);
+  const units: Record<string, number> = { B: 1, kB: 1e3, MB: 1e6, GB: 1e9, TB: 1e12 };
+  return match ? Number(match[1]) * (units[match[2] as string] ?? 1) : 0;
+}
+
+interface DockerVolume {
+  Name: string;
+  Links: string;
+  Size: string;
+  Labels: string;
+}
+
+/** What `docker system df -v --format {{json .}}` prints, as far as keeper reads it. */
+export interface DockerUsage {
+  Images: { Containers: string; Size: string; Repository: string }[] | null;
+  Volumes: DockerVolume[] | null;
+}
+
+async function scanDocker(context: Context): Promise<Finding[]> {
+  const usage = await (context.docker ?? readDocker)();
+  return usage ? dockerFindings(...usage) : [];
+}
+
+async function readDocker(): Promise<[DockerUsage, number] | undefined> {
+  const df = await run(["docker", "system", "df", "-v", "--format", "{{json .}}"]);
+  // No docker, or a daemon this user cannot reach, means there is nothing of theirs to judge.
+  if (df.code !== 0) return undefined;
+  const summary = await run(["docker", "system", "df", "--format", "{{json .}}"]);
+  const build = summary.stdout
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as { Type: string; Reclaimable: string })
+    .find((row) => row.Type === "Build Cache");
+  return [JSON.parse(df.stdout), dockerBytes(build?.Reclaimable ?? "0B")];
+}
+
+export function dockerFindings(usage: DockerUsage, reclaimableBuildCache: number): Finding[] {
+  const findings: Finding[] = [];
+  const dangling = (usage.Images ?? []).filter((image) => image.Repository === "<none>" && image.Containers === "0");
+  if (dangling.length) {
+    const bytes = dangling.reduce((sum, image) => sum + dockerBytes(image.Size), 0);
+    findings.push({
+      id: findingId("docker", "dangling-images", `${dangling.length}:${bytes}`),
+      category: "docker",
       risk: "low",
-      action: "uv-prune",
-      title: "uv cache",
+      action: "docker-image-prune",
+      title: `${dangling.length} dangling docker images`,
       paths: [],
       packages: [],
+      bytes,
+      reason: "Untagged image layers no container uses. A rebuild recreates any that are needed",
+      blockers: [],
+    });
+  }
+  if (reclaimableBuildCache > 0) {
+    findings.push({
+      id: findingId("docker", "build-cache", String(reclaimableBuildCache)),
+      category: "docker",
+      risk: "low",
+      action: "docker-builder-prune",
+      title: "docker build cache",
+      paths: [],
+      packages: [],
+      // Docker applies the age filter itself, so how much of the reclaimable total goes is known only after it runs.
       bytes: 0,
-      reason: `Cache holds ${Math.round(bytes / 1024 ** 3)}G. Pruning removes entries no environment needs, so the amount freed is unknown until it runs`,
-      // uv refuses to prune while another uv holds the cache lock, which is the normal state of a busy machine.
-      blockers: (await run(["pgrep", "-x", "uv"])).code === 0 ? ["uv is running"] : [],
-    },
-  ];
+      reason: `${Math.round(reclaimableBuildCache / 1e9)}G reclaimable. Pruning drops entries unused for ${dockerCacheHours / 24} days; builds still reuse anything newer`,
+      blockers: [],
+    });
+  }
+  const unused = (usage.Volumes ?? []).filter((volume) => volume.Links === "0");
+  if (unused.length) {
+    const project = (volume: DockerVolume) => /com\.docker\.compose\.project=([^,]+)/.exec(volume.Labels)?.[1];
+    const projects = [...new Set(unused.map((volume) => project(volume) ?? volume.Name))];
+    findings.push({
+      id: findingId("docker", "volumes", unused.map((volume) => volume.Name).join(",")),
+      category: "docker",
+      risk: "high",
+      action: "report",
+      title: `${unused.length} unused docker volumes`,
+      paths: [],
+      packages: [],
+      bytes: unused.reduce((sum, volume) => sum + dockerBytes(volume.Size), 0),
+      // Volumes hold databases, and removing one cannot be undone, so keeper names them and leaves the call to a person.
+      reason: `No container uses them, but they can hold database data. Projects: ${projects.join(", ")}. Review with docker volume ls --filter dangling=true and remove with docker volume rm`,
+      blockers: [],
+    });
+  }
+  return findings;
 }
 
 async function scanSnapshots(): Promise<Finding[]> {
@@ -908,7 +1037,8 @@ const scanners: Record<Category, (context: Context) => Promise<Finding[]>> = {
   agent: scanAgent,
   build: scanBuild,
   transcripts: scanTranscripts,
-  "uv-cache": scanUv,
+  "package-cache": scanPackageCaches,
+  docker: scanDocker,
   snapshots: scanSnapshots,
   logs: scanLogs,
   load: scanLoad,

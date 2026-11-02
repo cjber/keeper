@@ -99,7 +99,8 @@ until `keeper purge`, which reports the measured change in free space as `freed`
 | `agent` | Output in configured roots, and paths agents claimed as scratch | low |
 | `build` | Git-ignored `target`, `node_modules`, `.next`, `.turbo` and `.venv` with no file written for 3 days | low |
 | `transcripts` | Claude Code and Codex transcripts over 14 days old | low |
-| `uv-cache` | Entries `uv cache prune` can remove | low |
+| `package-cache` | Unreferenced uv and pnpm entries, and npm and bun caches over 2G | low |
+| `docker` | Dangling images and build cache unused for 7 days; unused volumes are reported only | low, volumes report only |
 | `logs` | Configured logs over 50M, cut to their last 5M | low |
 | `snapshots` | Timeshift snapshots, which keep deleted data on disk | report only |
 | `load` | Commands holding the CPU while the machine is oversubscribed | medium |

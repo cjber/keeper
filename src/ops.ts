@@ -3,7 +3,15 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, st
 import { dirname, join } from "node:path";
 import { audit, withLock } from "./ledger";
 import type { Config, Context } from "./scanners";
-import { defaultConfig, defaultStaleDays, defaultTheme, logKeepBytes, lowestPriority, scan } from "./scanners";
+import {
+  defaultConfig,
+  defaultStaleDays,
+  defaultTheme,
+  dockerCacheHours,
+  logKeepBytes,
+  lowestPriority,
+  scan,
+} from "./scanners";
 import { defaultPaths, expandHome, liveFiles, niceness, type Paths, run } from "./system";
 import {
   eligible,
@@ -141,6 +149,11 @@ async function execute(finding: Finding, paths: Paths, tx: Transaction, base: st
     paccache: ["sudo", "-n", "paccache", "-rk1"],
     "remove-packages": ["sudo", "-n", "pacman", "-Rns", "--noconfirm", ...finding.packages],
     "uv-prune": ["env", "UV_LOCK_TIMEOUT=5", "uv", "cache", "prune"],
+    "pnpm-prune": ["pnpm", "store", "prune"],
+    "npm-clean": ["npm", "cache", "clean", "--force"],
+    "bun-clean": ["bun", "pm", "cache", "rm"],
+    "docker-image-prune": ["docker", "image", "prune", "--force"],
+    "docker-builder-prune": ["docker", "builder", "prune", "--force", "--filter", `until=${dockerCacheHours}h`],
   };
   const argv = command[finding.action];
   if (!argv) throw new Error(`action ${finding.action} cannot be applied`);

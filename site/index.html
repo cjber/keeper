@@ -68,9 +68,11 @@ ul.points span { color: var(--muted); }
 ol.flow { list-style: none; padding: 0; margin: 0; counter-reset: step; }
 ol.flow li { counter-increment: step; display: grid; grid-template-columns: 2.2em 9em 1fr; gap: 8px; padding: 8px 0; }
 ol.flow li::before { content: counter(step); color: var(--accent); font-weight: 600; }
-ol.flow code { font-weight: 600; }
+ol.flow code { font-weight: 600; background: none; padding: 0; }
 ol.flow span { color: var(--muted); }
+pre.wrap { white-space: pre-wrap; }
 @media (max-width: 560px) {
+  .comment { display: none; }
   ol.flow li { grid-template-columns: 2.2em 1fr; }
   ol.flow span { grid-column: 2; }
 }
@@ -98,8 +100,7 @@ footer { margin-top: 72px; color: var(--muted); font-size: 13px; text-align: cen
 <span class="prompt">npm i -g @cjber/keeper</span>      <span class="comment"># or from npm</span>
 <span class="prompt">npx skills add cjber/keeper</span> <span class="comment"># skill for your agent</span></code></pre>
 <p>In Claude Code, the plugin works too: <code>/plugin marketplace add cjber/keeper</code>, then <code>/plugin install keeper@keeper</code>. Then ask your agent:</p>
-<pre><code>Run keeper status, then keeper scan. Show me what is eligible and what is blocked,
-and why. Plan the low-risk items, then ask me before applying anything else.</code></pre>
+<pre class="wrap"><code>Run keeper status, then keeper scan. Show me what is eligible and what is blocked, and why. Plan the low-risk items, then ask me before applying anything else.</code></pre>
 <p>To run it yourself, <code>keeper</code> opens a terminal wizard, and <code>keeper timer install</code> cleans up low-risk items every night.</p>
 
 <h2>Why keeper</h2>
@@ -121,7 +122,7 @@ and why. Plan the low-risk items, then ask me before applying anything else.</co
 </ol>
 
 <h2>What it cleans</h2>
-<p>Stale worktrees, AUR build clones, the pacman cache, orphaned packages, agent leftovers, build output, old transcripts, the uv cache, snapshots and logs. It also reports CPU load and memory pressure.</p>
+<p>Stale worktrees, AUR build clones, the pacman cache, orphaned packages, agent leftovers, build output, old transcripts, uv, pnpm, npm and bun caches, Docker images and build cache, snapshots and logs. It reports unused Docker volumes, CPU load and memory pressure, and leaves those calls to you.</p>
 
 <footer>MIT licensed. Made by <a href="https://cjber.dev">cjber</a>.</footer>
 </main>

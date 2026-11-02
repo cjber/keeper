@@ -7,26 +7,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
-- **The wizard shows what you can act on.** Eligible findings come first and blocked ones are hidden until you press
-  `b`. Keys that cannot act on the current row now say why. It opens on the previous scan while a fresh one runs, and
-  selects nothing until that scan finishes.
-- **The wizard follows your terminal theme.** Text uses the terminal's own colours, and a `[theme]` table in the config
-  sets custom ones.
-- **A path deleted during a scan no longer hides its category.** Agents remove their own worktrees and scratch at any
-  time; such a path now drops out instead of failing every other worktree, agent or build finding.
-- **Install from npm or as an agent skill.** `npm i -g @cjber/keeper` installs the binary, `npx skills add cjber/keeper`
-  the skill, and the repository is a Claude Code plugin marketplace.
+First release.
 
-- **Purge reports what it really freed.** `freed` is the measured change in free space, and sizes elsewhere are labelled
-  uncompressed, because on btrfs with compression they can be several times what a removal gives back.
-
-- **Worktrees can be proven finished.** A merged pull request with the same commit, or every commit on the default
-  branch, makes a worktree low risk. An open pull request or an unfinished rebase, merge, bisect or cherry-pick blocks it.
-- **Purge finishes the job.** It deletes a trashed worktree's local branch if the branch has not moved, and runs an
-  optional `purgeHook` first.
-- **Roots are configurable.** `worktreeRoots`, `aurClones`, `logs`, `warnFreeGb` and `freshen` join the config file, and
-  an unknown key is now an error.
-- **Build output is judged by its newest file.** A build still writing deep inside `target` keeps it.
-- **`keeper status` says what to do next,** with the last run, active holds and any missing tools.
-- **`keeper purge --older-days 0` always purges.** It could skip a transaction applied moments earlier.
-- **`keeper undo` can be run again.** It refuses to overwrite a path that exists again, and finishes an interrupted undo.
+- **Finds what agents leave behind.** Stale worktrees, AUR clones, the pacman cache, orphaned packages, agent output,
+  git-ignored build output, old transcripts, package manager caches, Docker leftovers, Timeshift snapshots and
+  oversized logs, plus CPU load and memory pressure.
+- **Proves a worktree finished before it counts as low risk.** A merged pull request with the same commit, or every
+  commit on the default branch. Uncommitted files, unpushed commits, an open pull request, a running process or an
+  unfinished rebase, merge, bisect or cherry-pick blocks it.
+- **Undoable by default.** Paths move to a trash, `keeper undo` restores them, and `keeper purge` deletes them for good
+  and reports the space it measured as freed. Purge deletes a worktree's local branch only if it has not moved, and
+  runs an optional `purgeHook`.
+- **Leaves data it cannot recreate to a person.** Unused Docker volumes are reported with their Compose projects, never
+  removed.
+- **Agent first.** JSON output when piped, one error shape, exit codes that name the next step, `keeper hold` and
+  `keeper claim` for declaring intent, and `keeper schema` for the whole interface.
+- **A terminal wizard** that lists what you can act on first, follows your terminal theme, and opens on the previous
+  scan while a fresh one runs.
+- **Runs nightly** with `keeper timer install`, applying only low-risk findings.
+- **Install from the AUR, npm or as an agent skill**: `paru -S keeper-bin`, `npm i -g @cjber/keeper`, or
+  `npx skills add cjber/keeper`.

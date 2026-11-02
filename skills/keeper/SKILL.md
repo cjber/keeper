@@ -28,4 +28,6 @@ Protect work and declare scratch as you go, because this is how keeper knows int
 - Set `KEEPER_ACTOR` to your session name so `keeper log` shows who did what.
 - Exit code 6 means another run holds the lock, so wait and retry.
 
+Unused Docker volumes are a `report` finding because they can hold database data and removing one cannot be undone. List their Compose projects for the user, and run `docker volume rm` only on the volumes they name.
+
 Treat a blocker as final: never remove a blocked path by hand. Exit code 3 means `--yes` is missing, and that needs the user's approval when the plan includes medium-risk items.

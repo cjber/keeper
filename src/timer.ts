@@ -4,6 +4,8 @@ import { type Paths, run } from "./system";
 
 const service = "keeper.service";
 const timer = "keeper.timer";
+const sampleService = "keeper-sample.service";
+const sampleTimer = "keeper-sample.timer";
 const cronMark = "# keeper";
 
 /** systemd splits on whitespace and expands `%` and `$`, so every argument is quoted and escaped. */
@@ -46,6 +48,25 @@ RandomizedDelaySec=30min
 [Install]
 WantedBy=timers.target
 `,
+    // Separate from the nightly run, so status health still means the cleanup ran, not that a reading did.
+    [sampleService]: `[Unit]
+Description=keeper: record free space for keeper history
+
+[Service]
+Type=oneshot
+Nice=19
+ExecStart=${[...command, "sample"].map(quote).join(" ")}
+`,
+    [sampleTimer]: `[Unit]
+Description=Hourly keeper free space reading
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target
+`,
   };
 }
 
@@ -57,19 +78,19 @@ export async function installSystemd(paths: Paths): Promise<void> {
     if (!existsSync(target) || readFileSync(target, "utf8") !== text) writeFileSync(target, text);
   }
   await systemctl("daemon-reload");
-  await systemctl("enable", "--now", timer);
+  await systemctl("enable", "--now", timer, sampleTimer);
 }
 
 export async function installCron(): Promise<void> {
-  const line = `17 3 * * * ${keeperCommand().join(" ")} auto ${cronMark}`;
+  const command = keeperCommand().join(" ");
   const current = (await run(["crontab", "-l"])).stdout;
   const kept = current.split("\n").filter((entry) => entry && !entry.endsWith(cronMark));
-  await writeCrontab([...kept, line]);
+  await writeCrontab([...kept, `17 3 * * * ${command} auto ${cronMark}`, `7 * * * * ${command} sample ${cronMark}`]);
 }
 
 export async function removeSchedule(paths: Paths): Promise<void> {
-  await run(["systemctl", "--user", "disable", "--now", timer]);
-  for (const name of [service, timer]) {
+  await run(["systemctl", "--user", "disable", "--now", timer, sampleTimer]);
+  for (const name of [service, timer, sampleService, sampleTimer]) {
     const target = join(paths.units, name);
     if (existsSync(target)) unlinkSync(target);
   }

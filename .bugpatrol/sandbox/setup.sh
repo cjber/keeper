@@ -60,4 +60,34 @@ truncate -s 3G "$home/.npm/_cacache/blob"
 dd if=/dev/zero of="$home/.npm/_cacache/blob" bs=1M count=1 conv=notrunc status=none
 
 mkdir -p "$home/.config/keeper"
+
+# A week of free space readings and the events that changed it, so the history view has a chart to draw.
+state="$home/.local/state/keeper"
+mkdir -p "$state"
+python3 - "$state" $(df -B1 --output=avail,size "$home" | tail -1) <<'PY'
+import json, sys, time
+state, now, gig = sys.argv[1], time.time(), 1024 ** 3
+real_free, real_size = int(sys.argv[2]), int(sys.argv[3])
+iso = lambda t: time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(t))
+# Ends at the real reading, so the next one keeper takes continues the line instead of jumping.
+step = real_free / 400
+free, readings = 0.0, []
+with open(f"{state}/history.jsonl", "w") as history, open(f"{state}/audit.jsonl", "w") as log:
+    for hour in range(7 * 24, -1, -1):
+        at = now - hour * 3600
+        free -= step  # builds and caches eat space between cleanups
+        if hour % 24 == 3:
+            free += 8 * step
+            log.write(json.dumps({"at": iso(at), "actor": "keeper.service", "event": "auto", "summary": "nightly"}) + "\n")
+        if hour == 50:
+            free += 30 * step
+            log.write(json.dumps({"at": iso(at), "actor": "patrol", "event": "apply", "bytes": int(30 * step)}) + "\n")
+        if hour == 20:
+            free += 20 * step
+            log.write(json.dumps({"at": iso(at), "actor": "patrol", "event": "purge", "bytes": int(24 * step), "freed": int(20 * step)}) + "\n")
+        readings.append((at, free))
+    shift = real_free - readings[-1][1]
+    for at, value in readings:
+        history.write(json.dumps({"at": iso(at), "free": int(max(0, value + shift)), "size": real_size}) + "\n")
+PY
 echo "sandbox ready at $home"

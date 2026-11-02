@@ -206,11 +206,17 @@ async function unlessGone<T>(path: string, inspect: () => T | Promise<T>): Promi
   }
 }
 
-/** A file written after the scan's clock was read has a slightly negative age, which still means today. */
-function touchedAgo(days: number): string {
+/**
+ * Says how long ago, and how long until it is offered. A file written after the scan's clock was read has a slightly
+ * negative age, which still means today.
+ */
+function touchedAgo(days: number, window: number): string {
   const whole = Math.max(0, Math.floor(days));
-  return whole === 0 ? "touched today" : `touched ${count(whole, "day")} ago`;
+  const when = whole === 0 ? "touched today" : `touched ${count(whole, "day")} ago`;
+  return `${when}, offered after ${count(window, "idle day")}`;
 }
+
+const inUse = "in use by a running process, offered once it exits";
 
 const found = <T>(items: (T | undefined)[]): T[] => items.filter((item): item is T => item !== undefined);
 
@@ -273,14 +279,19 @@ async function inspectWorktree(
   // One rev-parse prints a line per query. Any failure, an unborn HEAD included, leaves the work unprovable.
   const valid = names.code === 0;
   const [commonDir = "", gitDir = "", head = "", branch = ""] = valid ? names.stdout.split("\n") : [];
-  if (!valid) blockers.push("not a valid checkout, so its work cannot be checked");
-  if (status.stdout) blockers.push(count(status.stdout.split("\n").length, "uncommitted or untracked file"));
-  if (holders(path, context.live)) blockers.push("in use by a running process");
+  if (!valid) blockers.push("not a valid checkout, so its work cannot be checked. Look at it yourself");
+  if (status.stdout) {
+    const files = status.stdout.split("\n").length;
+    blockers.push(
+      `${count(files, "uncommitted or untracked file")}, commit, stash or delete ${files === 1 ? "it" : "them"}`,
+    );
+  }
+  if (holders(path, context.live)) blockers.push(inUse);
   const operation = unfinishedOperations.find((name) => gitDir && existsSync(join(gitDir, name)));
-  if (operation) blockers.push(`${operation} is in progress`);
+  if (operation) blockers.push(`${operation} is in progress, finish or abort it`);
   const pullRequests = valid && commonDir ? await lookup(commonDir, path) : [];
   const open = pullRequests.find((pr) => pr.state === "OPEN" && pr.headRefName === branch);
-  if (open) blockers.push(`PR #${open.number} is open`);
+  if (open) blockers.push(`PR #${open.number} is open, merge or close it`);
   // The commit must match too: a branch name gets reused, and a branch can gain commits after its PR merged.
   const merged = pullRequests.find(
     (pr) => pr.state === "MERGED" && pr.headRefName === branch && pr.headRefOid === head,
@@ -288,7 +299,9 @@ async function inspectWorktree(
   // A merged branch is usually deleted from the remote, and the pull request is what still holds this commit.
   if (!merged && (ahead.code !== 0 || ahead.stdout !== "0")) {
     blockers.push(
-      ahead.stdout ? `${count(Number(ahead.stdout), "commit")} on no remote` : "unknown commits on no remote",
+      ahead.stdout
+        ? `${count(Number(ahead.stdout), "commit")} on no remote, push ${ahead.stdout === "1" ? "it" : "them"} to keep the work`
+        : "unknown commits on no remote, push the branch to keep the work",
     );
   }
   const mainline = defaultBranch.stdout.replace(/^origin\//, "");
@@ -303,7 +316,7 @@ async function inspectWorktree(
     gitDir ? headAge(gitDir, context.now) : Number.POSITIVE_INFINITY,
   );
   // Only a merge outruns the age window. A branch just cut from main is also contained in it, and is about to be used.
-  if (!merged && touched < context.staleDays) blockers.push(touchedAgo(touched));
+  if (!merged && touched < context.staleDays) blockers.push(touchedAgo(touched, context.staleDays));
   return {
     id: findingId("worktree", path, `${head}\0${status.stdout}\0${proof}\0${open?.number ?? ""}`),
     category: "worktree",
@@ -369,8 +382,8 @@ async function inspectLeftover(path: string, context: Context, bytes: number): P
   const age = await newestAge(path, context.now);
   const blockers: string[] = [];
   if (nested.stdout) blockers.push("contains a checkout");
-  if (holders(path, context.live)) blockers.push("in use by a running process");
-  if (age < context.staleDays) blockers.push(touchedAgo(age));
+  if (holders(path, context.live)) blockers.push(inUse);
+  if (age < context.staleDays) blockers.push(touchedAgo(age, context.staleDays));
   return {
     id: findingId("worktree", path, `leftover\0${bytes}`),
     category: "worktree",
@@ -415,7 +428,7 @@ async function scanAur(context: Context): Promise<Finding[]> {
     bytes: bytes.get(path) ?? 0,
     reason,
     blockers: busy
-      ? ["a package build is running"]
+      ? ["a package build is running, offered once it finishes"]
       : holders(path, context.live)
         ? ["in use by a running process"]
         : [],
@@ -446,7 +459,7 @@ async function scanPacmanCache(): Promise<Finding[]> {
       packages: [],
       bytes,
       reason: "Keeps the newest cached version of each package",
-      blockers: (await building()) ? ["a package operation is running"] : [],
+      blockers: (await building()) ? ["a package operation is running, offered once it finishes"] : [],
     },
   ];
 }
@@ -467,7 +480,7 @@ async function scanOrphans(): Promise<Finding[]> {
       packages,
       bytes,
       reason: "Installed as dependencies that nothing requires any more",
-      blockers: (await building()) ? ["a package operation is running"] : [],
+      blockers: (await building()) ? ["a package operation is running, offered once it finishes"] : [],
     },
   ];
 }
@@ -484,8 +497,8 @@ async function scanAgent(context: Context): Promise<Finding[]> {
   const inspect = (path: string): Finding => {
     const age = ageDays(path, context.now);
     const blockers: string[] = [];
-    if (holders(path, context.live)) blockers.push("in use by a running process");
-    if (age < context.staleDays) blockers.push(touchedAgo(age));
+    if (holders(path, context.live)) blockers.push(inUse);
+    if (age < context.staleDays) blockers.push(touchedAgo(age, context.staleDays));
     return {
       id: findingId("agent", path, `${statSync(path).mtimeMs}`),
       category: "agent",
@@ -678,7 +691,7 @@ async function scanPackageCaches(context: Context): Promise<Finding[]> {
           ? `Cache holds ${gib}G. Pruning removes entries nothing references, so the amount freed is unknown until it runs`
           : `Cache holds ${gib}G of downloads that ${cache.tool} fetches again on the next install`,
         // Clearing a cache under a running install can break that install, and uv refuses while it holds the lock.
-        blockers: (await running(cache.tool)) ? [`${cache.tool} is running`] : [],
+        blockers: (await running(cache.tool)) ? [`${cache.tool} is running, offered once it exits`] : [],
       };
     }),
   );
@@ -1078,17 +1091,32 @@ function overlaps(a: string, b: string): boolean {
 }
 
 /** `done` hears each category as it finishes, with its finding count, or undefined when it failed. */
+/** Holds are applied on every read, never stored, so a cached finding reflects a hold made or released since. */
+export function withHolds(context: Context, findings: readonly Finding[]): Finding[] {
+  const holds = readLedger(context.paths).holds.filter((hold) => Date.parse(hold.until) > context.now);
+  return findings.map((finding) => {
+    const held = holds
+      .filter((hold) => finding.paths.some((path) => overlaps(path, hold.path)))
+      .map(
+        (hold) =>
+          `held by ${hold.actor} until ${hold.until}: ${hold.reason}. keeper release ${hold.path} ends it early`,
+      );
+    return held.length ? { ...finding, blockers: [...finding.blockers, ...held] } : finding;
+  });
+}
+
+/** Scans each category, reporting its findings, before holds, as it finishes, or undefined when it failed. */
 export async function scan(
   context: Context,
   only: readonly Category[] = categories,
-  done?: (category: Category, findings: number | undefined) => void,
+  done?: (category: Category, findings: Finding[] | undefined) => void,
 ): Promise<Scan> {
   const warnings: string[] = [];
   const results = await Promise.all(
     only.map((category) =>
       scanners[category](context).then(
         (findings) => {
-          done?.(category, findings.length);
+          done?.(category, findings);
           return findings;
         },
         (error) => {
@@ -1099,19 +1127,12 @@ export async function scan(
       ),
     ),
   );
-  const holds = readLedger(context.paths).holds.filter((hold) => Date.parse(hold.until) > context.now);
-  const findings = results.flat();
-  for (const finding of findings) {
-    for (const hold of holds) {
-      if (finding.paths.some((path) => overlaps(path, hold.path))) {
-        finding.blockers.push(`held by ${hold.actor} until ${hold.until}: ${hold.reason}`);
-      }
-    }
-  }
+  const at = new Date(context.now).toISOString();
   return {
     schemaVersion,
-    scannedAt: new Date(context.now).toISOString(),
-    findings: findings.sort((a, b) => b.bytes - a.bytes),
+    scannedAt: at,
+    categoryScannedAt: Object.fromEntries(only.map((category) => [category, at])),
+    findings: withHolds(context, results.flat()).sort((a, b) => b.bytes - a.bytes),
     warnings,
   };
 }

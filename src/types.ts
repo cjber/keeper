@@ -66,6 +66,8 @@ export interface Finding {
 export interface Scan {
   schemaVersion: number;
   scannedAt: string;
+  /** When each category's findings were scanned. A cached category is older than scannedAt. */
+  categoryScannedAt: Partial<Record<Category, string>>;
   findings: Finding[];
   warnings: string[];
 }
@@ -75,6 +77,8 @@ export interface Plan {
   id: string;
   createdAt: string;
   findingIds: string[];
+  /** The categories its findings came from, so apply rescans only those. Older plans lack it and rescan all. */
+  categories?: Category[];
   bytes: number;
   /** The window the plan was approved under, so apply judges findings the same way. */
   staleDays: number;

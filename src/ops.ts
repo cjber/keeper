@@ -324,8 +324,9 @@ async function purgeUnlocked(paths: Paths, olderThanDays: number, now: number): 
   }
   // Flushing a whole filesystem can take seconds, so only a purge that removed something measures.
   if (purged.length === 0) return { purged, bytes, freed: 0, failed };
-  // Copy-on-write filesystems release space when the transaction commits, so measuring now needs a sync.
-  await run(["sync", "--file-system", paths.home]);
+  // Copy-on-write filesystems release space when the transaction commits, so measuring now needs a sync. A busy
+  // disk can take far longer to flush, and the lock is held meanwhile, so past two seconds `freed` may undercount.
+  await run(["timeout", "2", "sync", "--file-system", paths.home]);
   return { purged, bytes, freed: Math.max(0, (await freeBytes(paths.home)) - freeBefore), failed };
 }
 

@@ -9,7 +9,7 @@ Run `keeper --help` for the command list. Output is JSON when piped.
 
 If `keeper` is not on `PATH`, ask the user before installing it with `paru -S keeper-bin` (or `yay`). Nightly cleanup is opt-in: run `keeper timer install` only when the user asks for it. Done when `keeper status` exits 0.
 
-1. Run `keeper scan`. Findings with empty `blockers` and an action other than `report` are eligible.
+1. Run `keeper scan`. Findings with empty `blockers` and an action other than `report` are eligible. `--cached` reuses categories scanned in the last minutes to hours, which suits a quick look; `plan` and `apply` always rescan.
 2. Run `keeper plan`, adding `--max-risk medium` only when the user approved worktree or package removal, or renicing a command.
 3. Show the user the plan's size and items, then run `keeper apply PLAN --yes`.
 4. Done when exit code is 0. On 5, scan again and report what changed. On 4, make a new plan.
@@ -30,4 +30,8 @@ Protect work and declare scratch as you go, because this is how keeper knows int
 
 Unused Docker volumes are a `report` finding because they can hold database data and removing one cannot be undone. List their Compose projects for the user, and run `docker volume rm` only on the volumes they name.
 
-Treat a blocker as final: never remove a blocked path by hand. Exit code 3 means `--yes` is missing, and that needs the user's approval when the plan includes medium-risk items.
+Each blocker ends in its next step, such as pushing commits, closing a PR or waiting out the age window. Relay it to the user; pushing, closing or discarding work needs their approval like any other change. Never remove a blocked path by hand.
+
+For whether keeper is keeping up, or where space went, run `keeper history` (readings and the applies, purges and nightly runs between them) and `keeper status`.
+
+Exit code 3 means `--yes` is missing, and that needs the user's approval when the plan includes medium-risk items.

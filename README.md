@@ -109,13 +109,52 @@ until `keeper purge`, which reports the measured change in free space as `freed`
 These block a worktree whatever its age: uncommitted files, commits on no remote, a running process inside it, an open
 pull request, a rebase, merge, bisect or cherry-pick in progress, and any hold.
 
+## Blocked findings
+
+A blocked finding is something keeper found but will not touch yet, because something says the work there may still
+matter. Each blocker names what to do about it:
+
+| Blocker | To resolve it |
+| --- | --- |
+| Touched recently | Wait. It is offered once idle for the age window, 7 days by default, or `--stale-days N` |
+| Uncommitted or untracked files | Commit, stash or delete them |
+| Commits on no remote | Push them to keep the work. Once every commit is on the default branch it becomes low risk |
+| An open pull request | Merge or close it |
+| In use by a running process | Quit what runs there |
+| A rebase, merge, bisect or cherry-pick | Finish or abort it |
+| Held | `keeper release PATH` ends the hold early |
+| A tool or package operation running | It is offered once that finishes |
+
+keeper never clears a blocker for you, and a blocked path is never removed by hand on its behalf. Press `b` in the
+wizard to list blocked findings, or read `blockers` in `keeper scan`.
+
+## Scans and history
+
+A full scan takes seconds to minutes on a busy machine, so each category's findings are kept for as long as they stay
+useful, and `keeper scan --cached` or the wizard reuse them:
+
+| Kept for | Categories |
+| --- | --- |
+| Never, always scanned | `load`, `memory` |
+| 15 minutes | `worktree` |
+| 1 hour | `build`, `agent`, `transcripts`, `logs`, `docker` |
+| 6 hours | `aur`, `pacman-cache`, `orphans`, `package-cache`, `snapshots` |
+
+Applying rescans the categories in its plan first, so a kept finding can never be what decides a removal, and applying,
+undoing or claiming drops the categories it changed. Holds are applied on every read. `keeper scan` without `--cached`
+always scans everything.
+
+keeper records free space whenever it scans or changes something, at most every 10 minutes, and hourly once the timer
+is installed. `keeper history` returns those readings with the applies, purges, undos and nightly runs, and the
+wizard draws them.
+
 ## Commands
 
 | Command | What it does |
 | --- | --- |
 | `keeper` | Opens the wizard (terminal only) |
 | `keeper status` | Free space, schedule, last run and whether the nightly runs are healthy, holds, trash and missing tools |
-| `keeper scan` | Lists findings and their blockers |
+| `keeper scan` | Lists findings and their blockers. `--cached` reuses recently scanned categories |
 | `keeper plan` | Saves a plan of eligible findings. Add `--max-risk medium` once medium risk is approved |
 | `keeper apply PLAN --yes` | Rescans, then applies what is unchanged |
 | `keeper undo TX` | Restores a transaction from trash |
@@ -124,9 +163,11 @@ pull request, a rebase, merge, bisect or cherry-pick in progress, and any hold.
 | `keeper claim PATH` | Declares your own scratch disposable once stale |
 | `keeper release PATH` | Drops a hold or claim |
 | `keeper log` | Shows recent mutations and who made them |
+| `keeper history` | Free space readings and the events that changed it, over 30 days or `--days N` |
+| `keeper sample` | Records free space now, as the hourly timer does |
 | `keeper schema` | Describes the CLI as JSON |
 | `keeper auto` | Applies low-risk findings, purges old trash and notifies |
-| `keeper timer install` | Schedules `keeper auto` daily with systemd, or `--cron` |
+| `keeper timer install` | Schedules `keeper auto` daily and `keeper sample` hourly with systemd, or `--cron` |
 | `keeper timer remove` | Removes the schedule |
 
 | Exit code | Meaning |

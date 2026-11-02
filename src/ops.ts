@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { forget } from "./cache";
 import { audit, withLock } from "./ledger";
 import type { Config, Context } from "./scanners";
 import {
@@ -73,6 +74,7 @@ export function createPlan(paths: Paths, chosen: readonly Finding[], staleDays: 
     id: newId(),
     createdAt: new Date(now).toISOString(),
     findingIds: findings.map((finding) => finding.id),
+    categories: [...new Set(findings.map((finding) => finding.category))],
     bytes: findings.reduce((sum, finding) => sum + finding.bytes, 0),
     staleDays,
   };
@@ -168,6 +170,7 @@ async function execute(finding: Finding, paths: Paths, tx: Transaction, base: st
 export function applyPlan(plan: Plan, ctx: Context): Promise<Outcome> {
   return withLock(ctx.paths, async () => {
     const outcome = await applyUnlocked(plan, ctx);
+    forget(ctx.paths, plan.categories);
     audit(ctx.paths, "apply", { plan: plan.id, ...outcome });
     return outcome;
   });
@@ -175,7 +178,10 @@ export function applyPlan(plan: Plan, ctx: Context): Promise<Outcome> {
 
 async function applyUnlocked(plan: Plan, ctx: Context): Promise<Outcome> {
   const current = new Map(
-    (await scan({ ...ctx, staleDays: plan.staleDays })).findings.map((finding) => [finding.id, finding]),
+    (await scan({ ...ctx, staleDays: plan.staleDays }, plan.categories)).findings.map((finding) => [
+      finding.id,
+      finding,
+    ]),
   );
   const outcome: Outcome = { applied: [], stale: [], failed: [], bytes: 0, reniced: 0 };
   const id = newId();
@@ -241,7 +247,12 @@ export interface Undone {
 }
 
 export function undo(paths: Paths, id: string): Promise<Undone> {
-  return withLock(paths, () => undoUnlocked(paths, id));
+  return withLock(paths, async () => {
+    const undone = await undoUnlocked(paths, id);
+    // A transaction does not record categories, and restored paths can be in any of them.
+    forget(paths);
+    return undone;
+  });
 }
 
 async function undoUnlocked(paths: Paths, id: string): Promise<Undone> {

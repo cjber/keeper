@@ -1,10 +1,12 @@
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import packageJson from "../package.json";
+import { cachedScan, forget, maxAge } from "./cache";
 import { freshen, primaryCheckouts } from "./freshen";
+import { readEvents, readSamples, sample } from "./history";
 import { actor, audit, BusyError, type Claim, type Hold, readAudit, readLedger, updateLedger } from "./ledger";
 import { applyPlan, context, createPlan, freeBytes, purge, readPlan, transactions, undo, withinRisk } from "./ops";
-import { defaultStaleDays, scan } from "./scanners";
+import { defaultStaleDays } from "./scanners";
 import { defaultPaths, run } from "./system";
 import { installCron, installSystemd, lastServiceResult, removeSchedule, scheduleStatus } from "./timer";
 import { type Category, categories, count, eligible, type Finding, type Risk, risks, schemaVersion } from "./types";
@@ -20,8 +22,8 @@ const optionalTools = ["gh", "paccache", "expac", "notify-send", "uv"];
 const help = `keeper keeps an Arch machine clean. Output is JSON when stdout is not a terminal or with --json.
 
   keeper                         open the wizard (terminal only)
-  keeper scan [--category C] [--stale-days N]
-                                 list findings
+  keeper scan [--category C] [--stale-days N] [--cached]
+                                 list findings; --cached reuses categories scanned recently
   keeper plan [ID...] [--category C] [--max-risk low|medium] [--stale-days N]
                                  save a plan of eligible findings
   keeper apply PLAN --yes        rescan, then apply what is unchanged
@@ -33,10 +35,12 @@ const help = `keeper keeps an Arch machine clean. Output is JSON when stdout is 
   keeper release PATH            drop your hold or claim on a path
   keeper status                  trash, holds, schedule, last run and what needs attention
   keeper log                     recent mutations and who made them
+  keeper history [--days N]      free space readings and the events that changed it (default 30 days)
+  keeper sample                  record free space now, as the hourly timer does
   keeper schema                  machine-readable description of this CLI
   keeper auto                    apply low-risk findings, purge old trash, notify
   keeper --version               print the version
-  keeper timer install [--cron]  schedule keeper auto daily
+  keeper timer install [--cron]  schedule keeper auto daily and keeper sample hourly
   keeper timer remove            remove the schedule
 
 Sizes are uncompressed, so btrfs with compression frees less than they show. Space returns at purge, which reports what it freed.
@@ -51,11 +55,12 @@ interface Flags {
   json: boolean;
   yes: boolean;
   cron: boolean;
+  cached: boolean;
   category?: Category[];
   maxRisk: Risk;
   olderDays: number;
   staleDays: number;
-  holdDays: number;
+  days?: number;
   reason?: string;
 }
 
@@ -75,10 +80,10 @@ function parse(args: readonly string[]): Flags {
     json: false,
     yes: false,
     cron: false,
+    cached: false,
     maxRisk: "low",
     olderDays: trashDays,
     staleDays: defaultStaleDays,
-    holdDays,
   };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i] as string;
@@ -90,6 +95,7 @@ function parse(args: readonly string[]): Flags {
     if (arg === "--json") flags.json = true;
     else if (arg === "--yes") flags.yes = true;
     else if (arg === "--cron") flags.cron = true;
+    else if (arg === "--cached") flags.cached = true;
     else if (arg === "--category") {
       const category = value() as Category;
       if (!categories.includes(category)) throw new UsageError(`unknown category ${category}`);
@@ -103,8 +109,8 @@ function parse(args: readonly string[]): Flags {
       if (!Number.isFinite(flags.staleDays) || flags.staleDays < 0)
         throw new UsageError("--stale-days must be a number of days, 0 or more");
     } else if (arg === "--days") {
-      flags.holdDays = Number(value());
-      if (!Number.isFinite(flags.holdDays) || flags.holdDays <= 0) throw new UsageError("--days must be positive");
+      flags.days = Number(value());
+      if (!Number.isFinite(flags.days) || flags.days <= 0) throw new UsageError("--days must be positive");
     } else if (arg === "--reason") flags.reason = value();
     else if (arg === "--older-days") {
       flags.olderDays = Number(value());
@@ -147,7 +153,11 @@ export function schema() {
       "id, category, risk, action, title, paths, packages, bytes, reason, blockers; worktrees add gitDir, branch and head; load findings add cpu and pids",
     bytes: "uncompressed size, so a compressing filesystem frees less. Only purge's freed field is measured",
     eligible: "blockers is empty and action is not report",
+    scan: "schemaVersion, scannedAt, categoryScannedAt (when each category was scanned), cached (categories reused), findings, warnings",
     environment: { KEEPER_ACTOR: "name recorded in holds, claims and the log" },
+    cacheMinutes: maxAge,
+    history:
+      "samples are {at, free, size} in bytes, at most one per 10 minutes, kept 90 days; events are apply, purge, undo and auto from the log",
     help,
   };
 }
@@ -186,7 +196,7 @@ async function auto(flags: Flags): Promise<{ value: { summary: string } & Record
   // Freshen first, so the scan judges worktrees against the default branch as it is now.
   const repos = ctx.config.freshen ? await primaryCheckouts(ctx) : [];
   const freshened = await Promise.all(repos.map(freshen));
-  const report = await scan(ctx);
+  const report = await cachedScan(ctx, { reuse: false });
   const ready = report.findings.filter((finding) => eligible(finding) && finding.risk === "low");
   const paths = ctx.paths;
   const outcome = ready.length ? await applyPlan(createPlan(paths, ready, ctx.staleDays), ctx) : undefined;
@@ -226,15 +236,15 @@ async function dispatch(
   const paths = defaultPaths();
   switch (command) {
     case "scan": {
-      const report = await scan(context(flags.staleDays), flags.category);
+      const report = await cachedScan(context(flags.staleDays), { reuse: flags.cached, only: flags.category });
       const total = report.findings.filter(eligible).reduce((sum, finding) => sum + finding.bytes, 0);
       return {
         value: { ...report, next: "keeper plan [ID...] [--max-risk medium]" },
-        text: `${report.findings.map(line).join("\n")}\n\n${size(total)} eligible, uncompressed`,
+        text: `${report.findings.map(line).join("\n")}\n\n${size(total)} eligible, uncompressed${report.cached.length ? `. Reused from the cache: ${report.cached.join(", ")}` : ""}`,
       };
     }
     case "plan": {
-      const report = await scan(context(flags.staleDays), flags.category);
+      const report = await cachedScan(context(flags.staleDays), { reuse: false, only: flags.category });
       const chosen = rest.length
         ? rest.map((id) => {
             const finding = report.findings.find((candidate) => candidate.id === id);
@@ -310,7 +320,7 @@ async function dispatch(
       if (!existsSync(path)) throw new UsageError(`${path} does not exist`);
       const hold: Hold = {
         path,
-        until: new Date(Date.now() + flags.holdDays * 86_400_000).toISOString(),
+        until: new Date(Date.now() + (flags.days ?? holdDays) * 86_400_000).toISOString(),
         reason: flags.reason,
         actor: actor(),
       };
@@ -332,6 +342,7 @@ async function dispatch(
         ...ledger,
         claims: [...ledger.claims.filter((item) => item.path !== path), claim],
       }));
+      forget(paths, ["agent"]); // Claimed paths are scanned as agent output.
       audit(paths, "claim", claim);
       return { value: claim, text: `claimed ${path}` };
     }
@@ -345,6 +356,7 @@ async function dispatch(
         claims: ledger.claims.filter((item) => item.path !== path),
       }));
       const released = [...before.holds, ...before.claims].some((item) => item.path === path);
+      forget(paths, ["agent"]);
       audit(paths, "release", { path });
       return {
         value: { path, released },
@@ -354,6 +366,30 @@ async function dispatch(
     case "log": {
       const entries = readAudit(paths, 50);
       return { value: entries, text: entries.map((entry) => JSON.stringify(entry)).join("\n") };
+    }
+    case "history": {
+      const days = flags.days ?? 30;
+      const samples = readSamples(paths, days);
+      const events = readEvents(paths, days);
+      const first = samples[0];
+      const last = samples.at(-1);
+      const change =
+        first && last
+          ? `, ${last.free >= first.free ? "up" : "down"} ${size(Math.abs(last.free - first.free))} since ${first.at}`
+          : "";
+      return {
+        value: { days, samples, events, next: samples.length ? "keeper scan" : "keeper sample" },
+        text: last
+          ? `${count(samples.length, "reading")} over ${count(days, "day")}: ${size(last.free)} free now${change}\n${events.map((event) => `${event.at} ${event.event}${event.bytes ? ` ${size(event.bytes)}` : ""}`).join("\n")}`
+          : "no readings yet. keeper sample records one, and the hourly timer keeps recording",
+      };
+    }
+    case "sample": {
+      const reading = await sample(paths, Date.now(), true);
+      return {
+        value: reading ?? null,
+        text: reading ? `${size(reading.free)} free of ${size(reading.size)}` : "df gave no reading",
+      };
     }
     case "schema":
       return { value: schema(), text: JSON.stringify(schema(), null, 2) };
@@ -375,6 +411,7 @@ async function dispatch(
         lastRun,
         holds,
         trash: trash.map((tx) => ({ id: tx.id, appliedAt: tx.appliedAt, paths: tx.entries.length })),
+        lastSample: readSamples(paths, 1).at(-1)?.at,
         missingTools: optionalTools.filter((tool) => !Bun.which(tool)),
         next: schedule === "none" ? "keeper timer install" : problems.length ? "keeper log" : "keeper scan",
       };
@@ -407,6 +444,8 @@ async function dispatch(
   }
 }
 
+const sampled = new Set(["scan", "plan", "apply", "undo", "purge", "status", "auto"]);
+
 /** Returns undefined only when the wizard should open, which callers must never reach without a terminal. */
 export async function runCli(args: readonly string[]): Promise<number | undefined> {
   if (args.includes("--help") || args.includes("-h")) {
@@ -427,6 +466,8 @@ export async function runCli(args: readonly string[]): Promise<number | undefine
       throw new UsageError("the wizard needs a terminal. Run keeper --help");
     }
     const result = await dispatch(flags, command, rest);
+    // Commands that see or change free space leave a reading, so the history fills in without the timer.
+    if (sampled.has(command)) await sample(defaultPaths()).catch(() => undefined);
     console.log(json ? JSON.stringify(result.value) : (result.text ?? JSON.stringify(result.value)));
     return result.code ?? exit.ok;
   } catch (error) {

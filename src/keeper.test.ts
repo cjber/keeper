@@ -104,7 +104,7 @@ test("a pushed, clean, idle worktree is the only eligible one", async () => {
   const report = await scan({ ...ctx, live: [join(live, "src")] }, ["worktree"]);
   const by = (path: string) => report.findings.find((finding) => finding.paths[0] === path);
   expect(by(clean)?.blockers).toEqual([]);
-  expect(by(dirty)?.blockers).toContain("1 uncommitted or untracked file");
+  expect(by(dirty)?.blockers).toContain("1 uncommitted or untracked file, commit, stash or delete it");
   expect(by(live)?.blockers.join()).toContain("running process");
   expect(by(recent)?.blockers.join()).toContain("touched");
 });
@@ -114,7 +114,7 @@ test("a commit only on this machine blocks the worktree", async () => {
   await git(path, "commit", "-qm", "local", "--allow-empty");
   age(path);
   const report = await scan(ctx, ["worktree"]);
-  expect(report.findings[0]?.blockers).toContain("1 commit on no remote");
+  expect(report.findings[0]?.blockers).toContain("1 commit on no remote, push it to keep the work");
 });
 
 test("build output is found in a dirty worktree only when ignored and stale", async () => {
@@ -230,6 +230,12 @@ test("the unit quotes systemd specials and logs to a file", () => {
   expect(unit).toContain('"PATH=/a%%b"');
   expect(unit).toContain(`append:${ctx.paths.state}/keeper.log`);
   expect(unit).toContain('"/bin/keeper" "auto"');
+});
+
+test("free space readings get their own hourly unit, apart from the nightly run", () => {
+  const all = units(["/bin/keeper"], ctx.paths, "/usr/bin");
+  expect(all["keeper-sample.timer"]).toContain("OnCalendar=hourly");
+  expect(all["keeper-sample.service"]).toContain('"/bin/keeper" "sample"');
 });
 
 test("the wizard refuses to open without a terminal", async () => {
@@ -390,7 +396,7 @@ test("an open PR blocks the worktree", async () => {
   age(path);
   age(join(home, "open-main/.git/worktrees/open/logs/HEAD"));
   const report = await scan({ ...ctx, pullRequests: pull("OPEN", "x", "b-open") }, ["worktree"]);
-  expect(report.findings[0]?.blockers).toEqual(["PR #7 is open"]);
+  expect(report.findings[0]?.blockers).toEqual(["PR #7 is open, merge or close it"]);
 });
 
 test("a new branch cut from main keeps the age window, and only an idle one is low risk", async () => {
@@ -410,7 +416,7 @@ test("a rebase in progress blocks a clean, pushed worktree", async () => {
   age(path);
   age(join(home, "rebasing-main/.git/worktrees/rebasing/logs/HEAD"));
   const report = await scan(ctx, ["worktree"]);
-  expect(report.findings[0]?.blockers).toEqual(["rebase-merge is in progress"]);
+  expect(report.findings[0]?.blockers).toEqual(["rebase-merge is in progress, finish or abort it"]);
 });
 
 test("a stray directory is a finding, unless a checkout sits inside it", async () => {

@@ -1,39 +1,42 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { RGBA, TextAttributes } from "@opentui/core";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import { useEffect, useState } from "react";
+import { type CachedScan, cachedScan, lastKnown } from "./cache";
+import { freeChart, markerRuns, marks, spaceBars } from "./charts";
 import { measure, size } from "./cli";
+import { type Event, readEvents, readSamples, type Sample, sample } from "./history";
 import { applyPlan, context, createPlan } from "./ops";
-import { defaultTheme, scan, type Theme } from "./scanners";
+import { defaultTheme, type Theme } from "./scanners";
 import { defaultPaths } from "./system";
 import { installSystemd } from "./timer";
 import { type Category, categories, count, eligible, type Finding, outermost, type Scan } from "./types";
 
 export interface Actions {
-  /** The previous wizard scan, shown while a fresh one runs. Never acted on. */
+  /** Every category last stored, however old, shown while the scan runs. Never acted on. */
   cached: () => Scan | undefined;
-  /** Scans afresh, reporting each category as it finishes, with its finding count or undefined on failure. */
-  load: (done?: (category: Category, findings: number | undefined) => void) => Promise<Scan>;
+  /**
+   * Scans the categories past their max age, or all of them without reuse, reporting each as it finishes with its
+   * finding count (undefined on failure) and whether it came from the cache.
+   */
+  load: (
+    reuse: boolean,
+    done?: (category: Category, findings: number | undefined, cached: boolean) => void,
+  ) => Promise<CachedScan>;
+  history: () => { samples: Sample[]; events: Event[] };
   apply: (findings: Finding[]) => Promise<string>;
   schedule: () => Promise<string>;
 }
 
-const cachePath = () => join(defaultPaths().state, "last-scan.json");
-
 export const liveActions: Actions = {
-  cached: () => {
-    try {
-      return JSON.parse(readFileSync(cachePath(), "utf8")) as Scan;
-    } catch {
-      return undefined;
-    }
+  cached: () => lastKnown(context()),
+  load: async (reuse, done) => {
+    const ctx = context();
+    await sample(ctx.paths).catch(() => undefined);
+    return cachedScan(ctx, { reuse, done });
   },
-  load: async (done) => {
-    const result = await scan(context(), categories, done);
-    mkdirSync(defaultPaths().state, { recursive: true });
-    writeFileSync(cachePath(), JSON.stringify(result));
-    return result;
+  history: () => {
+    const paths = defaultPaths();
+    return { samples: readSamples(paths, 30), events: readEvents(paths, 30) };
   },
   apply: async (findings) => {
     const ctx = context();
@@ -50,11 +53,10 @@ export const liveActions: Actions = {
   },
   schedule: async () => {
     await installSystemd(defaultPaths());
-    return "Daily keeper run scheduled with systemd";
+    return "Daily keeper run and hourly free space readings scheduled with systemd";
   },
 };
 
-const pageSize = 18;
 const spinner = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
 const palette = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"];
 /**
@@ -70,28 +72,52 @@ const color = (value: string) => {
 const terminal = color("");
 /** Ends a title that does not fit in an ellipsis, so a cut reads as a cut. */
 const clip = (text: string, room: number) => (text.length > room ? `${text.slice(0, Math.max(room - 1, 0))}…` : text);
-/** Each category's state while a scan runs: undefined is still scanning, null failed, a number is its findings. */
-type Progress = Partial<Record<Category, number | null>>;
+/** Each category's state while a scan runs: absent is still scanning, a null count failed. */
+type Progress = Partial<Record<Category, { found: number | null; cached: boolean }>>;
+const views = ["list", "space", "history"] as const;
+type View = (typeof views)[number];
 const keys = (showBlocked: boolean) => [
   "j/k move",
   "space select",
   "a all low risk",
   "enter apply",
   `b ${showBlocked ? "hide" : "show"} blocked`,
+  "g graphs",
+  "r rescan",
   "t schedule",
   "q/esc quit",
 ];
-const time = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+const two = (n: number) => String(n).padStart(2, "0");
+const time = (iso: string | number) => {
+  const date = new Date(iso);
+  return `${two(date.getHours())}:${two(date.getMinutes())}`;
+};
+const stamp = (iso: string | number) => {
+  const date = new Date(iso);
+  return `${two(date.getMonth() + 1)}-${two(date.getDate())} ${time(iso)}`;
+};
+const describe = (event: Event) =>
+  event.event === "apply"
+    ? `moved ${size(event.bytes ?? 0)} to trash`
+    : event.event === "purge"
+      ? `purge freed ${size(event.bytes ?? 0)}`
+      : event.event === "undo"
+        ? "undo restored a transaction"
+        : "nightly run";
+const legend = "▲ apply · ◆ purge · ↺ undo · · nightly run";
 
 /** Holds selection only. Every safety rule stays in the scan and apply calls an agent would make. */
 export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; theme?: Theme }) {
   const renderer = useRenderer();
-  const { width } = useTerminalDimensions();
+  const { width, height } = useTerminalDimensions();
   // Below this the category column goes, so the title keeps room to say what the row is.
   const wide = width >= 80;
   // Padding, mark, size and risk columns, then the category column when it shows.
   const titleWidth = width - 2 - 4 - 9 - 7 - (wide ? 14 : 0);
   const [report, setReport] = useState<Scan | undefined>(actions.cached);
+  const [fromCache, setFromCache] = useState<Category[]>([]);
+  const [history, setHistory] = useState(actions.history);
+  const [view, setView] = useState<View>("list");
   const [cursor, setCursor] = useState(0);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [showBlocked, setShowBlocked] = useState(false);
@@ -106,15 +132,17 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
     return () => clearInterval(timer);
   }, [progress]);
 
-  const perform = (work: Promise<string | undefined>) => {
+  const perform = (work: Promise<string | undefined>, reuse = true) => {
     setBusy(true);
     work
       .then(async (done) => {
         setProgress({});
-        const fresh = await actions.load((category, found) =>
-          setProgress((now) => ({ ...now, [category]: found ?? null })),
+        const fresh = await actions.load(reuse, (category, found, cached) =>
+          setProgress((now) => ({ ...now, [category]: { found: found ?? null, cached } })),
         );
         setReport(fresh);
+        setFromCache(fresh.cached);
+        setHistory(actions.history());
         setMessage(done ?? "");
       })
       .catch((error) => setMessage(`Failed: ${error instanceof Error ? error.message : error}`))
@@ -134,8 +162,16 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
   const chosen = rows.filter((finding) => selected.has(finding.id));
   const at = Math.min(cursor, Math.max(rows.length - 1, 0));
 
+  // Every view gets the same panel, so switching never moves the lines around it. The explanation keeps two lines
+  // because blockers with their next step often wrap.
+  const keyLines = Math.ceil(keys(showBlocked).join(" · ").length / Math.max(width - 2, 1));
+  const panel = Math.max(3, height - 1 - 2 - 1 - (report?.warnings.length ? 1 : 0) - keyLines);
+
   useKeyboard((key) => {
     if (key.name === "q" || key.name === "escape") renderer.destroy();
+    if (key.name === "g") setView((now) => views[(views.indexOf(now) + 1) % views.length] as View);
+    if (key.name === "r" && !busy) perform(Promise.resolve("Rescanned everything"), false);
+    if (view !== "list") return;
     const current = rows[at];
     if (key.name === "down" || key.name === "j") setCursor(Math.min(at + 1, rows.length - 1));
     if (key.name === "up" || key.name === "k") setCursor(Math.max(at - 1, 0));
@@ -172,90 +208,209 @@ export function Wizard({ actions, theme = defaultTheme }: { actions: Actions; th
     if (key.name === "t") perform(actions.schedule());
   });
 
+  const pageSize = panel - (report && !rows.length ? 1 : 0);
   const start = Math.max(0, Math.min(at - pageSize + 1, rows.length - pageSize));
   const active = rows[at];
   const total = outermost(chosen).reduce((sum, finding) => sum + finding.bytes, 0);
   const shown = report ? ` · showing ${time(report.scannedAt)}` : "";
   const scanning = () => {
-    const waiting = categories.filter((category) => progress?.[category] === undefined);
-    const failed = categories.filter((category) => progress?.[category] === null);
+    const waiting = categories.filter((category) => !progress?.[category]);
+    const failed = categories.filter((category) => progress?.[category]?.found === null);
+    const reused = categories.filter((category) => progress?.[category]?.cached).length;
     return [
       `${spinner[frame % spinner.length]} Scanning ${categories.length - waiting.length}/${categories.length}${shown}`,
+      reused ? `${reused} cached` : "",
       failed.length ? `failed: ${failed.join(", ")}` : "",
       waiting.length ? `waiting on ${waiting.join(", ")}` : "",
     ]
       .filter(Boolean)
       .join(" · ");
   };
+  const idle =
+    message ||
+    (fromCache.length
+      ? `${count(fromCache.length, "category", "categories")} reused from a recent scan · r rescans all`
+      : "");
   // One line at the bottom, so the list never moves when a scan starts or ends.
-  const status = clip(progress ? scanning() : busy ? `Working${shown}` : message, width - 2);
+  const status = clip(progress ? scanning() : busy ? `Working${shown}` : idle, width - 2);
   const riskColor = { low: theme.low, medium: theme.medium, high: theme.high };
+  const explanation =
+    view === "list"
+      ? active
+        ? active.blockers.join("; ") || active.reason
+        : ""
+      : view === "space"
+        ? "Disk each category holds: █ ready to clean now, ░ waiting on a blocker. In the list, b shows why each waits"
+        : `${legend}. Readings come from every keeper run and, with the timer on, every hour`;
+
+  const list = (
+    <>
+      {report && !rows.length ? (
+        <text fg={terminal}>
+          {blocked ? `Nothing is eligible. Press b to see ${count(blocked, "blocked finding")}.` : "Nothing to clean."}
+        </text>
+      ) : null}
+      {rows.slice(start, start + pageSize).map((finding, index) => {
+        const isCursor = index + start === at;
+        const ok = eligible(finding);
+        const isSelected = selected.has(finding.id);
+        const mark = !ok ? " - " : isSelected ? "[x]" : "[ ]";
+        // The cursor row and blocked rows drop the column colours, so the cursor and the dimming read clearly.
+        const plain = isCursor || !ok;
+        const rowColor = isCursor ? color(theme.cursorText) : ok ? terminal : color(theme.blocked);
+        const attributes =
+          (isCursor && !theme.cursor ? TextAttributes.INVERSE : 0) | (!ok && !theme.blocked ? TextAttributes.DIM : 0);
+        const cell = (value: string) => (plain ? rowColor : color(value));
+        return (
+          <box
+            key={finding.id}
+            flexDirection="row"
+            backgroundColor={isCursor && theme.cursor ? theme.cursor : undefined}
+          >
+            <text
+              wrapMode="none"
+              fg={plain ? rowColor : color(isSelected ? theme.selected : "")}
+              attributes={attributes}
+              flexShrink={0}
+            >
+              {mark}{" "}
+            </text>
+            <text
+              wrapMode="none"
+              fg={cell(theme.size)}
+              attributes={attributes | (plain ? 0 : TextAttributes.BOLD)}
+              flexShrink={0}
+            >
+              {measure(finding).padStart(8)}{" "}
+            </text>
+            <text wrapMode="none" fg={cell(riskColor[finding.risk])} attributes={attributes} flexShrink={0}>
+              {finding.risk.padEnd(7)}
+            </text>
+            {wide ? (
+              <text wrapMode="none" fg={cell(theme.category)} attributes={attributes} flexShrink={0}>
+                {finding.category.padEnd(14)}
+              </text>
+            ) : null}
+            <text wrapMode="none" fg={rowColor} attributes={attributes} flexShrink={1}>
+              {clip(finding.title, titleWidth)}
+            </text>
+          </box>
+        );
+      })}
+    </>
+  );
+
+  const space = () => {
+    const bars = spaceBars(all).slice(0, panel);
+    if (!bars.length) return <text fg={terminal}>{report ? "No category holds disk worth showing." : "Scanning"}</text>;
+    const most = Math.max(...bars.map((bar) => bar.ready + bar.blocked));
+    // Label, then the sizes after the bar: " 12.3G ready · 140.0G blocked" is 30 columns.
+    const room = Math.max(width - 2 - 14 - 30, 4);
+    const cells = (bytes: number) => (bytes > 0 ? Math.max(1, Math.round((bytes / most) * room)) : 0);
+    return bars.map((bar) => {
+      const ready = cells(bar.ready);
+      const waiting = Math.min(cells(bar.blocked), room - ready);
+      return (
+        <text key={bar.category} wrapMode="none" fg={terminal}>
+          <span fg={color(theme.category)}>{bar.category.padEnd(14)}</span>
+          <span fg={color(theme.low)}>{"█".repeat(ready)}</span>
+          <span fg={color(theme.blocked)}>{"░".repeat(waiting)}</span>
+          {" ".repeat(room - ready - waiting)} {size(bar.ready).padStart(6)} ready · {size(bar.blocked).padStart(6)}{" "}
+          blocked
+        </text>
+      );
+    });
+  };
+
+  const chart = () => {
+    const { samples, events } = history;
+    const last = samples.at(-1);
+    const legendLines = Math.min(3, events.length, Math.max(panel - 7, 0));
+    const axis = Math.max(width - 2 - 8, 2);
+    const plotted = freeChart(samples, events, axis, panel - 3 - legendLines, Date.now());
+    if (!plotted || !last) {
+      return (
+        <>
+          <text fg={terminal}>
+            {last ? `${size(last.free)} free of ${size(last.size)} at ${stamp(last.at)}.` : "No readings yet."}
+          </text>
+          <text fg={terminal}>The chart starts with the second reading.</text>
+        </>
+      );
+    }
+    const first = samples.find((entry) => Date.parse(entry.at) >= plotted.start) ?? samples[0];
+    const change = first ? last.free - first.free : 0;
+    const markColor = { apply: theme.low, purge: theme.accent, undo: theme.medium, auto: "" };
+    const startLabel =
+      plotted.end - plotted.start > 2 * 86_400_000 ? stamp(plotted.start).slice(0, 5) : time(plotted.start);
+    return (
+      <>
+        <text wrapMode="none" fg={terminal}>
+          Free space: {size(last.free)} of {size(last.size)}, {change >= 0 ? "up" : "down"} {size(Math.abs(change))}{" "}
+          since {stamp(plotted.start)}
+        </text>
+        {plotted.rows.map((row) => (
+          <text key={`level-${row.level}`} wrapMode="none" fg={terminal}>
+            <span fg={terminal}>
+              {(row.level === plotted.rows.length - 1
+                ? size(plotted.top)
+                : row.level === 0
+                  ? size(plotted.bottom)
+                  : ""
+              ).padStart(7)}{" "}
+            </span>
+            <span fg={color(theme.accent)}>{row.text}</span>
+          </text>
+        ))}
+        <text wrapMode="none" fg={terminal}>
+          {"        "}
+          {markerRuns(plotted.markers).map((run) => (
+            <span key={`marks-${run.column}`} fg={color(run.kind ? markColor[run.kind] : "")}>
+              {(run.kind ? marks[run.kind] : " ").repeat(run.width)}
+            </span>
+          ))}
+        </text>
+        <text wrapMode="none" fg={terminal} attributes={TextAttributes.DIM}>
+          {"        "}
+          {startLabel}
+          {"now".padStart(Math.max(axis - startLabel.length, 3))}
+        </text>
+        {events
+          .slice(-legendLines)
+          .reverse()
+          .map((event) => (
+            <text key={`${event.at}-${event.event}`} wrapMode="none" fg={terminal}>
+              {marks[event.event]} {stamp(event.at)} {describe(event)}
+            </text>
+          ))}
+      </>
+    );
+  };
 
   return (
     <box flexDirection="column" paddingLeft={1} paddingRight={1} flexGrow={1}>
       <text wrapMode="none" fg={color(theme.accent)} attributes={TextAttributes.BOLD}>
-        keeper · {open.length} eligible, {blocked} blocked ·{" "}
-        {chosen.length ? `${size(total)} selected, uncompressed` : "nothing selected"}
+        {clip(
+          view === "list"
+            ? `keeper · ${open.length} eligible, ${blocked} blocked · ${chosen.length ? `${size(total)} selected, uncompressed` : "nothing selected"}`
+            : `keeper · ${view === "space" ? "space by category" : "free space over time"} · g for the next view`,
+          width - 2,
+        )}
       </text>
-      <box flexDirection="column" flexGrow={1}>
-        {report && !rows.length ? (
-          <text fg={terminal}>
-            {blocked
-              ? `Nothing is eligible. Press b to see ${count(blocked, "blocked finding")}.`
-              : "Nothing to clean."}
-          </text>
-        ) : null}
-        {rows.slice(start, start + pageSize).map((finding, index) => {
-          const isCursor = index + start === at;
-          const ok = eligible(finding);
-          const isSelected = selected.has(finding.id);
-          const mark = !ok ? " - " : isSelected ? "[x]" : "[ ]";
-          // The cursor row and blocked rows drop the column colours, so the cursor and the dimming read clearly.
-          const plain = isCursor || !ok;
-          const rowColor = isCursor ? color(theme.cursorText) : ok ? terminal : color(theme.blocked);
-          const attributes =
-            (isCursor && !theme.cursor ? TextAttributes.INVERSE : 0) | (!ok && !theme.blocked ? TextAttributes.DIM : 0);
-          const cell = (value: string) => (plain ? rowColor : color(value));
-          return (
-            <box
-              key={finding.id}
-              flexDirection="row"
-              backgroundColor={isCursor && theme.cursor ? theme.cursor : undefined}
-            >
-              <text
-                wrapMode="none"
-                fg={plain ? rowColor : color(isSelected ? theme.selected : "")}
-                attributes={attributes}
-                flexShrink={0}
-              >
-                {mark}{" "}
-              </text>
-              <text
-                wrapMode="none"
-                fg={cell(theme.size)}
-                attributes={attributes | (plain ? 0 : TextAttributes.BOLD)}
-                flexShrink={0}
-              >
-                {measure(finding).padStart(8)}{" "}
-              </text>
-              <text wrapMode="none" fg={cell(riskColor[finding.risk])} attributes={attributes} flexShrink={0}>
-                {finding.risk.padEnd(7)}
-              </text>
-              {wide ? (
-                <text wrapMode="none" fg={cell(theme.category)} attributes={attributes} flexShrink={0}>
-                  {finding.category.padEnd(14)}
-                </text>
-              ) : null}
-              <text wrapMode="none" fg={rowColor} attributes={attributes} flexShrink={1}>
-                {clip(finding.title, titleWidth)}
-              </text>
-            </box>
-          );
-        })}
+      <box flexDirection="column" height={panel} flexShrink={0}>
+        {view === "list" ? list : view === "space" ? space() : chart()}
       </box>
-      {active ? <text fg={terminal}>{active.blockers.join("; ") || active.reason}</text> : null}
-      <text fg={busy ? color(theme.accent) : terminal}>{status}</text>
-      {report?.warnings.length ? <text fg={color(theme.high)}>Scan warnings: {report.warnings.join("; ")}</text> : null}
+      <box height={2} flexShrink={0}>
+        <text fg={terminal}>{explanation}</text>
+      </box>
+      <text wrapMode="none" fg={busy ? color(theme.accent) : terminal}>
+        {status}
+      </text>
+      {report?.warnings.length ? (
+        <text wrapMode="none" fg={color(theme.high)}>
+          {clip(`Scan warnings: ${report.warnings.join("; ")}`, width - 2)}
+        </text>
+      ) : null}
       {/* One text per binding, so a narrow terminal wraps between bindings rather than inside one. */}
       <box flexDirection="row" flexWrap="wrap">
         {keys(showBlocked).map((binding, index, all) => (

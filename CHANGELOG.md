@@ -23,9 +23,16 @@ First release.
 - **Agent first.** JSON output when piped, one error shape, exit codes that name the next step, `keeper hold` and
   `keeper claim` for declaring intent, and `keeper schema` for the whole interface.
 - **A terminal wizard** that lists what you can act on first, colours risk and category with your terminal theme's
-  palette, opens on the previous scan, and shows each category's progress while a fresh one runs.
+  palette, and opens in about a second by rescanning only the categories that are due. `g` switches to the disk each
+  category holds and to free space over time, marked with each apply, purge, undo and nightly run. `r` rescans all.
+- **Says how to unblock.** Every blocker names its next step: push the commits, merge or close the PR, wait out the
+  age window, or `keeper release` the hold.
+- **Free space history.** keeper records free space whenever it runs and hourly with the timer, and
+  `keeper history` returns the readings and events as JSON.
 - **Light on a busy machine.** Scans run a few processes at a time and walk large directories outside the process, so
-  the wizard stays responsive under heavy load.
+  the wizard stays responsive under heavy load. Each category is kept for as long as it stays useful, from never for
+  load to six hours for package caches, and `keeper scan --cached` reuses them. Applying rescans only its plan's
+  categories.
 - **Runs nightly** with `keeper timer install`, applying only low-risk findings. A failed run raises a desktop
   notification, and `keeper status` says whether the nightly runs are healthy and, if not, why.
 - **Install from the AUR, npm or as an agent skill**: `paru -S keeper-bin`, `npm i -g @cillianb/keeper`, or

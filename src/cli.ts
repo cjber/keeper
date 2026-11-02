@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import packageJson from "../package.json";
 import { freshen, primaryCheckouts } from "./freshen";
-import { actor, audit, BusyError, type Claim, type Hold, readAudit, readLedger, writeLedger } from "./ledger";
+import { actor, audit, BusyError, type Claim, type Hold, readAudit, readLedger, updateLedger } from "./ledger";
 import { applyPlan, context, createPlan, freeBytes, purge, readPlan, transactions, undo, withinRisk } from "./ops";
 import { defaultStaleDays, scan } from "./scanners";
 import { defaultPaths, run } from "./system";
@@ -306,14 +306,16 @@ async function dispatch(
       if (!target || !flags.reason) throw new UsageError("usage: keeper hold PATH --reason R [--days N]");
       const path = resolve(target);
       if (!existsSync(path)) throw new UsageError(`${path} does not exist`);
-      const ledger = readLedger(paths);
       const hold: Hold = {
         path,
         until: new Date(Date.now() + flags.holdDays * 86_400_000).toISOString(),
         reason: flags.reason,
         actor: actor(),
       };
-      writeLedger(paths, { ...ledger, holds: [...ledger.holds.filter((item) => item.path !== path), hold] });
+      await updateLedger(paths, (ledger) => ({
+        ...ledger,
+        holds: [...ledger.holds.filter((item) => item.path !== path), hold],
+      }));
       audit(paths, "hold", hold);
       return { value: hold, text: `held ${path} until ${hold.until}` };
     }
@@ -323,9 +325,11 @@ async function dispatch(
       const path = resolve(target);
       if (!existsSync(path)) throw new UsageError(`${path} does not exist`);
       if (dangerous(path, paths.home)) throw new UsageError(`${path} is too broad to claim`);
-      const ledger = readLedger(paths);
       const claim: Claim = { path, actor: actor(), at: new Date().toISOString() };
-      writeLedger(paths, { ...ledger, claims: [...ledger.claims.filter((item) => item.path !== path), claim] });
+      await updateLedger(paths, (ledger) => ({
+        ...ledger,
+        claims: [...ledger.claims.filter((item) => item.path !== path), claim],
+      }));
       audit(paths, "claim", claim);
       return { value: claim, text: `claimed ${path}` };
     }
@@ -333,13 +337,12 @@ async function dispatch(
       const [target] = rest;
       if (!target) throw new UsageError("usage: keeper release PATH");
       const path = resolve(target);
-      const ledger = readLedger(paths);
       // Idempotent, so an agent can retry it; `released` says whether there was anything to drop.
-      const released = [...ledger.holds, ...ledger.claims].some((item) => item.path === path);
-      writeLedger(paths, {
+      const before = await updateLedger(paths, (ledger) => ({
         holds: ledger.holds.filter((item) => item.path !== path),
         claims: ledger.claims.filter((item) => item.path !== path),
-      });
+      }));
+      const released = [...before.holds, ...before.claims].some((item) => item.path === path);
       audit(paths, "release", { path });
       return {
         value: { path, released },

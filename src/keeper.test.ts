@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { dangerous, health, runCli, schema } from "./cli";
 import { freshen } from "./freshen";
-import { BusyError, withLock, writeLedger } from "./ledger";
+import { BusyError, type Ledger, readLedger, updateLedger, withLock, writeLedger } from "./ledger";
 import { applyPlan, context, createPlan, loadConfig, purge, undo } from "./ops";
 import {
   type Context,
@@ -194,6 +194,18 @@ test("a live lock makes a second mutation fail as busy, and a dead lock is taken
   writeFileSync(join(ctx.paths.state, "lock"), "999999999");
   expect(await withLock(ctx.paths, async () => 1)).toBe(1);
   expect(existsSync(join(ctx.paths.state, "lock"))).toBe(false);
+});
+
+test("a hold waits for the lock, so it cannot land in the middle of an apply", async () => {
+  mkdirSync(ctx.paths.state, { recursive: true });
+  writeFileSync(join(ctx.paths.state, "lock"), String(process.pid));
+  const hold = { path: home, until: "2099-01-01T00:00:00Z", reason: "r", actor: "a" };
+  const add = (ledger: Ledger) => ({ ...ledger, holds: [hold] });
+  await expect(updateLedger(ctx.paths, add)).rejects.toBeInstanceOf(BusyError);
+  expect(readLedger(ctx.paths).holds).toEqual([]);
+  rmSync(join(ctx.paths.state, "lock"));
+  await updateLedger(ctx.paths, add);
+  expect(readLedger(ctx.paths).holds).toEqual([hold]);
 });
 
 test("purge keeps young trash and removes old trash", async () => {

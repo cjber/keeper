@@ -36,7 +36,7 @@ Every version needs a `CHANGELOG.md` entry. `python3 scripts/wordmark.py` regene
 - Do not treat atime, or the git index mtime, as evidence of use.
 - `apply` rescans and matches ids. Never add a path that skips that check.
 - Only low-risk findings may run unattended. A worktree is low risk only with proof, and packages stay behind approval.
-- A merged PR proves a worktree only when the commit matches, because branch names get reused. Only that proof outruns the age window: a branch just cut from main is contained in main too.
+- A merged PR proves a worktree only when its head is the local commit, or holds it as an ancestor while the checkout has unpushed commits, because branch names get reused. Only that proof outruns the age window: a branch just cut from main is contained in main too.
 - keeper never starts an LLM. The calling agent judges, and a hold is the only verdict it can give, so judgement can add a blocker but never clear one.
 - An agent's hold beats every scanner. Mutations go through `withLock` and write to the audit log.
 - Delete through trash. Only `purge` is final, so branch deletion and `purgeHook` run there.

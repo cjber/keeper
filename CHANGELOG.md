@@ -12,8 +12,8 @@ First release.
 - **Finds what agents leave behind.** Stale worktrees, AUR clones, the pacman cache, orphaned packages, agent output,
   git-ignored build output, old transcripts, package manager caches, Docker leftovers, Timeshift snapshots and
   oversized logs, plus CPU load and memory pressure.
-- **Proves a worktree finished before it counts as low risk.** A merged pull request with the same commit, or every
-  commit on the default branch. Uncommitted files, unpushed commits, an open pull request, a running process or an
+- **Proves a worktree finished before it counts as low risk.** A merged pull request that holds every local commit, or
+  every commit on the default branch. Repositories with more than 1000 pull requests are covered too. Uncommitted files, unpushed commits, an open pull request, a running process or an
   unfinished rebase, merge, bisect or cherry-pick blocks it.
 - **Undoable by default.** Paths move to a trash, `keeper undo` restores them, and `keeper purge` deletes them for good
   and reports the space it measured as freed. Purge deletes a worktree's local branch only if it has not moved, and

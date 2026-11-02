@@ -12,7 +12,8 @@
     "start": "bun run src/index.tsx",
     "test": "bun test",
     "gate": "biome ci . && tsc --noEmit && bun test && bun scripts/changelog.ts --check",
-    "site:deploy": "rm -rf dist/site && mkdir -p dist/site && cp site/index.html assets/wordmark.svg assets/wordmark-dark.svg assets/logo.svg assets/icon.png dist/site && wrangler pages deploy dist/site --project-name keeper --branch main"
+    "site:deploy": "rm -rf dist/site && mkdir -p dist/site && cp site/index.html assets/wordmark.svg assets/wordmark-dark.svg assets/logo.svg assets/icon.png dist/site && wrangler pages deploy dist/site --project-name keeper --branch main",
+    "npm:first-publish": "bun scripts/build.ts && bun scripts/render-npm.ts && for d in keeper-linux-x64 keeper-linux-arm64 keeper; do npm publish dist/npm/$d --access public || exit 1; done"
   },
   "dependencies": {
     "@opentui/core": "^0.5.17",

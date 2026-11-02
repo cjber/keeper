@@ -1,8 +1,8 @@
 name: Release
 
 # Pushing a vX.Y.Z tag (see scripts/release.ts) publishes a GitHub release, the npm packages and both AUR packages. The
-# npm step needs the NPM_TOKEN secret, an automation token that can publish @cillianb packages, and a public repository
-# for provenance. The AUR step needs AUR_SSH_PRIVATE_KEY: the private half of a key on the maintainer's AUR account.
+# npm step uses trusted publishing, configured on each package for this workflow, and a public repository for
+# provenance. The AUR step needs AUR_SSH_PRIVATE_KEY: the private half of a key on the maintainer's AUR account.
 on:
   push:
     tags: ["v*.*.*"]
@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      id-token: write # npm provenance
+      id-token: write # npm trusted publishing and provenance
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -55,19 +55,23 @@ jobs:
           bun scripts/changelog.ts "$VERSION" > "$RUNNER_TEMP/notes.md"
           gh release create "$GITHUB_REF_NAME" dist/keeper-linux-x64 dist/keeper-linux-arm64 --verify-tag --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"
 
+      # Trusted publishing: npm checks this workflow's OIDC identity, so there is no token. A version already on npm is
+      # skipped, which lets the first one be published by hand before trust can be configured on the packages.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24 # ships npm 11, which trusted publishing needs
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
       - name: Publish to npm
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -z "${NPM_TOKEN:-}" ]; then
-            echo "::error::NPM_TOKEN is not set"
-            exit 1
-          fi
-          printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" > "$RUNNER_TEMP/.npmrc"
-          export NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/.npmrc"
           bun scripts/render-npm.ts dist/npm
           for dir in keeper-linux-x64 keeper-linux-arm64 keeper; do
+            name=$(jq -r .name "dist/npm/$dir/package.json")
+            if npm view "$name@$VERSION" version >/dev/null 2>&1; then
+              echo "$name@$VERSION is already published"
+              continue
+            fi
             npm publish "dist/npm/$dir" --access public --provenance
           done
 

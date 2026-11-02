@@ -40,7 +40,7 @@ export const liveActions: Actions = {
   },
   apply: async (findings) => {
     const ctx = context();
-    const outcome = await applyPlan(createPlan(ctx.paths, findings, ctx.staleDays), ctx);
+    const outcome = await applyPlan(createPlan(ctx.paths, findings, ctx.staleDays, ctx.appStaleDays), ctx);
     const lowered = outcome.reniced ? `lowered the priority of ${count(outcome.reniced, "process", "processes")}` : "";
     const done =
       [outcome.bytes ? `moved ${size(outcome.bytes)} to trash` : "", lowered].filter(Boolean).join(" and ") ||

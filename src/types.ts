@@ -1,4 +1,4 @@
-export const schemaVersion = 4;
+export const schemaVersion = 5;
 
 export const categories = [
   "worktree",
@@ -12,6 +12,11 @@ export const categories = [
   "docker",
   "snapshots",
   "logs",
+  "apps",
+  "large",
+  "downloads",
+  "screenshots",
+  "duplicates",
   "load",
   "memory",
 ] as const;
@@ -82,6 +87,8 @@ export interface Plan {
   bytes: number;
   /** The window the plan was approved under, so apply judges findings the same way. */
   staleDays: number;
+  /** The app window this plan was approved under. Older plans lack it and fall back to the current default. */
+  appStaleDays?: number;
 }
 
 export interface TrashEntry {

@@ -21,11 +21,16 @@ export const maxAge: Record<Category, number> = {
   transcripts: 60,
   logs: 60,
   docker: 60,
+  downloads: 60,
+  screenshots: 60,
   aur: 360,
   "pacman-cache": 360,
   orphans: 360,
   "package-cache": 360,
   snapshots: 360,
+  apps: 360,
+  large: 360,
+  duplicates: 360,
 };
 
 interface Entry {
@@ -43,7 +48,13 @@ interface Cache {
 const cachePath = (paths: Paths) => join(paths.state, "scan-cache.json");
 
 function fingerprint(context: Context): string {
-  const inputs = { schemaVersion, staleDays: context.staleDays, home: context.paths.home, config: context.config };
+  const inputs = {
+    schemaVersion,
+    staleDays: context.staleDays,
+    appStaleDays: context.appStaleDays,
+    home: context.paths.home,
+    config: context.config,
+  };
   return createHash("sha256").update(JSON.stringify(inputs)).digest("hex").slice(0, 16);
 }
 

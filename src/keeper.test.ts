@@ -581,7 +581,7 @@ test("a misspelt config key is an error, and configured roots replace the defaul
   writeFileSync(ctx.paths.config, 'worktreeRoot = ["~/w"]\n');
   expect(() => loadConfig(ctx.paths)).toThrow("unknown keys");
   writeFileSync(ctx.paths.config, 'worktreeRoots = ["~/w"]\naurClones = ["/opt/aur"]\n');
-  const { paths } = context(7, ctx.paths);
+  const { paths } = context(7, 90, ctx.paths);
   expect(paths.worktrees).toEqual([join(home, "w")]);
   expect(paths.aurClones).toEqual(["/opt/aur"]);
 });

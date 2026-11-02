@@ -24,6 +24,7 @@ Every version needs a `CHANGELOG.md` entry. `python3 scripts/wordmark.py` regene
 - `src/scanners.ts`: read-only findings and their blockers
 - `src/ops.ts`: plans, apply, trash, undo, purge
 - `src/ledger.ts`: holds, claims, audit log, lock
+- `src/usage.ts`: last-seen ledger of running executables, folded to packages; written by `keeper sample`, read by `apps`
 - `src/cli.ts`: argument parsing, output, exit codes
 - `src/freshen.ts`: returns main checkouts to the default branch and fast-forwards them
 - `src/timer.ts`: systemd and cron schedules

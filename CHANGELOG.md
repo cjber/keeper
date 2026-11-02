@@ -12,6 +12,11 @@ First release.
 - **Finds what agents leave behind.** Stale worktrees, AUR clones, the pacman cache, orphaned packages, agent output,
   git-ignored build output, old transcripts, package manager caches, Docker leftovers, Timeshift snapshots and
   oversized logs, plus CPU load and memory pressure.
+- **Google Files style cleanup.** Unused apps, large stale files, old downloads and installer leftovers, screenshots
+  and duplicate files are each their own scan category. Apps are judged from a last-seen ledger that `keeper sample`
+  records hourly from running processes, never from atime; a package is unused only once the ledger has covered the
+  whole window and it was not seen in it. Duplicates are grouped by size, then a partial hash, then a full hash, and
+  the newest or shallowest copy is always the one kept.
 - **Proves a worktree finished before it counts as low risk.** A merged pull request that holds every local commit, or
   every commit on the default branch. Repositories with more than 1000 pull requests are covered too. Uncommitted files, unpushed commits, an open pull request, a running process or an
   unfinished rebase, merge, bisect or cherry-pick blocks it.

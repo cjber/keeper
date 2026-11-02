@@ -1,18 +1,25 @@
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { createReadStream, existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
 import { availableParallelism, loadavg } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { readLedger } from "./ledger";
 import { ageDays, expandHome, holders, type Paths, run, sizes } from "./system";
-import { type Category, categories, count, type Finding, type Scan, schemaVersion } from "./types";
+import { type Category, categories, count, type Finding, type Risk, type Scan, schemaVersion } from "./types";
+import { readUsage, type UsageLedger } from "./usage";
 
 export const defaultStaleDays = 7;
+/** Apps are used less often than files, so an app is judged unused over a longer window by default. */
+export const defaultAppStaleDays = 90;
+/** Large files are offered at this apparent size or above, unless the config says otherwise. */
+export const defaultLargeBytes = 500 * 1024 ** 2;
 const staleBuildDays = 3;
 const transcriptDays = 14;
 const logCapBytes = 50 * 1024 ** 2;
 export const logKeepBytes = 5 * 1024 ** 2;
 const buildDirs = /\/(target|node_modules|\.next|\.turbo|\.venv)$/;
+/** The head of a file is enough to split most same-size files before the full hash runs. */
+const partialHashBytes = 64 * 1024;
 
 /** A machine this far past its core count is oversubscribed, so `load` findings become worth showing. */
 const loadPerCore = 1.25;
@@ -78,6 +85,8 @@ export interface Config {
   logs: string[];
   /** `keeper auto` notifies below this much free space. */
   warnFreeGb: number;
+  /** A file under $HOME this large, stale, and not in a repo or dotdir, is offered by the `large` category. */
+  largeBytes: number;
   /** Run before a worktree is deleted for good, with its trashed path then its original path. */
   purgeHook: string;
   /** Have `keeper auto` return primary checkouts to their default branch and fast-forward them. */
@@ -124,6 +133,7 @@ export const defaultConfig: Config = {
   aurClones: [],
   logs: [],
   warnFreeGb: 20,
+  largeBytes: defaultLargeBytes,
   purgeHook: "",
   freshen: false,
   theme: defaultTheme,
@@ -144,6 +154,12 @@ export interface Context {
   now: number;
   /** Worktrees and agent output touched more recently than this are blocked. */
   staleDays: number;
+  /** Apps not seen running for this long are unused. Falls back to `defaultAppStaleDays` when unset. */
+  appStaleDays?: number;
+  /** XDG download dir, or ~/Downloads. Overridable so a test never reads the real user dirs. */
+  downloadDir?: string;
+  /** XDG pictures dir, or ~/Pictures. Overridable so a test never reads the real user dirs. */
+  picturesDir?: string;
   /** Sampled processes, so a test never has to race a real machine. Absent means the scan reads /proc. */
   processes?: readonly ProcessInfo[];
   /** Replaces the GitHub lookup in tests. With a branch, it lists only that branch's pull requests. */
@@ -875,6 +891,438 @@ async function scanLogs(context: Context): Promise<Finding[]> {
   });
 }
 
+/** Short uncompressed size: 512K, 340M, 2.3G. */
+function humanSize(bytes: number): string {
+  const units = ["B", "K", "M", "G", "T"];
+  const power = Math.min(Math.max(Math.floor(Math.log(bytes) / Math.log(1024)), 0), units.length - 1);
+  const value = bytes / 1024 ** power;
+  return `${power >= 3 ? value.toFixed(1) : Math.round(value)}${units[power]}`;
+}
+
+/** Whether a path sits inside a git checkout, by walking up to the nearest `.git`. */
+function hasGitAncestor(path: string, home: string): boolean {
+  for (let dir = dirname(path); dir === home || dir.startsWith(`${home}/`); dir = dirname(dir)) {
+    if (existsSync(join(dir, ".git"))) return true;
+    if (dir === home) break;
+  }
+  return false;
+}
+
+function isFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** A package keeper can judge as unused: it is installed on purpose and ships something to launch. */
+export interface AppPackage {
+  name: string;
+  bytes: number;
+  requiredBy: string[];
+  groups: string[];
+  /** `.desktop` and `/usr/bin` paths, so a hold on one blocks the package and the finding can point at them. */
+  paths: string[];
+}
+
+const baseGroups = ["base", "base-devel"];
+/** Packages that are part of the machine itself and must never be removed for space. */
+const systemPackages = /^(linux|linux-lts|linux-zen|linux-hardened|linux-rt|linux-firmware|systemd|mkinitcpio)/;
+const firmwarePackages = /(-firmware$|^firmware-|-(ucode|microcode)$|^(amd|intel)-(ucode|microcode))/;
+const driverPackages =
+  /(-driver$|^driver-|^nvidia|^lib32-nvidia|^vulkan-|^xf86-video-|^xf86-input-|^mesa|^libva|^libva-|^intel-media-driver|^lib32-mesa)/;
+const displayPackages = new Set([
+  "xorg-server",
+  "xorg-xwayland",
+  "wayland",
+  "weston",
+  "hyprland",
+  "sway",
+  "i3",
+  "gnome-shell",
+  "plasma-desktop",
+  "kwin",
+  "mutter",
+  "sddm",
+  "gdm",
+  "lightdm",
+  "greetd",
+  "uwsm",
+]);
+
+/**
+ * Packages as findings from what pacman reports and what the last-seen ledger remembers. Pure, so tests describe a
+ * machine without touching pacman, and the no-atime rule holds by construction: nothing here reads atime.
+ */
+export function appFindings(
+  packages: readonly AppPackage[],
+  usage: UsageLedger | undefined,
+  now: number,
+  appStaleDays: number,
+): Finding[] {
+  const day = 86_400_000;
+  const since = usage ? Date.parse(usage.since) : undefined;
+  const coverageDays = since !== undefined ? (now - since) / day : 0;
+  const covered = since !== undefined && coverageDays >= appStaleDays;
+  return packages.flatMap((pkg): Finding[] => {
+    const lastSeen = usage?.packages[pkg.name];
+    if (lastSeen && (now - Date.parse(lastSeen)) / day < appStaleDays) return [];
+    const idleDays = lastSeen ? (now - Date.parse(lastSeen)) / day : coverageDays;
+    const blockers: string[] = [];
+    if (!covered) {
+      blockers.push(
+        `usage has only been tracked for ${Math.floor(coverageDays)} of ${appStaleDays} days, offered once the ledger covers the window`,
+      );
+    }
+    if (pkg.requiredBy.length) {
+      blockers.push(
+        `${count(pkg.requiredBy.length, "installed package")} ${pkg.requiredBy.length === 1 ? "depends" : "depend"} on it`,
+      );
+    }
+    if (pkg.groups.some((group) => baseGroups.includes(group)))
+      blockers.push("member of a base group the system needs");
+    if (systemPackages.test(pkg.name)) blockers.push("a kernel or system package");
+    if (firmwarePackages.test(pkg.name)) blockers.push("firmware the hardware may need");
+    if (driverPackages.test(pkg.name)) blockers.push("a driver the hardware may need");
+    if (displayPackages.has(pkg.name)) blockers.push("part of the display server or desktop session");
+    return [
+      {
+        id: findingId("apps", pkg.name, lastSeen ?? "never"),
+        category: "apps",
+        risk: "medium",
+        action: "remove-packages",
+        title: pkg.name,
+        paths: pkg.paths,
+        packages: [pkg.name],
+        bytes: pkg.bytes,
+        reason: `Installed on purpose, ${humanSize(pkg.bytes)} installed, and ${
+          lastSeen
+            ? `last seen running ${count(Math.floor(idleDays), "day")} ago`
+            : "never seen running while usage was tracked"
+        }. Removed through pacman, so reinstalling brings it back`,
+        blockers,
+      } satisfies Finding,
+    ];
+  });
+}
+
+/** Explicitly installed packages, their size, dependants and groups, batched so a scan starts a few processes. */
+async function packageMetadata(
+  names: readonly string[],
+): Promise<Map<string, { bytes: number; requiredBy: string[]; groups: string[] }>> {
+  const result = new Map<string, { bytes: number; requiredBy: string[]; groups: string[] }>();
+  for (let start = 0; start < names.length; start += 200) {
+    const batch = names.slice(start, start + 200);
+    const output = await run(["expac", "-Q", "-l", "\u001f", "%n\t%N\t%G\t%m", ...batch]);
+    if (output.code !== 0) continue;
+    for (const line of output.stdout.split("\n")) {
+      const [name, requiredBy = "", groups = "", bytes = "0"] = line.split("\t");
+      if (!name) continue;
+      result.set(name, {
+        bytes: Number(bytes) || 0,
+        requiredBy: requiredBy.split("\u001f").filter(Boolean),
+        groups: groups.split("\u001f").filter(Boolean),
+      });
+    }
+  }
+  return result;
+}
+
+/** Which launcher and `/usr/bin` files each package ships, so only apps with something to launch are judged. */
+async function packageLaunchers(names: readonly string[]): Promise<Map<string, string[]>> {
+  const result = new Map<string, string[]>();
+  for (let start = 0; start < names.length; start += 200) {
+    const batch = names.slice(start, start + 200);
+    const output = await run(["pacman", "-Ql", ...batch]);
+    if (output.code !== 0) continue;
+    for (const line of output.stdout.split("\n")) {
+      const space = line.indexOf(" ");
+      if (space < 0) continue;
+      const name = line.slice(0, space);
+      const path = line.slice(space + 1);
+      if (!path) continue;
+      const launcher = path.startsWith("/usr/share/applications/") && path.endsWith(".desktop");
+      const binary = path.startsWith("/usr/bin/") && !path.endsWith("/");
+      if (launcher || binary) result.set(name, [...(result.get(name) ?? []), path]);
+    }
+  }
+  return result;
+}
+
+async function scanApps(context: Context): Promise<Finding[]> {
+  const appStaleDays = context.appStaleDays ?? defaultAppStaleDays;
+  const explicit = await run(["pacman", "-Qeq"]);
+  if (explicit.code !== 0) return [];
+  const names = explicit.stdout.split("\n").filter(Boolean);
+  if (names.length === 0) return [];
+  const [metadata, launchers] = await Promise.all([packageMetadata(names), packageLaunchers(names)]);
+  const apps = names.flatMap((name): AppPackage[] => {
+    const meta = metadata.get(name);
+    const paths = launchers.get(name) ?? [];
+    if (!meta || paths.length === 0) return [];
+    return [{ name, bytes: meta.bytes, requiredBy: meta.requiredBy, groups: meta.groups, paths }];
+  });
+  return appFindings(apps, readUsage(context.paths), context.now, appStaleDays);
+}
+
+async function xdgDir(name: "DOWNLOAD" | "PICTURES", context: Context, fallback: string): Promise<string> {
+  if (name === "DOWNLOAD" && context.downloadDir) return context.downloadDir;
+  if (name === "PICTURES" && context.picturesDir) return context.picturesDir;
+  const result = await run(["xdg-user-dir", name]);
+  if (result.code === 0 && result.stdout.startsWith("/")) return result.stdout;
+  return join(context.paths.home, fallback);
+}
+
+function screenshotDirs(home: string, pictures: string): string[] {
+  return [
+    ...new Set([
+      join(pictures, "Screenshots"),
+      join(pictures, "screenshots"),
+      join(home, "Screenshots"),
+      join(pictures, "grim"),
+      join(pictures, "hyprshot"),
+    ]),
+  ];
+}
+
+/** Directories other categories already own, so `large` and `duplicates` leave those files to them. */
+async function otherOwnedDirs(context: Context): Promise<string[]> {
+  const download = await xdgDir("DOWNLOAD", context, "Downloads");
+  const pictures = await xdgDir("PICTURES", context, "Pictures");
+  return [...new Set([download, ...screenshotDirs(context.paths.home, pictures)])];
+}
+
+const partialExtensions = [".crdownload", ".part", ".partial", ".download", ".opdownload"];
+const installerExtensions = [".pkg.tar.zst", ".pkg.tar.xz", ".pkg.tar.zstd", ".AppImage"];
+
+async function scanDownloads(context: Context): Promise<Finding[]> {
+  const dir = await xdgDir("DOWNLOAD", context, "Downloads");
+  return entries(dir).flatMap((path): Finding[] => {
+    if (!isFile(path)) return [];
+    let stat: ReturnType<typeof statSync>;
+    try {
+      stat = statSync(path);
+    } catch {
+      return [];
+    }
+    const name = basename(path);
+    const age = (context.now - stat.mtimeMs) / 86_400_000;
+    const partial = partialExtensions.some((ext) => name.endsWith(ext));
+    const installer = installerExtensions.some((ext) => name.endsWith(ext));
+    // Partials are abandoned once a day old, so they are low risk then and offered sooner than the idle window.
+    if (!partial && age < context.staleDays) return [];
+    const risk: Risk = partial && age >= 1 ? "low" : "medium";
+    const reason = partial
+      ? `Incomplete download, safe to discard once it stopped changing`
+      : installer
+        ? `${humanSize(stat.size)} installer that a package or app was installed from`
+        : `${humanSize(stat.size)} in Downloads, not touched for ${count(context.staleDays, "day")}`;
+    return [
+      {
+        id: findingId("downloads", path, `${stat.size}\0${Math.round(stat.mtimeMs)}`),
+        category: "downloads",
+        risk,
+        action: "trash",
+        title: path.replace(`${context.paths.home}/`, "~/"),
+        paths: [path],
+        packages: [],
+        bytes: stat.size,
+        reason,
+        blockers: holders(path, context.live) ? [inUse] : [],
+      } satisfies Finding,
+    ];
+  });
+}
+
+const screenshotExtensions = [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".avif"];
+
+async function scanScreenshots(context: Context): Promise<Finding[]> {
+  const pictures = await xdgDir("PICTURES", context, "Pictures");
+  const dirs = screenshotDirs(context.paths.home, pictures).filter(existsSync);
+  return dirs.flatMap((dir) =>
+    entries(dir).flatMap((path): Finding[] => {
+      const name = basename(path);
+      if (!screenshotExtensions.some((ext) => name.endsWith(ext))) return [];
+      if (!isFile(path)) return [];
+      let stat: ReturnType<typeof statSync>;
+      try {
+        stat = statSync(path);
+      } catch {
+        return [];
+      }
+      if ((context.now - stat.mtimeMs) / 86_400_000 < context.staleDays) return [];
+      return [
+        {
+          id: findingId("screenshots", path, `${stat.size}\0${Math.round(stat.mtimeMs)}`),
+          category: "screenshots",
+          risk: "medium",
+          action: "trash",
+          title: path.replace(`${context.paths.home}/`, "~/"),
+          paths: [path],
+          packages: [],
+          bytes: stat.size,
+          reason: `Screenshot not touched for ${count(context.staleDays, "day")}, kept in a screenshots folder`,
+          blockers: holders(path, context.live) ? [inUse] : [],
+        } satisfies Finding,
+      ];
+    }),
+  );
+}
+
+/**
+ * Large stale files under $HOME. The walk stays on one filesystem (`-xdev`, so mount points and network mounts are
+ * skipped) and prunes dot directories, which is where config, caches and git metadata live. Git repos, downloads and
+ * screenshots are left to their own categories, so a file is never offered twice.
+ */
+async function scanLarge(context: Context): Promise<Finding[]> {
+  const threshold = context.config.largeBytes;
+  const walk = await run([
+    "find",
+    context.paths.home,
+    "-xdev",
+    "(",
+    "-name",
+    ".*",
+    "-prune",
+    ")",
+    "-o",
+    "(",
+    "-type",
+    "f",
+    "-size",
+    `+${threshold}c`,
+    "-printf",
+    "%s\\t%T@\\t%p\\n",
+    ")",
+  ]);
+  if (walk.code !== 0) return [];
+  const owned = await otherOwnedDirs(context);
+  return walk.stdout.split("\n").flatMap((line): Finding[] => {
+    const [size = "0", mtime = "0", ...rest] = line.split("\t");
+    const path = rest.join("\t");
+    const bytes = Number(size);
+    if (!path || !bytes) return [];
+    const age = (context.now - Number(mtime) * 1000) / 86_400_000;
+    if (age < context.staleDays) return [];
+    if (owned.some((dir) => path.startsWith(`${dir}/`))) return [];
+    if (hasGitAncestor(path, context.paths.home)) return [];
+    return [
+      {
+        id: findingId("large", path, `${bytes}\0${Math.round(Number(mtime) * 1000)}`),
+        category: "large",
+        risk: "medium",
+        action: "trash",
+        title: path.replace(`${context.paths.home}/`, "~/"),
+        paths: [path],
+        packages: [],
+        bytes,
+        reason: `${humanSize(bytes)} file not modified for ${count(context.staleDays, "day")}. Git repos, config dirs and downloads are left to their own categories`,
+        blockers: holders(path, context.live) ? [inUse] : [],
+      } satisfies Finding,
+    ];
+  });
+}
+
+/** The head of a file is enough to split most same-size files before the full hash runs. */
+async function partialHash(path: string): Promise<string> {
+  const head = await Bun.file(path).slice(0, partialHashBytes).arrayBuffer();
+  return createHash("sha256").update(new Uint8Array(head)).digest("hex");
+}
+
+async function sha256File(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
+  return hash.digest("hex");
+}
+
+/** The copy to keep: newest, then shallowest path, then the first alphabetically. */
+function keepCopy(files: readonly { path: string; mtime: number }[]): string {
+  const newest = Math.max(...files.map((file) => file.mtime));
+  const tied = files.filter((file) => file.mtime === newest);
+  return tied.sort((a, b) => a.path.split("/").length - b.path.split("/").length || a.path.localeCompare(b.path))[0]
+    ?.path as string;
+}
+
+/**
+ * Identical files under $HOME, size first, then a partial hash, then a full hash, so a large home is hashed only
+ * where two files already share a size. Hard links and files in git repos are skipped, and the kept copy is never
+ * offered. Hidden directories are pruned like `large`, so caches and git metadata stay out.
+ */
+async function scanDuplicates(context: Context): Promise<Finding[]> {
+  const walk = await run([
+    "find",
+    context.paths.home,
+    "-xdev",
+    "(",
+    "-name",
+    ".*",
+    "-prune",
+    ")",
+    "-o",
+    "(",
+    "-type",
+    "f",
+    "-links",
+    "1",
+    "-printf",
+    "%s\\t%T@\\t%p\\n",
+    ")",
+  ]);
+  if (walk.code !== 0) return [];
+  const owned = await otherOwnedDirs(context);
+  const files = walk.stdout.split("\n").flatMap((line): { path: string; bytes: number; mtime: number }[] => {
+    const [size = "0", mtime = "0", ...rest] = line.split("\t");
+    const path = rest.join("\t");
+    const bytes = Number(size);
+    if (!path || bytes === 0) return [];
+    if (owned.some((dir) => path.startsWith(`${dir}/`))) return [];
+    if (hasGitAncestor(path, context.paths.home)) return [];
+    return [{ path, bytes, mtime: Math.round(Number(mtime) * 1000) }];
+  });
+  const bySize = new Map<number, typeof files>();
+  for (const file of files) bySize.set(file.bytes, [...(bySize.get(file.bytes) ?? []), file]);
+  const duplicates: { kept: string; copy: (typeof files)[number] }[] = [];
+  for (const group of bySize.values()) {
+    if (group.length < 2) continue;
+    const byPartial = new Map<string, typeof group>();
+    for (const file of group) {
+      const key = await partialHash(file.path);
+      byPartial.set(key, [...(byPartial.get(key) ?? []), file]);
+    }
+    for (const candidates of byPartial.values()) {
+      if (candidates.length < 2) continue;
+      const byFull = new Map<string, typeof candidates>();
+      for (const file of candidates) {
+        const key = await sha256File(file.path);
+        byFull.set(key, [...(byFull.get(key) ?? []), file]);
+      }
+      for (const identical of byFull.values()) {
+        if (identical.length < 2) continue;
+        const kept = keepCopy(identical);
+        for (const copy of identical) {
+          if (copy.path !== kept) duplicates.push({ kept, copy });
+        }
+      }
+    }
+  }
+  return duplicates.map(
+    ({ kept, copy }) =>
+      ({
+        id: findingId("duplicates", copy.path, `${copy.bytes}\0${copy.mtime}`),
+        category: "duplicates",
+        risk: "medium",
+        action: "trash",
+        title: copy.path.replace(`${context.paths.home}/`, "~/"),
+        paths: [copy.path],
+        packages: [],
+        bytes: copy.bytes,
+        reason: `Identical to ${kept.replace(`${context.paths.home}/`, "~/")}, which keeper keeps`,
+        blockers: holders(copy.path, context.live) ? [inUse] : [],
+      }) satisfies Finding,
+  );
+}
+
 interface RawProcess {
   pid: number;
   ppid: number;
@@ -1121,6 +1569,11 @@ const scanners: Record<Category, (context: Context) => Promise<Finding[]>> = {
   docker: scanDocker,
   snapshots: scanSnapshots,
   logs: scanLogs,
+  apps: scanApps,
+  large: scanLarge,
+  downloads: scanDownloads,
+  screenshots: scanScreenshots,
+  duplicates: scanDuplicates,
   load: scanLoad,
   memory: scanMemory,
 };

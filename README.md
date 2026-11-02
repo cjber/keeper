@@ -103,6 +103,11 @@ until `keeper purge`, which reports the measured change in free space as `freed`
 | `docker` | Dangling images and build cache unused for 7 days; unused volumes are reported only | low, volumes report only |
 | `logs` | Configured logs over 50M, cut to their last 5M | low |
 | `snapshots` | Timeshift snapshots, which keep deleted data on disk | report only |
+| `apps` | Explicitly installed packages that ship a launcher or `/usr/bin` binary and were not seen running for 90 days | medium |
+| `large` | Files over 500M under `$HOME`, stale, outside git repos, dotdirs, downloads and screenshots | medium |
+| `downloads` | Stale downloads, finished installers, and partials (partials over a day old are low) | low or medium |
+| `screenshots` | Stale images in the Pictures `Screenshots` and grim/hyprshot folders | medium |
+| `duplicates` | Identical files under `$HOME`, keeping the newest copy and offering the rest | medium |
 | `load` | Commands holding the CPU while the machine is oversubscribed | medium |
 | `memory` | Cgroups at their `memory.high` cap, and memory pressure | report only |
 
@@ -138,8 +143,8 @@ useful, and `keeper scan --cached` or the wizard reuse them:
 | --- | --- |
 | Never, always scanned | `load`, `memory` |
 | 15 minutes | `worktree` |
-| 1 hour | `build`, `agent`, `transcripts`, `logs`, `docker` |
-| 6 hours | `aur`, `pacman-cache`, `orphans`, `package-cache`, `snapshots` |
+| 1 hour | `build`, `agent`, `transcripts`, `logs`, `docker`, `downloads`, `screenshots` |
+| 6 hours | `aur`, `pacman-cache`, `orphans`, `package-cache`, `snapshots`, `apps`, `large`, `duplicates` |
 
 Applying rescans the categories in its plan first, so a kept finding can never be what decides a removal, and applying,
 undoing or claiming drops the categories it changed. Holds are applied on every read. `keeper scan` without `--cached`
@@ -148,6 +153,11 @@ always scans everything.
 keeper records free space whenever it scans or changes something, at most every 10 minutes, and hourly once the timer
 is installed. `keeper history` returns those readings with the applies, purges, undos and nightly runs, and the
 wizard draws them.
+
+The `apps` category reads a last-seen ledger that `keeper sample` records hourly: which executables are running, folded
+to their owning package. Use is never judged from atime. A package counts as unused only when the ledger has existed
+for the whole `--app-stale-days` window (default 90) and it was not seen in it, so a fresh install shows each candidate
+as blocked until it has watched long enough.
 
 ## Commands
 
@@ -165,7 +175,7 @@ wizard draws them.
 | `keeper release PATH` | Drops a hold or claim |
 | `keeper log` | Shows recent mutations and who made them |
 | `keeper history` | Free space readings and the events that changed it, over 30 days or `--days N` |
-| `keeper sample` | Records free space now, as the hourly timer does |
+| `keeper sample` | Records free space and which executables are running, as the hourly timer does |
 | `keeper schema` | Describes the CLI as JSON |
 | `keeper auto` | Applies low-risk findings, purges old trash and notifies |
 | `keeper timer install` | Schedules `keeper auto` daily and `keeper sample` hourly with systemd, or `--cron` |
@@ -203,6 +213,8 @@ agentCachePatterns = ["^pr\\d+-venv$"]
 logs = ["~/scripts/backup.log"]
 # Notify below this much free space. Default: 20
 warnFreeGb = 20
+# Files under $HOME this large or more are offered by `large` once stale. Default: 524288000 (500M)
+largeBytes = 524288000
 # Run before a worktree is deleted for good, with its trashed path then its original path.
 purgeHook = "~/bin/drop-worktree-db"
 # Have keeper auto return main checkouts to the default branch and fast-forward them.

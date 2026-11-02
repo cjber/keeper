@@ -6,10 +6,11 @@ import { freshen, primaryCheckouts } from "./freshen";
 import { readEvents, readSamples, sample } from "./history";
 import { actor, audit, BusyError, type Claim, type Hold, readAudit, readLedger, updateLedger } from "./ledger";
 import { applyPlan, context, createPlan, freeBytes, purge, readPlan, transactions, undo, withinRisk } from "./ops";
-import { defaultStaleDays } from "./scanners";
+import { defaultAppStaleDays, defaultStaleDays } from "./scanners";
 import { defaultPaths, run } from "./system";
 import { installCron, installSystemd, lastServiceResult, removeSchedule, scheduleStatus } from "./timer";
 import { type Category, categories, count, eligible, type Finding, type Risk, risks, schemaVersion } from "./types";
+import { recordUsage } from "./usage";
 
 /** Each code past 2 tells the caller one thing to do next. */
 export const exit = { ok: 0, error: 1, usage: 2, needsConfirmation: 3, stalePlan: 4, partial: 5, busy: 6 } as const;
@@ -22,9 +23,9 @@ const optionalTools = ["gh", "paccache", "expac", "notify-send", "uv"];
 const help = `keeper keeps an Arch machine clean. Output is JSON when stdout is not a terminal or with --json.
 
   keeper                         open the wizard (terminal only)
-  keeper scan [--category C] [--stale-days N] [--cached]
+  keeper scan [--category C] [--stale-days N] [--app-stale-days N] [--cached]
                                  list findings; --cached reuses categories scanned recently
-  keeper plan [ID...] [--category C] [--max-risk low|medium] [--stale-days N]
+  keeper plan [ID...] [--category C] [--max-risk low|medium] [--stale-days N] [--app-stale-days N]
                                  save a plan of eligible findings
   keeper apply PLAN --yes        rescan, then apply what is unchanged
   keeper undo TX                 restore a transaction from trash
@@ -60,6 +61,7 @@ interface Flags {
   maxRisk: Risk;
   olderDays: number;
   staleDays: number;
+  appStaleDays: number;
   days?: number;
   reason?: string;
 }
@@ -84,6 +86,7 @@ function parse(args: readonly string[]): Flags {
     maxRisk: "low",
     olderDays: trashDays,
     staleDays: defaultStaleDays,
+    appStaleDays: defaultAppStaleDays,
   };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i] as string;
@@ -108,6 +111,10 @@ function parse(args: readonly string[]): Flags {
       flags.staleDays = Number(value());
       if (!Number.isFinite(flags.staleDays) || flags.staleDays < 0)
         throw new UsageError("--stale-days must be a number of days, 0 or more");
+    } else if (arg === "--app-stale-days") {
+      flags.appStaleDays = Number(value());
+      if (!Number.isFinite(flags.appStaleDays) || flags.appStaleDays < 0)
+        throw new UsageError("--app-stale-days must be a number of days, 0 or more");
     } else if (arg === "--days") {
       flags.days = Number(value());
       if (!Number.isFinite(flags.days) || flags.days <= 0) throw new UsageError("--days must be positive");
@@ -199,7 +206,9 @@ async function auto(flags: Flags): Promise<{ value: { summary: string } & Record
   const report = await cachedScan(ctx, { reuse: false });
   const ready = report.findings.filter((finding) => eligible(finding) && finding.risk === "low");
   const paths = ctx.paths;
-  const outcome = ready.length ? await applyPlan(createPlan(paths, ready, ctx.staleDays), ctx) : undefined;
+  const outcome = ready.length
+    ? await applyPlan(createPlan(paths, ready, ctx.staleDays, ctx.appStaleDays), ctx)
+    : undefined;
   const purged = await purge(paths, flags.olderDays);
   const waiting = report.findings.filter((finding) => eligible(finding) && finding.risk !== "low");
   const free = await freeBytes(paths.home);
@@ -236,7 +245,10 @@ async function dispatch(
   const paths = defaultPaths();
   switch (command) {
     case "scan": {
-      const report = await cachedScan(context(flags.staleDays), { reuse: flags.cached, only: flags.category });
+      const report = await cachedScan(context(flags.staleDays, flags.appStaleDays), {
+        reuse: flags.cached,
+        only: flags.category,
+      });
       const total = report.findings.filter(eligible).reduce((sum, finding) => sum + finding.bytes, 0);
       return {
         value: { ...report, next: "keeper plan [ID...] [--max-risk medium]" },
@@ -244,7 +256,10 @@ async function dispatch(
       };
     }
     case "plan": {
-      const report = await cachedScan(context(flags.staleDays), { reuse: false, only: flags.category });
+      const report = await cachedScan(context(flags.staleDays, flags.appStaleDays), {
+        reuse: false,
+        only: flags.category,
+      });
       const chosen = rest.length
         ? rest.map((id) => {
             const finding = report.findings.find((candidate) => candidate.id === id);
@@ -254,7 +269,7 @@ async function dispatch(
             return finding;
           })
         : report.findings.filter((finding) => eligible(finding) && withinRisk(finding, flags.maxRisk));
-      const plan = createPlan(paths, chosen, flags.staleDays);
+      const plan = createPlan(paths, chosen, flags.staleDays, flags.appStaleDays);
       return {
         value: { ...plan, next: `keeper apply ${plan.id} --yes` },
         text: `plan ${plan.id}: ${count(chosen.length, "item")}, ${size(plan.bytes)}`,
@@ -277,7 +292,7 @@ async function dispatch(
           code: exit.needsConfirmation,
         };
       }
-      const outcome = await applyPlan(plan, context(plan.staleDays));
+      const outcome = await applyPlan(plan, context(plan.staleDays, plan.appStaleDays));
       const partial = outcome.failed.length > 0 || (outcome.stale.length > 0 && outcome.applied.length > 0);
       const next = outcome.transaction
         ? `keeper undo ${outcome.transaction} to restore, or keeper purge --older-days 0 to free the space`
@@ -390,6 +405,8 @@ async function dispatch(
       };
     }
     case "sample": {
+      // The hourly timer runs this, so it also keeps the last-seen ledger the `apps` category judges from.
+      await recordUsage(paths).catch(() => undefined);
       const reading = await sample(paths, Date.now(), true);
       return {
         value: reading ?? null,

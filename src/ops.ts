@@ -5,6 +5,7 @@ import { forget, forgetUnder } from "./cache";
 import { audit, withLock } from "./ledger";
 import type { Config, Context } from "./scanners";
 import {
+  defaultAppStaleDays,
   defaultConfig,
   defaultStaleDays,
   defaultTheme,
@@ -55,9 +56,20 @@ function configuredPaths(paths: Paths, config: Config): Paths {
   };
 }
 
-export function context(staleDays = defaultStaleDays, paths: Paths = defaultPaths()): Context {
+export function context(
+  staleDays = defaultStaleDays,
+  appStaleDays = defaultAppStaleDays,
+  paths: Paths = defaultPaths(),
+): Context {
   const config = loadConfig(paths);
-  return { paths: configuredPaths(paths, config), config, live: liveFiles(), now: Date.now(), staleDays };
+  return {
+    paths: configuredPaths(paths, config),
+    config,
+    live: liveFiles(),
+    now: Date.now(),
+    staleDays,
+    appStaleDays,
+  };
 }
 
 function writeJson(path: string, value: unknown): void {
@@ -67,7 +79,13 @@ function writeJson(path: string, value: unknown): void {
 
 const newId = () => randomBytes(4).toString("hex");
 
-export function createPlan(paths: Paths, chosen: readonly Finding[], staleDays: number, now = Date.now()): Plan {
+export function createPlan(
+  paths: Paths,
+  chosen: readonly Finding[],
+  staleDays: number,
+  appStaleDays = defaultAppStaleDays,
+  now = Date.now(),
+): Plan {
   const findings = outermost(chosen);
   const plan: Plan = {
     schemaVersion,
@@ -77,6 +95,7 @@ export function createPlan(paths: Paths, chosen: readonly Finding[], staleDays: 
     categories: [...new Set(findings.map((finding) => finding.category))],
     bytes: findings.reduce((sum, finding) => sum + finding.bytes, 0),
     staleDays,
+    appStaleDays,
   };
   writeJson(join(paths.state, "plans", `${plan.id}.json`), plan);
   return plan;
@@ -178,10 +197,12 @@ export function applyPlan(plan: Plan, ctx: Context): Promise<Outcome> {
 
 async function applyUnlocked(plan: Plan, ctx: Context): Promise<Outcome> {
   const current = new Map(
-    (await scan({ ...ctx, staleDays: plan.staleDays }, plan.categories)).findings.map((finding) => [
-      finding.id,
-      finding,
-    ]),
+    (
+      await scan(
+        { ...ctx, staleDays: plan.staleDays, appStaleDays: plan.appStaleDays ?? ctx.appStaleDays },
+        plan.categories,
+      )
+    ).findings.map((finding) => [finding.id, finding]),
   );
   const outcome: Outcome = { applied: [], stale: [], failed: [], bytes: 0, reniced: 0 };
   const id = newId();

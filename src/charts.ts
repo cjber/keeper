@@ -18,8 +18,10 @@ export type Ink = "line" | "grid" | "rule" | "blank";
 export interface FreeChart {
   /** Top row first. Each row is runs of one ink, keyed by the column they start at. */
   rows: { label: string; runs: { column: number; ink: Ink; text: string }[] }[];
-  /** The axis under the chart: event marks, and day or hour labels where they fit between them. */
-  axis: { column: number; kind?: Marked; text: string }[];
+  /** Event marks, on their own row under the chart so they never hide a label. */
+  ticks: { column: number; kind: Marked }[];
+  /** Day or hour labels under the marks. */
+  axis: string;
   /** The events drawn, oldest first. */
   events: (Event & { event: Marked })[];
   top: number;
@@ -122,38 +124,31 @@ export function freeChart(
     return { label: tick === undefined ? "" : label(tick), runs };
   });
 
-  return { rows, axis: timeAxis(start, end, columns, markAt), events: drawn, top, bottom, start };
+  const ticks = [...markAt].map(([column, kind]) => ({ column, kind })).sort((a, b) => a.column - b.column);
+  return { rows, ticks, axis: timeAxis(start, end, columns), events: drawn, top, bottom, start };
 }
 
-/** Weekday names at midnight over two days or more, otherwise hours. A label never covers an event's mark. */
-function timeAxis(start: number, end: number, columns: number, markAt: ReadonlyMap<number, Marked>) {
+/** Weekday names at midnight over two days or more, otherwise hours, each with a space before the next. */
+function timeAxis(start: number, end: number, columns: number): string {
   const column = (at: number) => Math.floor(((at - start) / (end - start)) * columns);
-  const taken: (Marked | string | undefined)[] = Array.from({ length: columns }, (_, at) => markAt.get(at));
+  const cells = Array.from({ length: columns }, () => " ");
   const long = end - start >= 2 * day;
   const every = long ? day : hour * Math.max(1, Math.ceil((end - start) / hour / Math.max(columns / 8, 1)));
   const first = new Date(start);
   if (long) first.setHours(24, 0, 0, 0);
   else first.setMinutes(60, 0, 0);
+  let free = 0;
   for (let at = first.getTime(); at < end; at += every) {
     const date = new Date(at);
     const text = long
       ? date.toLocaleDateString("en-GB", { weekday: "short" })
       : `${String(date.getHours()).padStart(2, "0")}:00`;
     const from = column(at);
-    // One free cell either side, so neighbouring labels and marks never touch.
-    if (from + text.length > columns) continue;
-    if (taken.slice(Math.max(from - 1, 0), from + text.length + 1).some(Boolean)) continue;
-    for (let i = 0; i < text.length; i++) taken[from + i] = text[i];
+    if (from < free || from + text.length > columns) continue;
+    for (let i = 0; i < text.length; i++) cells[from + i] = text[i] ?? " ";
+    free = from + text.length + 1;
   }
-  const axis: FreeChart["axis"] = [];
-  taken.forEach((cell, at) => {
-    const kind = cell && cell in marks ? (cell as Marked) : undefined;
-    const text = kind ? marks[kind] : (cell ?? " ");
-    const last = axis.at(-1);
-    if (last && !last.kind && !kind) last.text += text;
-    else axis.push({ column: at, kind, text });
-  });
-  return axis;
+  return cells.join("").trimEnd();
 }
 
 export interface Bar {
@@ -210,6 +205,10 @@ const reasons: [RegExp, string][] = [
   [/^in use|is running|operation is running|build is running/, "in use, offered once it stops"],
   [/^held by/, "held, keeper release PATH ends it"],
   [/is in progress/, "git operation in progress, finish or abort it"],
+  [/^includes this keeper run/, "includes this keeper run, judged once it exits"],
+  [/desktop session/, "part of your desktop session, never lowered"],
+  [/bottom priority/, "already at the bottom priority"],
+  [/another user/, "owned by another user"],
 ];
 
 export interface Wait {
@@ -218,17 +217,22 @@ export interface Wait {
   bytes: number;
 }
 
-/** Why space waits, by each finding's first blocker, largest first. A finding counts once, so the sizes add up. */
+/**
+ * Why findings wait, by each one's first blocker, largest first. Every blocked finding counts once, so the counts add up
+ * to the blocked total and the sizes to the space waiting. Load and memory rows wait too, though they hold no disk.
+ */
 export function waits(findings: readonly Finding[]): Wait[] {
+  const own = ownBytes(findings);
   const groups = new Map<string, Wait>();
-  for (const [finding, bytes] of ownBytes(findings)) {
+  for (const finding of findings) {
     const first = finding.blockers[0];
-    if (!first || bytes <= 0) continue;
+    if (!first) continue;
+    const bytes = own.get(finding) ?? 0;
     const reason = reasons.find(([pattern]) => pattern.test(first))?.[1] ?? first.replace(/\d+/g, "N");
     const group = groups.get(reason) ?? { reason, count: 0, bytes: 0 };
     group.count++;
     group.bytes += bytes;
     groups.set(reason, group);
   }
-  return [...groups.values()].sort((a, b) => b.bytes - a.bytes);
+  return [...groups.values()].sort((a, b) => b.bytes - a.bytes || b.count - a.count);
 }

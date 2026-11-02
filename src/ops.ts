@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { forget } from "./cache";
+import { forget, forgetUnder } from "./cache";
 import { audit, withLock } from "./ledger";
 import type { Config, Context } from "./scanners";
 import {
@@ -212,6 +212,10 @@ async function applyUnlocked(plan: Plan, ctx: Context): Promise<Outcome> {
     }
     writeJson(join(base, "transaction.json"), tx);
   }
+  forgetUnder(
+    ctx.paths,
+    tx.entries.map((entry) => entry.original),
+  );
   if (outcome.applied.length === 0) rmSync(base, { recursive: true, force: true });
   else outcome.transaction = id;
   return outcome;

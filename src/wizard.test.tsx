@@ -182,7 +182,8 @@ test("g cycles to space, then free space over time, keeping the key line in plac
     Promise.resolve(),
     { samples, events },
   );
-  const keyRow = (frame: string) => frame.split("\n").findIndex((line) => line.includes("q/esc quit"));
+  // The first key line: the list's starts with moving, each graph's with g.
+  const keyRow = (frame: string) => frame.split("\n").findIndex((line) => /^\s*(j\/k move|g )/.test(line));
   const listKeys = keyRow(captureCharFrame());
   await act(async () => {
     await mockInput.pressKey("g");
@@ -193,6 +194,9 @@ test("g cycles to space, then free space over time, keeping the key line in plac
   expect(frame).toMatch(/aur +1\.0G +1\.0G +█+░+/);
   expect(frame).toMatch(/in use, offered once it stops +1 +1\.0G/);
   expect(keyRow(frame)).toBe(listKeys);
+  // Each view offers only the keys that work in it.
+  expect(frame).toContain("g free space history · r rescan · q/esc quit");
+  expect(frame).not.toContain("space select");
   await act(async () => {
     await mockInput.pressKey("g");
   });
@@ -201,6 +205,7 @@ test("g cycles to space, then free space over time, keeping the key line in plac
   expect(frame).toContain("keeper · free space · 110.0G of 500.0G, up 10.0G in 3 hours");
   expect(frame).toContain("▲");
   expect(frame).toContain("moved 5.0G to trash");
+  expect(frame).toContain("g back to the list");
   expect(keyRow(frame)).toBe(listKeys);
   renderer.destroy();
 });

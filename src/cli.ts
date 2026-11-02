@@ -267,7 +267,12 @@ async function dispatch(
       const plan = readPlan(paths, id);
       if (!flags.yes) {
         return {
-          value: { status: "needs_confirmation", plan },
+          value: {
+            status: "needs_confirmation",
+            message: `plan ${id} changes the machine, so it runs only with --yes`,
+            plan,
+            next: `keeper apply ${id} --yes`,
+          },
           text: `plan ${id} would process ${count(plan.findingIds.length, "item")}, ${size(plan.bytes)}. Re-run with --yes.`,
           code: exit.needsConfirmation,
         };

@@ -6,7 +6,7 @@ import { actor, audit, BusyError, type Claim, type Hold, readAudit, readLedger, 
 import { applyPlan, context, createPlan, freeBytes, purge, readPlan, transactions, undo, withinRisk } from "./ops";
 import { defaultStaleDays, scan } from "./scanners";
 import { defaultPaths, run } from "./system";
-import { installCron, installSystemd, removeSchedule, scheduleStatus } from "./timer";
+import { installCron, installSystemd, lastServiceResult, removeSchedule, scheduleStatus } from "./timer";
 import { type Category, categories, eligible, type Finding, type Risk, risks, schemaVersion } from "./types";
 
 /** Each code past 2 tells the caller one thing to do next. */
@@ -153,6 +153,29 @@ function line(finding: Finding): string {
   return `${finding.id}  ${measure(finding).padStart(7)}  ${finding.risk.padEnd(6)} ${state.padEnd(7)} ${finding.title}\n    ${why}`;
 }
 
+interface AutoRun {
+  at: string;
+  summary: string;
+  incomplete?: boolean;
+  warnings?: string[];
+}
+
+/** A nightly run is due once a day, so a gap past this means the schedule stopped or the run crashed before logging. */
+const overdueHours = 36;
+
+/** What stops the nightly runs from being trusted. Empty means every check passed. */
+export function health(schedule: string, last: AutoRun | undefined, result: string | undefined, now: number): string[] {
+  if (schedule === "none") return ["no schedule, so nothing runs nightly"];
+  const problems: string[] = [];
+  if (result && result !== "success") problems.push(`the last nightly run ended in ${result}`);
+  if (!last) return [...problems, "no nightly run recorded yet"];
+  const hours = (now - Date.parse(last.at)) / 3_600_000;
+  if (hours > overdueHours) problems.push(`the last nightly run was ${Math.floor(hours)} hours ago`);
+  if (last.incomplete) problems.push("the last nightly run could not apply or purge everything");
+  if (last.warnings?.length) problems.push(`the last nightly scan warned: ${last.warnings.join("; ")}`);
+  return problems;
+}
+
 async function auto(flags: Flags): Promise<{ value: { summary: string } & Record<string, unknown>; code: number }> {
   const ctx = context();
   // Freshen first, so the scan judges worktrees against the default branch as it is now.
@@ -168,11 +191,13 @@ async function auto(flags: Flags): Promise<{ value: { summary: string } & Record
   const waitingBytes = waiting.reduce((sum, finding) => sum + finding.bytes, 0);
   const summary = `Moved ${gib(outcome?.bytes ?? 0)} to trash, purge freed ${gib(purged.freed)}, ${gib(free)} free. ${gib(waitingBytes)} waits for approval. Sizes before purge are uncompressed.`;
   const low = free < ctx.config.warnFreeGb * 1024 ** 3;
-  if (waitingBytes > 10 * 1024 ** 3 || low) {
-    await run(["notify-send", ...(low ? ["-u", "critical"] : []), "keeper", summary]);
+  const warnings = report.warnings;
+  if (waitingBytes > 10 * 1024 ** 3 || low || warnings.length) {
+    const said = warnings.length ? `${summary} Scan warnings: ${warnings.join("; ")}` : summary;
+    await run(["notify-send", ...(low || warnings.length ? ["-u", "critical"] : []), "keeper", said]);
   }
   const incomplete = (outcome?.failed.length ?? 0) > 0 || purged.failed.length > 0;
-  audit(paths, "auto", { summary, incomplete });
+  audit(paths, "auto", { summary, incomplete, warnings });
   return {
     value: {
       at: new Date().toISOString(),
@@ -182,7 +207,7 @@ async function auto(flags: Flags): Promise<{ value: { summary: string } & Record
       purged,
       waiting: waiting.length,
       freshened: freshened.filter((note) => note !== undefined),
-      warnings: report.warnings,
+      warnings,
     },
     code: incomplete ? exit.partial : exit.ok,
   };
@@ -317,25 +342,30 @@ async function dispatch(
     case "status": {
       const trash = transactions(paths);
       const lastRun = readAudit(paths, 500)
-        .filter((entry): entry is { at: string; summary: string } => (entry as { event?: string }).event === "auto")
+        .filter((entry): entry is AutoRun => (entry as { event?: string }).event === "auto")
         .at(-1);
       const holds = readLedger(paths).holds.filter((hold) => Date.parse(hold.until) > Date.now());
       const schedule = await scheduleStatus();
+      const result = schedule === "systemd" ? await lastServiceResult() : undefined;
+      const problems = health(schedule, lastRun, result, Date.now());
       const value = {
         version: packageJson.version,
         free: await freeBytes(paths.home),
         schedule,
+        healthy: problems.length === 0,
+        problems,
         lastRun,
         holds,
         trash: trash.map((tx) => ({ id: tx.id, appliedAt: tx.appliedAt, paths: tx.entries.length })),
         missingTools: optionalTools.filter((tool) => !Bun.which(tool)),
-        next: schedule === "none" ? "keeper timer install" : "keeper scan",
+        next: schedule === "none" ? "keeper timer install" : problems.length ? "keeper log" : "keeper scan",
       };
       const last = lastRun ? `\nlast run ${lastRun.at}: ${lastRun.summary}` : "";
+      const verdict = problems.length ? `\nunhealthy: ${problems.join("; ")}` : "\nhealthy";
       const missing = value.missingTools.length ? `\nmissing: ${value.missingTools.join(", ")}` : "";
       return {
         value,
-        text: `${gib(value.free)} free, schedule ${schedule}, ${trash.length} transactions in trash, ${holds.length} holds${last}${missing}\nnext: ${value.next}`,
+        text: `${gib(value.free)} free, schedule ${schedule}, ${trash.length} transactions in trash, ${holds.length} holds${last}${verdict}${missing}\nnext: ${value.next}`,
       };
     }
     case "auto": {

@@ -1,0 +1,22 @@
+#!/bin/sh
+# Drives the keeper wizard in a private tmux server, so the patrol can press keys and read frames.
+#   tui start [cols] [rows]   open the wizard in a fresh terminal (default 100x30)
+#   tui keys KEY...           press keys, by tmux name: j k space a b t q Enter Escape Down Up
+#   tui show                  print the current frame, with colours as ANSI escapes
+#   tui text                  print the current frame as plain text
+#   tui resize COLS ROWS      change the terminal size
+#   tui stop                  close the wizard
+t="tmux -L keeper-patrol"
+here=$(cd "$(dirname "$0")" && pwd)
+case "$1" in
+  start)
+    $t kill-server 2>/dev/null
+    $t new-session -d -s w -x "${2:-100}" -y "${3:-30}" "$here/keeper; sleep 600"
+    sleep 1.5 && $t capture-pane -p -e -t w ;;
+  keys) shift; $t send-keys -t w "$@"; sleep 0.6; $t capture-pane -p -e -t w ;;
+  show) $t capture-pane -p -e -t w ;;
+  text) $t capture-pane -p -t w ;;
+  resize) $t resize-window -t w -x "$2" -y "$3"; sleep 0.5; $t capture-pane -p -e -t w ;;
+  stop) $t kill-server 2>/dev/null; echo stopped ;;
+  *) sed -n '2,9p' "$0"; exit 2 ;;
+esac

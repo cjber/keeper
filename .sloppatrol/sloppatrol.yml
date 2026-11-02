@@ -1,0 +1,36 @@
+# Sloppatrol: https://github.com/agent-labs-dev/sloppatrol
+# Commit this file and instructions.md. runs/ is local data.
+version: 1
+project: { name: keeper }
+# The agent every role runs on. auto: the first of claude, codex, opencode on PATH.
+# Or a model on an API key: { runtime: model, via: anthropic, model: claude-opus-5-5 }
+agent: auto
+# Runs in each fresh checkout and worktree, before the checks.
+prepare:
+  - bun install --frozen-lockfile
+# The oracle: these must pass on main before any work, and on every refactor.
+# The stronger your tests, the bolder Sloppatrol can be.
+checks:
+  - name: lint
+    run: bunx biome ci .
+  - name: typecheck
+    run: bunx tsc --noEmit
+  - name: test
+    run: bun test
+    tests: true
+# Files no agent may change (generated, vendored, migrations).
+ignore: []
+# Test files that none of the checks above runs (an e2e tier, for example).
+uncheckedTests: []
+guards:
+  maxFiles: 12
+  maxLines: 600
+# A role can run on another agent with `use:`, e.g. reviewer: { use: codex }.
+agents:
+  surveyor: { maxPerSurvey: 8 }
+  refactorer: { maxPerCycle: 1, maxAttempts: 2 }
+  reviewer: { enabled: true }
+# Quality metrics an assessor scores blind; each refactor must raise its target metric.
+metrics: { enabled: true, panel: 100, tolerance: 0.5, judges: 3 }
+github: { enabled: false, maxOpen: 3 }
+patrol: { intervalMinutes: 60, pull: origin/main }

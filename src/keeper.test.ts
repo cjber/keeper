@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { dangerous, runCli, schema } from "./cli";
+import { dangerous, health, runCli, schema } from "./cli";
 import { freshen } from "./freshen";
 import { BusyError, withLock, writeLedger } from "./ledger";
 import { applyPlan, context, createPlan, loadConfig, purge, undo } from "./ops";
@@ -611,4 +611,20 @@ test("docker: dangling images and build cache are prunable, unused volumes are o
   expect(findings[2]).toMatchObject({ title: "2 unused docker volumes", bytes: 3e9 });
   expect(findings[2]?.reason).toContain("app-wt1, app-wt2");
   expect(dockerFindings({ Images: null, Volumes: null }, 0)).toEqual([]);
+});
+
+test("health names each reason the nightly runs cannot be trusted, and nothing when they can", () => {
+  const now = Date.parse("2026-11-10T12:00:00Z");
+  const run = { at: "2026-11-10T00:30:00Z", summary: "ok" };
+  expect(health("systemd", run, "success", now)).toEqual([]);
+  expect(health("none", run, undefined, now)).toEqual(["no schedule, so nothing runs nightly"]);
+  expect(health("systemd", undefined, undefined, now)).toEqual(["no nightly run recorded yet"]);
+  expect(health("systemd", { ...run, at: "2026-11-08T00:30:00Z" }, "success", now)).toEqual([
+    "the last nightly run was 59 hours ago",
+  ]);
+  expect(health("systemd", { ...run, incomplete: true, warnings: ["docker: down"] }, "exit-code", now)).toEqual([
+    "the last nightly run ended in exit-code",
+    "the last nightly run could not apply or purge everything",
+    "the last nightly scan warned: docker: down",
+  ]);
 });

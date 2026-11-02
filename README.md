@@ -114,7 +114,7 @@ pull request, a rebase, merge, bisect or cherry-pick in progress, and any hold.
 | Command | What it does |
 | --- | --- |
 | `keeper` | Opens the wizard (terminal only) |
-| `keeper status` | Free space, schedule, last run, holds, trash and missing tools |
+| `keeper status` | Free space, schedule, last run and whether the nightly runs are healthy, holds, trash and missing tools |
 | `keeper scan` | Lists findings and their blockers |
 | `keeper plan` | Saves a plan of eligible findings. Add `--max-risk medium` once medium risk is approved |
 | `keeper apply PLAN --yes` | Rescans, then applies what is unchanged |

@@ -26,6 +26,7 @@ First release.
   palette, opens on the previous scan, and shows each category's progress while a fresh one runs.
 - **Light on a busy machine.** Scans run a few processes at a time and walk large directories outside the process, so
   the wizard stays responsive under heavy load.
-- **Runs nightly** with `keeper timer install`, applying only low-risk findings.
+- **Runs nightly** with `keeper timer install`, applying only low-risk findings. A failed run raises a desktop
+  notification, and `keeper status` says whether the nightly runs are healthy and, if not, why.
 - **Install from the AUR, npm or as an agent skill**: `paru -S keeper-bin`, `npm i -g @cillianb/keeper`, or
   `npx skills add cjber/keeper`.

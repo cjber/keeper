@@ -305,9 +305,8 @@ async function inspectWorktree(
     paths: [path],
     packages: [],
     bytes,
-    reason: proof
-      ? `${proof}, and nothing is uncommitted`
-      : "Worktree with every commit on a remote and nothing uncommitted",
+    // The reason states the proof alone; uncommitted files and the like are blockers, so the two never contradict.
+    reason: proof || "No merged pull request or default branch holds its commits",
     blockers,
     gitDir: commonDir || undefined,
     branch: branch && branch !== "HEAD" ? branch : undefined,
@@ -707,8 +706,8 @@ async function scanDocker(context: Context): Promise<Finding[]> {
 
 async function readDocker(): Promise<[DockerUsage, number] | undefined> {
   const df = await run(["docker", "system", "df", "-v", "--format", "{{json .}}"]);
-  // No docker, or a daemon this user cannot reach, means there is nothing of theirs to judge.
-  if (df.code !== 0) return undefined;
+  // No docker, a daemon this user cannot reach, or a shim that prints nothing means there is nothing to judge.
+  if (df.code !== 0 || !df.stdout) return undefined;
   const summary = await run(["docker", "system", "df", "--format", "{{json .}}"]);
   const build = summary.stdout
     .split("\n")

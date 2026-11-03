@@ -169,7 +169,7 @@ export function schema() {
     risks,
     version: packageJson.version,
     finding:
-      "id, category, risk, action, title, paths, packages, bytes, reason, blockers, explicit; worktrees add gitDir, branch and head; load findings add cpu and pids",
+      "id, category, risk, action, title, paths, packages, bytes, reason, blockers, explicit; worktrees add gitDir, branch and head; load findings add cpu and pids; tmp findings add inodes",
     explicit:
       "true means a person has to name the finding's id in `keeper plan`. A plan with no ids never takes it, whatever --max-risk says",
     bytes: "uncompressed size, so a compressing filesystem frees less. Only purge's freed field is measured",

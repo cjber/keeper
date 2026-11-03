@@ -24,6 +24,7 @@ import {
   type ProcessInfo,
   type PullRequest,
   scan,
+  tmpPatterns,
   worktreeDirs,
 } from "./scanners";
 import { defaultPaths, holders, niceness, run, waitFor } from "./system";
@@ -76,6 +77,8 @@ beforeEach(() => {
     docker: async () => undefined,
   };
   ctx.paths.state = join(home, "state");
+  ctx.paths.tmp = join(home, "tmp");
+  mkdirSync(ctx.paths.tmp);
 });
 
 afterEach(() => rmSync(home, { recursive: true, force: true }));
@@ -175,6 +178,77 @@ test("a claimed path becomes a finding once stale", async () => {
   age(scratch);
   writeLedger(ctx.paths, { holds: [], claims: [{ path: scratch, actor: "a", at: "now" }] });
   expect((await scan(ctx, ["agent"])).findings.map((finding) => finding.paths[0])).toContain(scratch);
+});
+
+test("temp names group by the pattern their random part leaves", () => {
+  const groups = tmpPatterns([
+    "nebula-test-home-dyqgGU",
+    "nebula-test-home-wege2i",
+    "nebula-test-home-qwerty",
+    "uv-0f3e9a2b44.lock",
+    "uv-77137c8075.lock",
+    "tmpk3j9xabq",
+    "tmp_o_zfjwe",
+    "com.google.Chrome.yeY6kp",
+    "com.google.Chrome.sEpbEr",
+    "opencode",
+    "fastbrowse-641-evidence",
+  ]);
+  expect(Object.fromEntries([...groups].map(([pattern, names]) => [pattern, names.length]))).toEqual({
+    "nebula-test-home-*": 3,
+    "uv-*.lock": 2,
+    "tmp*": 2,
+    "com.google.Chrome.*": 2,
+    "*": 2,
+  });
+});
+
+test("stale temp entries are one row that apply moves to trash and undo restores, leaving fresh, open and held ones", async () => {
+  const tmp = ctx.paths.tmp;
+  const leaked = ["leak-a1B2c3", "leak-Zz9yy8", "leak-qwerty"].map((name) => join(tmp, name)).sort();
+  for (const dir of leaked) {
+    mkdirSync(dir);
+    writeFileSync(join(dir, "f"), "x");
+    age(join(dir, "f"));
+    age(dir);
+  }
+  const fresh = join(tmp, "leak-Fr3sh0");
+  mkdirSync(fresh);
+  const writing = join(tmp, "leak-Wr1te0");
+  mkdirSync(writing);
+  writeFileSync(join(writing, "now"), "x");
+  age(writing);
+  const open = join(tmp, "leak-0pen00");
+  mkdirSync(open);
+  age(open);
+  const held = join(tmp, "leak-He1d00");
+  mkdirSync(held);
+  age(held);
+  const locked = join(tmp, "leak-L0cked");
+  mkdirSync(join(locked, "sub"), { recursive: true });
+  age(join(locked, "sub"));
+  age(locked);
+  chmodSync(join(locked, "sub"), 0);
+  writeLedger(ctx.paths, {
+    holds: [{ path: held, until: "2099-01-01T00:00:00Z", reason: "r", actor: "a" }],
+    claims: [],
+  });
+  const live = { ...ctx, live: [join(open, "socket")] };
+  const { findings } = await scan(live, ["tmp"]);
+  const ready = findings.filter(eligible);
+  expect(ready.map((finding) => [finding.title, finding.paths, finding.inodes])).toEqual([
+    [`${tmp}/leak-* (3 entries)`, leaked, 6],
+  ]);
+  expect(findings.find((finding) => !eligible(finding))?.paths).toEqual([open, fresh, locked, writing].sort());
+  expect(findings.flatMap((finding) => finding.paths)).not.toContain(held);
+
+  // Applied a minute later, as a person would, so the id must not depend on the clock.
+  const applied = await applyPlan(createPlan(ctx.paths, ready, 7), { ...live, now: live.now + 60_000 });
+  chmodSync(join(locked, "sub"), 0o755);
+  expect(applied.applied).toHaveLength(1);
+  expect(leaked.filter((dir) => existsSync(dir))).toEqual([]);
+  await undo(ctx.paths, applied.transaction as string);
+  expect(leaked.map((dir) => readFileSync(join(dir, "f"), "utf8"))).toEqual(["x", "x", "x"]);
 });
 
 test("claims refuse home, its parents and repositories", async () => {

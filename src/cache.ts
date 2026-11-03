@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { type Context, scan, withHolds } from "./scanners";
 import type { Paths } from "./system";
 import { type Category, categories, type Finding, type Scan, schemaVersion } from "./types";
@@ -19,6 +19,7 @@ export const maxAge: Record<Category, number> = {
   build: 60,
   agent: 60,
   transcripts: 60,
+  tmp: 60,
   logs: 60,
   docker: 60,
   downloads: 60,
@@ -89,7 +90,12 @@ export function forget(paths: Paths, changed: readonly Category[] = categories):
 export function forgetUnder(paths: Paths, moved: readonly string[]): void {
   const cache = read(paths);
   if (!cache || !moved.length) return;
-  const gone = (path: string) => moved.some((root) => path === root || path.startsWith(`${root}/`));
+  // A set and a walk up each path, because a temp dir sweep moves tens of thousands of roots.
+  const roots = new Set(moved);
+  const gone = (path: string) => {
+    for (let at = path; at !== dirname(at); at = dirname(at)) if (roots.has(at)) return true;
+    return false;
+  };
   for (const entry of Object.values(cache.entries)) {
     if (entry) entry.findings = entry.findings.filter((finding) => !finding.paths.length || !finding.paths.every(gone));
   }

@@ -30,6 +30,8 @@ Protect work and declare scratch as you go, because this is how keeper knows int
 - Set `KEEPER_ACTOR` to your session name so `keeper log` shows who did what.
 - Exit code 6 means another run holds the lock, so wait and retry.
 
+When commands fail with `EDQUOT` or "No space left" on `/tmp`, run `keeper scan --category tmp`. On a tmpfs the inode count is often what ran out, so read each finding's `inodes` as well as `bytes`. One finding can hold thousands of paths that share a name pattern; plan it by id like any other.
+
 Unused Docker volumes are a `report` finding because they can hold database data and removing one cannot be undone. List their Compose projects for the user, and run `docker volume rm` only on the volumes they name.
 
 Each blocker ends in its next step, such as pushing commits, closing a PR or waiting out the age window. Relay it to the user; pushing, closing or discarding work needs their approval like any other change. Never remove a blocked path by hand.

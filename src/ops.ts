@@ -118,8 +118,12 @@ export interface Outcome {
   transaction?: string;
 }
 
-/** Paths per `mv`. A temp dir sweep moves tens of thousands, and one process per path takes minutes. */
+/**
+ * Paths per `mv`, and their argv bytes, well under ARG_MAX. A temp dir sweep moves tens of thousands, and one process
+ * per path takes minutes.
+ */
 const moveBatch = 1000;
+const moveBatchBytes = 128 * 1024;
 
 type Move = [from: string, to: string];
 
@@ -133,13 +137,21 @@ async function moveAll(moves: readonly Move[]): Promise<{ moved: Move[]; error?:
   for (const move of moves) {
     const [from, to] = move;
     const key = basename(from) === basename(to) ? `${dirname(from)}\0${dirname(to)}` : `${from}\0${to}`;
-    batches.set(key, [...(batches.get(key) ?? []), move]);
+    const batch = batches.get(key);
+    if (batch) batch.push(move);
+    else batches.set(key, [move]);
   }
   const moved: Move[] = [];
   let error: string | undefined;
   for (const batch of batches.values()) {
-    for (let start = 0; start < batch.length; start += moveBatch) {
-      const chunk = batch.slice(start, start + moveBatch);
+    for (let start = 0; start < batch.length; ) {
+      let end = start + 1;
+      for (let bytes = 0; end < batch.length && end - start < moveBatch; end++) {
+        bytes += (batch[end] as Move)[0].length + 1;
+        if (bytes > moveBatchBytes) break;
+      }
+      const chunk = batch.slice(start, end);
+      start = end;
       const [from, to] = chunk[0] as Move;
       mkdirSync(dirname(to), { recursive: true });
       const argv =
@@ -281,7 +293,8 @@ async function applyUnlocked(plan: Plan, ctx: Context): Promise<Outcome> {
     ctx.paths,
     tx.entries.map((entry) => entry.original),
   );
-  if (outcome.applied.length === 0) rmSync(base, { recursive: true, force: true });
+  // A finding that failed partway still moved paths, and the transaction is the only way back to them.
+  if (outcome.applied.length === 0 && tx.entries.length === 0) rmSync(base, { recursive: true, force: true });
   else outcome.transaction = id;
   return outcome;
 }

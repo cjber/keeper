@@ -572,15 +572,20 @@ interface TmpEntry {
   path: string;
   bytes: number;
   inodes: number;
-  /** Newest mtime anywhere inside, in days, so a directory still being written is never stale. */
-  age: number;
+  /** Newest mtime anywhere inside, in seconds, so a directory still being written is never stale. */
+  mtime: number;
+}
+
+/** The paths in an error such as `du: cannot read directory '/tmp/x': Permission denied`. */
+function quotedPaths(stderr: string): string[] {
+  return [...stderr.matchAll(/'(\/[^\n]*?)': /g)].map((match) => match[1] as string);
 }
 
 /**
  * Size, newest mtime and inode count of every entry `depth` levels below `root`, from two `du` walks rather than a stat
  * per file: a temp dir can hold a million inodes. Lines end in NUL, so no file name can split one.
  */
-async function tmpUsage(root: string, depth: number, now: number): Promise<TmpEntry[]> {
+async function tmpUsage(root: string, depth: number): Promise<{ entries: TmpEntry[]; unreadable: string[] }> {
   const du = ["du", "-0", "-x", "-a", "-d", String(depth)];
   const [sized, counted] = await Promise.all([
     run([...du, "-b", "--time", "--time-style=+%s", root]),
@@ -598,31 +603,32 @@ async function tmpUsage(root: string, depth: number, now: number): Promise<TmpEn
       return [path, Number(count)];
     }),
   );
-  return counted.stdout && sized.stdout
-    ? sized.stdout.split("\0").flatMap((line) => {
-        const [bytes, time, path = ""] = fields(line, 3);
-        if (!atDepth(path)) return [];
-        const age = (now - Number(time) * 1000) / 86_400_000;
-        return [{ path, bytes: Number(bytes), inodes: inodes.get(path) ?? 1, age }];
-      })
-    : [];
+  const entries = sized.stdout.split("\0").flatMap((line) => {
+    const [bytes, mtime, path = ""] = fields(line, 3);
+    return atDepth(path) ? [{ path, bytes: Number(bytes), inodes: inodes.get(path) ?? 1, mtime: Number(mtime) }] : [];
+  });
+  return { entries, unreadable: quotedPaths(`${sized.stderr}\n${counted.stderr}`) };
 }
 
-/** Names `depth` levels below `root` that the current user owns. Another user's temp files are never ours to judge. */
-async function ownedNames(root: string, depth: number, uid: number): Promise<Set<string>> {
+/**
+ * Paths under `root` that another user owns, without descending into them, plus any the walk could not read. An entry
+ * that is one is not ours to judge, and one that holds one could not be moved whole, so neither is offered.
+ */
+async function tmpForeign(root: string, uid: number): Promise<string[]> {
   const found = await run([
     "find",
     root,
+    "-xdev",
     "-mindepth",
-    String(depth),
-    "-maxdepth",
-    String(depth),
+    "1",
+    "!",
     "-uid",
     String(uid),
     "-printf",
-    "%P\\0",
+    "%p\\0",
+    "-prune",
   ]);
-  return new Set(found.stdout.split("\0").filter(Boolean));
+  return [...found.stdout.split("\0").filter(Boolean), ...quotedPaths(found.stderr)];
 }
 
 /**
@@ -671,8 +677,11 @@ function strictPattern(name: string): string {
  * shares goes in `*` with the other one-offs, so a temp dir of scattered logs is one row rather than hundreds.
  */
 export function tmpPatterns(names: readonly string[]): Map<string, string[]> {
-  const add = (groups: Map<string, string[]>, key: string, name: string) =>
-    groups.set(key, [...(groups.get(key) ?? []), name]);
+  const add = (groups: Map<string, string[]>, key: string, name: string) => {
+    const members = groups.get(key);
+    if (members) members.push(name);
+    else groups.set(key, [name]);
+  };
   const strict = new Map<string, string[]>();
   for (const name of names) add(strict, strictPattern(name), name);
   const loose = new Map<string, string[]>();
@@ -687,7 +696,7 @@ export function tmpPatterns(names: readonly string[]): Map<string, string[]> {
 }
 
 function tmpFinding(title: string, members: readonly TmpEntry[], blockers: string[]): Finding {
-  const state = members.map((entry) => `${entry.path}\0${entry.bytes}\0${Math.floor(entry.age * 86_400)}`).join("\0");
+  const state = members.map((entry) => `${entry.path}\0${entry.bytes}\0${entry.mtime}`).join("\0");
   const inodes = members.reduce((sum, entry) => sum + entry.inodes, 0);
   return {
     id: findingId("tmp", title, state),
@@ -712,20 +721,31 @@ async function scanTmp(context: Context): Promise<Finding[]> {
   const root = context.paths.tmp;
   const uid = process.getuid?.() ?? -1;
   const claude = join(root, `claude-${uid}`);
-  const [top, sessions, owned, ownedSessions] = await Promise.all([
-    tmpUsage(root, 1, context.now),
-    isDirectory(claude) ? tmpUsage(claude, 2, context.now) : [],
-    ownedNames(root, 1, uid),
-    isDirectory(claude) ? ownedNames(claude, 2, uid) : new Set<string>(),
+  const home = context.paths.home;
+  if (root === "/" || root === home || home.startsWith(`${root}/`) || existsSync(join(root, ".git")))
+    throw new Error(`${root} holds home or a repository, so it is not scanned as the temp dir. Point TMPDIR at one`);
+  const [top, sessions, foreign] = await Promise.all([
+    tmpUsage(root, 1),
+    isDirectory(claude) ? tmpUsage(claude, 2) : { entries: [], unreadable: [] },
+    tmpForeign(root, uid),
   ]);
   const ledger = readLedger(context.paths);
   const holds = ledger.holds.filter((hold) => Date.parse(hold.until) > context.now).map((hold) => hold.path);
-  const kept = [...ledger.claims.map((claim) => claim.path), context.paths.state, context.paths.trash, ...holds];
-  const entries = [
-    ...top.filter((entry) => entry.path !== claude && owned.has(basename(entry.path))),
-    ...sessions.filter((entry) => ownedSessions.has(entry.path.slice(claude.length + 1))),
-  ]
-    .filter((entry) => !kept.some((path) => overlaps(path, entry.path)))
+  const kept = [
+    ...ledger.claims.map((claim) => claim.path),
+    ...holds,
+    context.paths.state,
+    context.paths.trash,
+    ...context.paths.worktrees,
+    ...context.paths.aurClones,
+  ];
+  const others = new Set(foreign);
+  const ours = (path: string) => {
+    for (let at = path; at.startsWith(`${root}/`); at = dirname(at)) if (others.has(at)) return false;
+    return true;
+  };
+  const entries = [...top.entries.filter((entry) => entry.path !== claude), ...sessions.entries]
+    .filter((entry) => ours(entry.path) && !kept.some((path) => overlaps(path, entry.path)))
     .sort((a, b) => (a.path < b.path ? -1 : 1));
   // Keyed by entry, so a million open files cost one pass rather than one per entry.
   const keyOf = (path: string) => {
@@ -737,15 +757,18 @@ async function scanTmp(context: Context): Promise<Finding[]> {
   const references = tmpReferences();
   const busy = under(context.live);
   const listening = under(references.sockets);
+  const mixed = under([...foreign, ...top.unreadable, ...sessions.unreadable]);
+  const age = (entry: TmpEntry) => (context.now - entry.mtime * 1000) / 86_400_000;
   const window = Math.min(context.staleDays, tmpStaleDays);
   const recent = `touched less than ${count(window, "day")} ago, offered once idle that long`;
   const blockersOf = (entry: TmpEntry, grouped: boolean) => [
     ...(busy.has(entry.path) ? [inUse] : []),
     ...(listening.has(entry.path) ? [tmpSocket] : []),
+    ...(mixed.has(entry.path) ? ["holds files another user owns or keeper cannot read, so it cannot move whole"] : []),
     ...(references.sessions.has(basename(entry.path)) && entry.path.startsWith(`${claude}/`)
       ? ["its Claude Code session is still running, offered once it exits"]
       : []),
-    ...(entry.age < window ? [grouped ? recent : touchedAgo(entry.age, window)] : []),
+    ...(age(entry) < window ? [grouped ? recent : touchedAgo(age(entry), window)] : []),
   ];
   const small = entries.filter((entry) => entry.bytes < tmpOwnRowBytes);
   const loose = small.filter((entry) => !entry.path.startsWith(`${claude}/`));

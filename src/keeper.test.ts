@@ -224,6 +224,11 @@ test("stale temp entries are one row that apply moves to trash and undo restores
   const held = join(tmp, "leak-He1d00");
   mkdirSync(held);
   age(held);
+  const locked = join(tmp, "leak-L0cked");
+  mkdirSync(join(locked, "sub"), { recursive: true });
+  age(join(locked, "sub"));
+  age(locked);
+  chmodSync(join(locked, "sub"), 0);
   writeLedger(ctx.paths, {
     holds: [{ path: held, until: "2099-01-01T00:00:00Z", reason: "r", actor: "a" }],
     claims: [],
@@ -234,10 +239,12 @@ test("stale temp entries are one row that apply moves to trash and undo restores
   expect(ready.map((finding) => [finding.title, finding.paths, finding.inodes])).toEqual([
     [`${tmp}/leak-* (3 entries)`, leaked, 6],
   ]);
-  expect(findings.find((finding) => !eligible(finding))?.paths).toEqual([open, fresh, writing].sort());
+  expect(findings.find((finding) => !eligible(finding))?.paths).toEqual([open, fresh, locked, writing].sort());
   expect(findings.flatMap((finding) => finding.paths)).not.toContain(held);
 
-  const applied = await applyPlan(createPlan(ctx.paths, ready, 7), live);
+  // Applied a minute later, as a person would, so the id must not depend on the clock.
+  const applied = await applyPlan(createPlan(ctx.paths, ready, 7), { ...live, now: live.now + 60_000 });
+  chmodSync(join(locked, "sub"), 0o755);
   expect(applied.applied).toHaveLength(1);
   expect(leaked.filter((dir) => existsSync(dir))).toEqual([]);
   await undo(ctx.paths, applied.transaction as string);

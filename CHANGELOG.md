@@ -7,6 +7,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+- **Finds what tests and agents leave in the temp dir.** The new `tmp` category offers your entries in `$TMPDIR` or
+  `/tmp` once nothing in them has changed for a day and no process has a file, working directory or listening socket
+  there. Claude Code's temp dir is judged per session, and a session that is still running is left alone. Each finding
+  reports `inodes` as well as bytes, because a tmpfs quota often runs out of inodes first, and thousands of leaked
+  `mkdtemp` directories are one finding per name pattern. `keeper auto` applies it, since it is low risk.
+- **Large plans move faster.** Apply and undo move paths in batches, so a finding with thousands of paths takes seconds
+  rather than minutes.
+
 ## [0.2.1] - 2026-11-02
 
 - **AUR publishes before npm.** The release workflow renders and pushes the AUR packages before it publishes to npm, so

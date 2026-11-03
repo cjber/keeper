@@ -169,6 +169,7 @@ footer { margin-top: 72px; color: var(--muted); font-size: 13px; text-align: cen
   <li><strong><code>agent</code></strong><span>Output in configured roots, and paths agents claimed as scratch. Low.</span></li>
   <li><strong><code>build</code></strong><span>Git-ignored <code>target</code>, <code>node_modules</code>, <code>.next</code>, <code>.turbo</code> and <code>.venv</code> with no file written for 3 days. Low.</span></li>
   <li><strong><code>transcripts</code></strong><span>Claude Code and Codex transcripts over 14 days old. Low.</span></li>
+  <li><strong><code>tmp</code></strong><span>Your temp dir entries untouched for a day, with nothing open in them, grouped by name and counted in inodes. Low.</span></li>
   <li><strong><code>package-cache</code></strong><span>Unreferenced uv and pnpm entries, and npm and bun caches over 2G. Low.</span></li>
   <li><strong><code>docker</code></strong><span>Dangling images and build cache unused for 7 days. Unused volumes are reported only. Low, volumes report only.</span></li>
   <li><strong><code>logs</code></strong><span>Configured logs over 50M, cut to their last 5M. Low.</span></li>

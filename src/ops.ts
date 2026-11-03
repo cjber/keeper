@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { forget, forgetUnder } from "./cache";
 import { audit, withLock } from "./ledger";
 import type { Config, Context } from "./scanners";
@@ -17,6 +17,7 @@ import {
 import { defaultPaths, expandHome, liveFiles, niceness, type Paths, run, waitFor } from "./system";
 import {
   bulkEligible,
+  count,
   eligible,
   type Finding,
   outermost,
@@ -117,10 +118,42 @@ export interface Outcome {
   transaction?: string;
 }
 
-/** `mv` rather than rename, because a configured root may sit on a different filesystem from the trash. */
-async function move(from: string, to: string): Promise<void> {
-  const result = await run(["mv", "--no-target-directory", "--", from, to]);
-  if (result.code !== 0) throw new Error(result.stderr || `mv exited ${result.code}`);
+/** Paths per `mv`. A temp dir sweep moves tens of thousands, and one process per path takes minutes. */
+const moveBatch = 1000;
+
+type Move = [from: string, to: string];
+
+/**
+ * `mv` rather than rename, because a configured root or the temp dir may sit on a different filesystem from the trash.
+ * Moves that keep their name and share both parents go in batches. Returns the moves that happened and the first error,
+ * so a batch that failed partway still records what it took. `--no-clobber` keeps a path that appeared meanwhile.
+ */
+async function moveAll(moves: readonly Move[]): Promise<{ moved: Move[]; error?: string }> {
+  const batches = new Map<string, Move[]>();
+  for (const move of moves) {
+    const [from, to] = move;
+    const key = basename(from) === basename(to) ? `${dirname(from)}\0${dirname(to)}` : `${from}\0${to}`;
+    batches.set(key, [...(batches.get(key) ?? []), move]);
+  }
+  const moved: Move[] = [];
+  let error: string | undefined;
+  for (const batch of batches.values()) {
+    for (let start = 0; start < batch.length; start += moveBatch) {
+      const chunk = batch.slice(start, start + moveBatch);
+      const [from, to] = chunk[0] as Move;
+      mkdirSync(dirname(to), { recursive: true });
+      const argv =
+        basename(from) === basename(to)
+          ? ["mv", "--no-clobber", "--target-directory", dirname(to), "--", ...chunk.map(([source]) => source)]
+          : ["mv", "--no-clobber", "--no-target-directory", "--", from, to];
+      const result = await run(argv);
+      const done = chunk.filter(([source, target]) => existsSync(target) && !existsSync(source));
+      moved.push(...done);
+      if (done.length < chunk.length)
+        error ??= result.stderr || `${count(chunk.length - done.length, "path")} did not move`;
+    }
+  }
+  return { moved, error };
 }
 
 /** Transcripts leave one directory per session behind. rmdir only ever removes an empty directory. */
@@ -134,7 +167,8 @@ function removeEmptyParents(path: string, home: string): void {
   }
 }
 
-async function execute(finding: Finding, paths: Paths, tx: Transaction, base: string): Promise<void> {
+/** `slot` is the finding's own directory in the transaction, so names from different findings never meet. */
+async function execute(finding: Finding, paths: Paths, tx: Transaction, slot: string): Promise<void> {
   if (finding.action === "renice") {
     let changed = 0;
     for (const pid of finding.pids ?? []) {
@@ -148,16 +182,25 @@ async function execute(finding: Finding, paths: Paths, tx: Transaction, base: st
     return;
   }
   if (finding.action === "trash") {
-    for (const original of finding.paths) {
-      // A worktree and its own build output can share a plan, so the parent's move may have taken this path.
-      if (!existsSync(original)) continue;
-      const trashed = join(base, String(tx.entries.length));
-      await move(original, trashed);
-      const { gitDir, branch, head } = finding;
-      const bytes = finding.paths.length === 1 ? finding.bytes : 0;
+    // Names repeat across a finding's parents, so each repeat goes in a slot of its own.
+    const seen = new Map<string, number>();
+    // A worktree and its own build output can share a plan, so the parent's move may have taken a path.
+    const pairs = finding.paths
+      .filter((path) => existsSync(path))
+      .map((original) => {
+        const name = basename(original);
+        const repeat = seen.get(name) ?? 0;
+        seen.set(name, repeat + 1);
+        return [original, join(repeat ? `${slot}.${repeat}` : slot, name)] satisfies Move;
+      });
+    const { moved, error } = await moveAll(pairs);
+    const { gitDir, branch, head } = finding;
+    const bytes = finding.paths.length === 1 ? finding.bytes : 0;
+    for (const [original, trashed] of moved) {
       tx.entries.push({ original, trashed, bytes, gitDir, branch, head });
       if (finding.category === "transcripts") removeEmptyParents(original, paths.home);
     }
+    if (error) throw new Error(error);
     return;
   }
   if (finding.action === "truncate") {
@@ -217,7 +260,7 @@ async function applyUnlocked(plan: Plan, ctx: Context): Promise<Outcome> {
     removedPackages: [],
     reniced: [],
   };
-  for (const findingId of plan.findingIds) {
+  for (const [index, findingId] of plan.findingIds.entries()) {
     const finding = current.get(findingId);
     if (!finding || !eligible(finding)) {
       outcome.stale.push(findingId);
@@ -225,7 +268,7 @@ async function applyUnlocked(plan: Plan, ctx: Context): Promise<Outcome> {
     }
     const reniced = tx.reniced.length;
     try {
-      await execute(finding, ctx.paths, tx, base);
+      await execute(finding, ctx.paths, tx, join(base, String(index)));
       outcome.applied.push(findingId);
       outcome.bytes += finding.bytes;
       outcome.reniced += tx.reniced.length - reniced;
@@ -288,12 +331,9 @@ async function undoUnlocked(paths: Paths, id: string): Promise<Undone> {
   const pending = tx.entries.filter((entry) => existsSync(entry.trashed));
   const taken = pending.filter((entry) => existsSync(entry.original)).map((entry) => entry.original);
   if (taken.length) throw new Error(`nothing restored, these paths exist again: ${taken.join(", ")}`);
-  const restored: string[] = [];
-  for (const entry of pending) {
-    mkdirSync(dirname(entry.original), { recursive: true });
-    await move(entry.trashed, entry.original);
-    restored.push(entry.original);
-  }
+  const { moved, error } = await moveAll(pending.map((entry): Move => [entry.trashed, entry.original]));
+  const restored = moved.map(([, original]) => original);
+  if (error) throw new Error(`restored ${restored.length} of ${pending.length}, run undo again to finish: ${error}`);
   // A process that has since exited cannot be put back, and one at the bottom cannot be raised without root.
   let reniced = 0;
   const stuck: Reniced[] = [];

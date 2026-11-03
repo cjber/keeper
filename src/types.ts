@@ -8,6 +8,7 @@ export const categories = [
   "agent",
   "build",
   "transcripts",
+  "tmp",
   "package-cache",
   "docker",
   "snapshots",
@@ -67,6 +68,8 @@ export interface Finding {
   /** Branch and commit of a worktree, so purge deletes the local branch only if it has not moved. */
   branch?: string;
   head?: string;
+  /** Files and directories the paths hold. On a tmpfs with a quota this, not bytes, is often what runs out. */
+  inodes?: number;
   /** Percent of one core the finding's processes used during the sample. Absent for everything that is not `load`. */
   cpu?: number;
   /** Pids the finding judged, so `renice` can target the command without a second scan. */

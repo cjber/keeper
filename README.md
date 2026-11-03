@@ -88,6 +88,19 @@ Sizes in scans and plans are uncompressed. On btrfs with compression, removing a
 size, and worktree build output often stores in under a third of it. Trash sits on the same disk, so nothing is freed
 until `keeper purge`, which reports the measured change in free space as `freed`.
 
+The `tmp` category is the exception. Its entries usually live on a tmpfs, so applying it copies them into the trash on
+disk, which frees the tmpfs and its inodes at once and keeps undo working until purge. A temp dir often runs out of
+inodes before bytes, so each `tmp` finding also reports `inodes`. Thousands of entries that differ only in a random
+suffix, such as a test suite's `mkdtemp` leftovers, are one finding, named by their pattern.
+
+## Temp files
+
+`tmp` looks only at entries you own, directly in `$TMPDIR` (or `/tmp`), and in `claude-<uid>`, where Claude Code
+keeps one directory per session. An entry is offered once nothing inside it has changed for a day, and never while a
+process has a file or its working directory there, a process listens on a socket there, or, for a Claude Code session,
+a process of that session is still running. Entries over 100M are listed one by one; the rest are grouped by name, with
+a blocked row per group that counts what is waiting and why. Holds, claims and keeper's own state are never included.
+
 ## What it finds
 
 | Category | Finds | Risk |
@@ -99,6 +112,7 @@ until `keeper purge`, which reports the measured change in free space as `freed`
 | `agent` | Output in configured roots, and paths agents claimed as scratch | low |
 | `build` | Git-ignored `target`, `node_modules`, `.next`, `.turbo` and `.venv` with no file written for 3 days | low |
 | `transcripts` | Claude Code and Codex transcripts over 14 days old | low |
+| `tmp` | Your entries in `$TMPDIR` or `/tmp` untouched for a day, with nothing open or listening in them | low |
 | `package-cache` | Unreferenced uv and pnpm entries, and npm and bun caches over 2G | low |
 | `docker` | Dangling images and build cache unused for 7 days; unused volumes are reported only | low, volumes report only |
 | `logs` | Configured logs over 50M, cut to their last 5M | low |
@@ -152,7 +166,7 @@ useful, and `keeper scan --cached` or the wizard reuse them:
 | --- | --- |
 | Never, always scanned | `load`, `memory` |
 | 15 minutes | `worktree` |
-| 1 hour | `build`, `agent`, `transcripts`, `logs`, `docker`, `downloads`, `screenshots` |
+| 1 hour | `build`, `agent`, `transcripts`, `tmp`, `logs`, `docker`, `downloads`, `screenshots` |
 | 6 hours | `aur`, `pacman-cache`, `orphans`, `package-cache`, `snapshots`, `apps`, `large`, `duplicates` |
 
 Applying rescans the categories in its plan first, so a kept finding can never be what decides a removal, and applying,

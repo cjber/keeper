@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { createReadStream, existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, statSync } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
 import { availableParallelism, loadavg } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -15,6 +15,8 @@ export const defaultAppStaleDays = 90;
 export const defaultLargeBytes = 500 * 1024 ** 2;
 const staleBuildDays = 3;
 const transcriptDays = 14;
+/** Temp entries are disposable by definition and a test suite leaks thousands a day, so a day idle is enough. */
+const tmpStaleDays = 1;
 const logCapBytes = 50 * 1024 ** 2;
 export const logKeepBytes = 5 * 1024 ** 2;
 const buildDirs = /\/(target|node_modules|\.next|\.turbo|\.venv)$/;
@@ -559,6 +561,227 @@ async function scanAgent(context: Context): Promise<Finding[]> {
     } satisfies Finding;
   };
   return found(await Promise.all(roots.map((path) => unlessGone(path, () => inspect(path)))));
+}
+
+/** A temp entry this large gets a row of its own. Smaller ones are grouped by name, so a leaky test suite is one row. */
+const tmpOwnRowBytes = 100 * 1024 ** 2;
+/** A bound socket is how a server such as tmux keeps its temp dir in use without an open file there. */
+const tmpSocket = "holds a socket a running program listens on, offered once it exits";
+
+interface TmpEntry {
+  path: string;
+  bytes: number;
+  inodes: number;
+  /** Newest mtime anywhere inside, in days, so a directory still being written is never stale. */
+  age: number;
+}
+
+/**
+ * Size, newest mtime and inode count of every entry `depth` levels below `root`, from two `du` walks rather than a stat
+ * per file: a temp dir can hold a million inodes. Lines end in NUL, so no file name can split one.
+ */
+async function tmpUsage(root: string, depth: number, now: number): Promise<TmpEntry[]> {
+  const du = ["du", "-0", "-x", "-a", "-d", String(depth)];
+  const [sized, counted] = await Promise.all([
+    run([...du, "-b", "--time", "--time-style=+%s", root]),
+    run([...du, "--inodes", root]),
+  ]);
+  const fields = (line: string, n: number) => {
+    const parts = line.split("\t");
+    return [...parts.slice(0, n - 1), parts.slice(n - 1).join("\t")];
+  };
+  const atDepth = (path: string) =>
+    path.startsWith(`${root}/`) && path.slice(root.length + 1).split("/").length === depth;
+  const inodes = new Map(
+    counted.stdout.split("\0").map((line) => {
+      const [count, path] = fields(line, 2);
+      return [path, Number(count)];
+    }),
+  );
+  return counted.stdout && sized.stdout
+    ? sized.stdout.split("\0").flatMap((line) => {
+        const [bytes, time, path = ""] = fields(line, 3);
+        if (!atDepth(path)) return [];
+        const age = (now - Number(time) * 1000) / 86_400_000;
+        return [{ path, bytes: Number(bytes), inodes: inodes.get(path) ?? 1, age }];
+      })
+    : [];
+}
+
+/** Names `depth` levels below `root` that the current user owns. Another user's temp files are never ours to judge. */
+async function ownedNames(root: string, depth: number, uid: number): Promise<Set<string>> {
+  const found = await run([
+    "find",
+    root,
+    "-mindepth",
+    String(depth),
+    "-maxdepth",
+    String(depth),
+    "-uid",
+    String(uid),
+    "-printf",
+    "%P\\0",
+  ]);
+  return new Set(found.stdout.split("\0").filter(Boolean));
+}
+
+/**
+ * What running processes still point at in the temp dir beyond open files: Claude Code session ids, from the id it gives
+ * every child and any `--resume` argument, and bound unix sockets, read once per network namespace. A socket file
+ * outlives its listener, so only a bound one counts.
+ */
+function tmpReferences(): { sessions: Set<string>; sockets: Set<string> } {
+  const sessions = new Set<string>();
+  const sockets = new Set<string>();
+  const namespaces = new Set<string>();
+  for (const pid of readdirSync("/proc")) {
+    if (!/^\d+$/.test(pid)) continue;
+    try {
+      const text = `${readFileSync(`/proc/${pid}/environ`, "latin1")}\0${readFileSync(`/proc/${pid}/cmdline`, "latin1")}`;
+      for (const id of text.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g) ?? [])
+        sessions.add(id);
+      const namespace = readlinkSync(`/proc/${pid}/ns/net`);
+      if (namespaces.has(namespace)) continue;
+      namespaces.add(namespace);
+      for (const line of readFileSync(`/proc/${pid}/net/unix`, "utf8").split("\n")) {
+        const path = line.split(" ").at(-1) ?? "";
+        if (path.startsWith("/")) sockets.add(path);
+      }
+    } catch {}
+  }
+  return { sessions, sockets };
+}
+
+/**
+ * The random part of a temp name becomes `*`: `nebula-test-home-dyqgGU` is `nebula-test-home-*`, `uv-0f3e9a2b.lock` is
+ * `uv-*.lock` and Python's `tmpk3j9xabq` is `tmp*`. A word counts as random when it has a digit or mixed case.
+ */
+function strictPattern(name: string): string {
+  return name.replace(/[A-Za-z0-9_]+/g, (word) => {
+    if (/^\d+$/.test(word)) return "*";
+    const mixed = /[a-z]/.test(word) && /[A-Z]/.test(word) && !/^[A-Z][a-z]+$/.test(word);
+    if (word.length < 6 || !(/\d/.test(word) || mixed)) return word;
+    return `${/^(tmp|[a-z_]*[a-z](?=[A-Z0-9][A-Za-z0-9]{5}$))/.exec(word)?.[0] ?? ""}*`;
+  });
+}
+
+/**
+ * Groups temp names by pattern. A random suffix with no digit and one case, which one Python temp name in sixteen has,
+ * falls back to its separator, so it joins `nebula-test-home-*` when another name makes that group. A name no other
+ * shares goes in `*` with the other one-offs, so a temp dir of scattered logs is one row rather than hundreds.
+ */
+export function tmpPatterns(names: readonly string[]): Map<string, string[]> {
+  const add = (groups: Map<string, string[]>, key: string, name: string) =>
+    groups.set(key, [...(groups.get(key) ?? []), name]);
+  const strict = new Map<string, string[]>();
+  for (const name of names) add(strict, strictPattern(name), name);
+  const loose = new Map<string, string[]>();
+  for (const name of names) {
+    const key = strictPattern(name);
+    const fallback = name.replace(/(^\.?tmp|[-._])[A-Za-z0-9_]{6,10}$/, "$1*");
+    add(loose, key === name && strict.has(fallback) ? fallback : key, name);
+  }
+  const groups = new Map<string, string[]>();
+  for (const [key, members] of loose) for (const name of members) add(groups, members.length > 1 ? key : "*", name);
+  return groups;
+}
+
+function tmpFinding(title: string, members: readonly TmpEntry[], blockers: string[]): Finding {
+  const state = members.map((entry) => `${entry.path}\0${entry.bytes}\0${Math.floor(entry.age * 86_400)}`).join("\0");
+  const inodes = members.reduce((sum, entry) => sum + entry.inodes, 0);
+  return {
+    id: findingId("tmp", title, state),
+    category: "tmp",
+    risk: "low",
+    action: "trash",
+    title: members.length > 1 ? `${title} (${count(members.length, "entry", "entries")})` : title,
+    paths: members.map((entry) => entry.path),
+    packages: [],
+    bytes: members.reduce((sum, entry) => sum + entry.bytes, 0),
+    inodes,
+    reason: `${members.length > 1 ? "Temp entries you own, grouped by name" : "Temp entry you own"}, ${count(inodes, "inode")}`,
+    blockers,
+  };
+}
+
+/**
+ * Stale entries you own in the temp dir. On a tmpfs with a quota the inode count is often what runs out, which is why a
+ * finding carries it. Claude Code keeps one temp dir per session inside `claude-<uid>`, so those are judged per session.
+ */
+async function scanTmp(context: Context): Promise<Finding[]> {
+  const root = context.paths.tmp;
+  const uid = process.getuid?.() ?? -1;
+  const claude = join(root, `claude-${uid}`);
+  const [top, sessions, owned, ownedSessions] = await Promise.all([
+    tmpUsage(root, 1, context.now),
+    isDirectory(claude) ? tmpUsage(claude, 2, context.now) : [],
+    ownedNames(root, 1, uid),
+    isDirectory(claude) ? ownedNames(claude, 2, uid) : new Set<string>(),
+  ]);
+  const ledger = readLedger(context.paths);
+  const holds = ledger.holds.filter((hold) => Date.parse(hold.until) > context.now).map((hold) => hold.path);
+  const kept = [...ledger.claims.map((claim) => claim.path), context.paths.state, context.paths.trash, ...holds];
+  const entries = [
+    ...top.filter((entry) => entry.path !== claude && owned.has(basename(entry.path))),
+    ...sessions.filter((entry) => ownedSessions.has(entry.path.slice(claude.length + 1))),
+  ]
+    .filter((entry) => !kept.some((path) => overlaps(path, entry.path)))
+    .sort((a, b) => (a.path < b.path ? -1 : 1));
+  // Keyed by entry, so a million open files cost one pass rather than one per entry.
+  const keyOf = (path: string) => {
+    const parts = path.slice(root.length + 1).split("/");
+    return join(root, ...parts.slice(0, parts[0] === `claude-${uid}` ? 3 : 1));
+  };
+  const under = (paths: Iterable<string>) =>
+    new Set([...paths].filter((path) => path.startsWith(`${root}/`)).map(keyOf));
+  const references = tmpReferences();
+  const busy = under(context.live);
+  const listening = under(references.sockets);
+  const window = Math.min(context.staleDays, tmpStaleDays);
+  const recent = `touched less than ${count(window, "day")} ago, offered once idle that long`;
+  const blockersOf = (entry: TmpEntry, grouped: boolean) => [
+    ...(busy.has(entry.path) ? [inUse] : []),
+    ...(listening.has(entry.path) ? [tmpSocket] : []),
+    ...(references.sessions.has(basename(entry.path)) && entry.path.startsWith(`${claude}/`)
+      ? ["its Claude Code session is still running, offered once it exits"]
+      : []),
+    ...(entry.age < window ? [grouped ? recent : touchedAgo(entry.age, window)] : []),
+  ];
+  const small = entries.filter((entry) => entry.bytes < tmpOwnRowBytes);
+  const loose = small.filter((entry) => !entry.path.startsWith(`${claude}/`));
+  const byName = new Map(loose.map((entry) => [basename(entry.path), entry]));
+  const groups = [...tmpPatterns(loose.map((entry) => basename(entry.path)))].map(([pattern, names]) => ({
+    title: join(root, pattern),
+    members: names.map((name) => byName.get(name) as TmpEntry),
+  }));
+  const claudeSessions = small.filter((entry) => entry.path.startsWith(`${claude}/`));
+  if (claudeSessions.length) groups.push({ title: join(claude, "*/*"), members: claudeSessions });
+  // Each group is one row of members ready now and one blocked row that says how many wait and why.
+  const grouped = groups.flatMap(({ title, members }) => {
+    const ready: TmpEntry[] = [];
+    const waiting: TmpEntry[] = [];
+    const tally = new Map<string, number>();
+    for (const entry of members) {
+      const blockers = blockersOf(entry, true);
+      (blockers.length ? waiting : ready).push(entry);
+      for (const why of blockers) tally.set(why, (tally.get(why) ?? 0) + 1);
+    }
+    const row = (list: TmpEntry[], blockers: string[]) =>
+      list.length ? [tmpFinding(list.length > 1 ? title : (list[0] as TmpEntry).path, list, blockers)] : [];
+    return [
+      ...row(ready, []),
+      ...row(
+        waiting,
+        [...tally].map(([why, n]) => `${count(n, "entry", "entries")}: ${why}`),
+      ),
+    ];
+  });
+  return [
+    ...entries
+      .filter((entry) => entry.bytes >= tmpOwnRowBytes)
+      .map((entry) => tmpFinding(entry.path, [entry], blockersOf(entry, false))),
+    ...grouped,
+  ];
 }
 
 /** Newest of a directory and its direct entries, read async so a directory of thousands never stalls the wizard. */
@@ -1758,6 +1981,7 @@ const scanners: Record<Category, (context: Context) => Promise<Finding[]>> = {
   agent: scanAgent,
   build: scanBuild,
   transcripts: scanTranscripts,
+  tmp: scanTmp,
   "package-cache": scanPackageCaches,
   docker: scanDocker,
   snapshots: scanSnapshots,

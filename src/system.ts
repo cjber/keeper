@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, readlinkSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 export interface Result {
   code: number;
@@ -72,7 +72,7 @@ export function defaultPaths(home = homedir(), env: Record<string, string | unde
     aurClones: [join(home, ".cache/paru/clone"), join(home, ".cache/yay")],
     state: join(env.XDG_STATE_HOME ?? join(home, ".local/state"), "keeper"),
     trash: join(home, ".local/share/keeper/trash"),
-    tmp: env.TMPDIR || "/tmp",
+    tmp: resolve(env.TMPDIR || "/tmp"),
     config: join(env.XDG_CONFIG_HOME ?? join(home, ".config"), "keeper/config.toml"),
     units: join(env.XDG_CONFIG_HOME ?? join(home, ".config"), "systemd/user"),
   };

@@ -5,9 +5,20 @@ import { cachedScan, categoriesOf, forget, maxAge } from "./cache";
 import { freshen, primaryCheckouts } from "./freshen";
 import { readEvents, readSamples, sample } from "./history";
 import { actor, audit, BusyError, type Claim, type Hold, readAudit, readLedger, updateLedger } from "./ledger";
-import { applyPlan, bulkPlan, context, createPlan, freeBytes, purge, readPlan, transactions, undo } from "./ops";
+import {
+  applyPlan,
+  bulkPlan,
+  context,
+  createPlan,
+  freeBytes,
+  loadConfig,
+  purge,
+  readPlan,
+  transactions,
+  undo,
+} from "./ops";
 import { defaultAppStaleDays, defaultStaleDays } from "./scanners";
-import { defaultPaths, run } from "./system";
+import { defaultPaths, expandHome, run } from "./system";
 import { installCron, installSystemd, lastServiceResult, removeSchedule, scheduleStatus } from "./timer";
 import {
   bulkEligible,
@@ -180,9 +191,29 @@ export function measure(finding: Finding): string {
   return "?";
 }
 
-/** Claims become deletable, so a slip here must not be able to take a home directory or a repo with it. */
-export function dangerous(path: string, home: string): boolean {
-  return path === "/" || home === path || home.startsWith(`${path}/`) || existsSync(join(path, ".git/HEAD"));
+/** Where agents keep clones and other scratch: always ~/.cache/agent-scratch, plus the configured agent roots. */
+export function scratchRoots(home: string, agentRoots: readonly string[]): string[] {
+  return [join(home, ".cache/agent-scratch"), ...agentRoots.map(expandHome(home))];
+}
+
+/**
+ * Why a path cannot be claimed, or undefined when it can. Claims become deletable, so a slip here must not be able to
+ * take a home directory or a project with it. A repository is claimable only inside a scratch root, where agents are
+ * told to put their clones.
+ */
+export function claimRefusal(
+  path: string,
+  home: string,
+  roots: readonly string[],
+): { message: string; next: string } | undefined {
+  if (path === "/" || home === path || home.startsWith(`${path}/`))
+    return { message: `${path} is too broad to claim`, next: "keeper claim PATH with a single scratch directory" };
+  if (existsSync(join(path, ".git/HEAD")) && !roots.some((root) => path.startsWith(`${root}/`)))
+    return {
+      message: `${path} is a git repository outside a scratch root (${roots.join(", ")}); claim refuses repositories`,
+      next: "clone scratch into ~/.cache/agent-scratch/NAME and claim that, or keeper hold PATH --reason R to keep it",
+    };
+  return undefined;
 }
 
 export function schema() {
@@ -396,7 +427,8 @@ async function dispatch(
       if (!target) throw new UsageError("usage: keeper claim PATH");
       const path = resolve(target);
       if (!existsSync(path)) throw new UsageError(`${path} does not exist`);
-      if (dangerous(path, paths.home)) throw new UsageError(`${path} is too broad to claim`);
+      const refusal = claimRefusal(path, paths.home, scratchRoots(paths.home, loadConfig(paths).agentRoots));
+      if (refusal) throw new UsageError(refusal.message, refusal.next);
       const claim: Claim = { path, actor: actor(), at: new Date().toISOString() };
       await updateLedger(paths, (ledger) => ({
         ...ledger,

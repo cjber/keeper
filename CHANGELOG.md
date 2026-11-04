@@ -7,6 +7,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+- **Scratch clones can be claimed.** `keeper claim` accepts a git clone under `~/.cache/agent-scratch` or a configured
+  agent root, and it is cleaned like any claimed scratch: trashed once stale, restorable with `keeper undo`. A
+  repository anywhere else is still refused, now with a message that says it is a repository rather than "too broad".
 - **Planning load findings by id is fast.** Load and memory findings are now remembered, though never reused, so
   `keeper plan LOAD-ID...` rescans only the load category instead of every category on the machine. Apply still rescans
   every id it runs.

@@ -173,3 +173,19 @@ export async function cachedScan(
     cached,
   };
 }
+
+/**
+ * The categories that hold these finding ids in the last stored scan, however old, so planning by id rescans only
+ * them. Undefined when any id is unknown, which leaves the caller to rescan everything.
+ */
+export function categoriesOf(context: Context, ids: readonly string[]): Category[] | undefined {
+  const stored = read(context.paths);
+  if (!stored || stored.fingerprint !== fingerprint(context)) return undefined;
+  const owner = new Map<string, Category>();
+  for (const [category, entry] of Object.entries(stored.entries) as [Category, Entry][]) {
+    for (const finding of entry.findings) owner.set(finding.id, category);
+  }
+  const found = ids.map((id) => owner.get(id));
+  if (found.some((category) => !category)) return undefined;
+  return [...new Set(found as Category[])];
+}

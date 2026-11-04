@@ -40,7 +40,7 @@ Every version needs a `CHANGELOG.md` entry. `python3 scripts/wordmark.py` regene
 - Apps and personal files (`apps`, `large`, `downloads`, `screenshots`, `duplicates`) carry `explicit`, so a plan with no ids never takes them, whatever `--max-risk` says. Only an explicit id selects them.
 - `large` and `duplicates` skip application trees: Wine prefixes, Steam, Lutris, Heroic, GOG, `~/Games` style libraries, flatpak data, VM stores, and any directory holding an install marker. A duplicate is offered only across different top-level personal document folders.
 - Apps are only packages with a `.desktop` launcher. A CLI-only package is out of scope, because the hourly sample rarely catches short-lived tools and daemons run as other users.
-- A merged PR proves a worktree only when its head is the local commit, or holds it as an ancestor while the checkout has unpushed commits, because branch names get reused. Only that proof outruns the age window: a branch just cut from main is contained in main too.
+- A merged PR proves a worktree only when its head is the local commit, or holds it as an ancestor while the checkout has unpushed commits, because branch names get reused. A PR rebased before merging proves it instead when every file the local commits changed is identical in its merge commit. Only that proof outruns the age window: a branch just cut from main is contained in main too.
 - keeper never starts an LLM. The calling agent judges, and a hold is the only verdict it can give, so judgement can add a blocker but never clear one.
 - An agent's hold beats every scanner. Mutations go through `withLock` and write to the audit log.
 - Delete through trash. Only `purge` is final, so branch deletion and `purgeHook` run there.

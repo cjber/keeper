@@ -484,6 +484,41 @@ test("a branch behind its merged PR's head is proven, but one just cut from main
   expect(reused.findings.find((finding) => finding.paths[0] === fresh)?.blockers.join()).toContain("touched");
 });
 
+test("a squash-merged PR that a bot rebased is proven by content, and extra local work is not", async () => {
+  const path = await worktree("rebased");
+  const main = join(home, "rebased-main");
+  writeFileSync(join(path, "file"), "work");
+  writeFileSync(join(path, "added"), "new");
+  await git(path, "add", ".");
+  await git(path, "commit", "-qm", "work");
+  // Main moved on, the bot rebased the branch onto it, and the squash merge landed the branch's files.
+  writeFileSync(join(main, "unrelated"), "main moved");
+  await git(main, "add", ".");
+  await git(main, "commit", "-qm", "main moved");
+  writeFileSync(join(main, "file"), "work");
+  writeFileSync(join(main, "added"), "new");
+  await git(main, "add", ".");
+  await git(main, "commit", "-qm", "squash");
+  const squash = await git(main, "rev-parse", "HEAD");
+  // A later change on main to a file the branch touched does not undo the proof.
+  writeFileSync(join(main, "added"), "edited later");
+  await git(main, "commit", "-qam", "later");
+  await git(main, "push", "-q", "origin", "HEAD:main");
+  const merged = async (): Promise<PullRequest[]> => [
+    { number: 7, state: "MERGED", headRefName: "b-rebased", headRefOid: "1".repeat(40), mergeCommit: { oid: squash } },
+  ];
+  const report = await scan({ ...ctx, pullRequests: merged }, ["worktree"]);
+  expect(report.findings[0]).toMatchObject({ risk: "low", blockers: [] });
+  expect(report.findings[0]?.reason).toContain("PR #7");
+
+  writeFileSync(join(path, "extra"), "unmerged");
+  await git(path, "add", ".");
+  await git(path, "commit", "-qm", "more");
+  const extra = await scan({ ...ctx, pullRequests: merged }, ["worktree"]);
+  expect(extra.findings[0]?.risk).toBe("medium");
+  expect(extra.findings[0]?.blockers.join()).toContain("on no remote");
+});
+
 test("a branch older than the newest page of PRs is looked up by name", async () => {
   const path = await worktree("old");
   const head = await git(path, "rev-parse", "HEAD");

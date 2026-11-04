@@ -21,7 +21,7 @@ behind, moves it to a trash you can undo, and proves its work before it touches 
 ## Why keeper
 
 - **It proves before it removes.** A worktree counts as finished only when a merged pull request holds every commit
-  it has, or when every commit is on the default branch. Anything else waits for approval.
+  it has, or landed every file its commits changed after a rebase, or when every commit is on the default branch. Anything else waits for approval.
 - **Agents are the primary user.** Every command returns JSON when piped, each exit code names the next step, and the
   wizard is a thin layer over the same calls.
 - **Agents can protect their work.** `keeper hold` outranks every scanner until it expires, so a session can mark a

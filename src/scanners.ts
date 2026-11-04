@@ -3,7 +3,7 @@ import { createReadStream, existsSync, lstatSync, readdirSync, readFileSync, rea
 import { lstat, readdir } from "node:fs/promises";
 import { availableParallelism, loadavg } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { alive, readLedger } from "./ledger";
+import { alive, type Hold, readLedger } from "./ledger";
 import { ageDays, expandHome, holders, type Paths, run, sizes } from "./system";
 import { type Category, categories, count, type Finding, type Risk, type Scan, schemaVersion } from "./types";
 import { coveredDays, readUsage, type UsageLedger } from "./usage";
@@ -45,6 +45,38 @@ const memoryStall = 10;
 /** A cgroup this close to its memory.high cap is being throttled rather than merely busy. */
 const cgroupCap = 0.9;
 const cgroupRoots = ["/sys/fs/cgroup/user.slice", "/sys/fs/cgroup/agent.slice"];
+/** An idle detached process this old, holding memory, has outlived whatever started it. */
+const abandonedHours = 6;
+/** Below this share of one core over the sample a process is idle rather than doing slow work. */
+const idleCpu = 0.5;
+/** RAM plus swap below this is not worth a finding: stopping it would not relieve memory pressure. */
+const minHeldBytes = 16 * 1024 ** 2;
+/** Programs that run a script named on their command line, so a deleted script means a stale process. */
+const interpreters = /^(bun|node|deno|tsx|ts-node|python[\d.]*|ruby|perl|bash|sh|zsh|dash|fish)$/;
+const shells = new Set(["bash", "sh", "zsh", "dash", "fish", "nu", "elvish", "xonsh"]);
+/** Interactive tools a person comes back to, and the servers that hold panes, are never stopped as abandoned. */
+const keptCommands = new Set([
+  "nvim",
+  "vim",
+  "vi",
+  "emacs",
+  "emacsclient",
+  "hx",
+  "helix",
+  "nano",
+  "micro",
+  "kak",
+  "code",
+  "tmux",
+  "screen",
+  "zellij",
+  "kiln",
+  "ssh-agent",
+  "gpg-agent",
+  "gnome-keyring-daemon",
+]);
+/** Servers whose children are panes: a child that is not the leader of a live pane's session was reparented there. */
+const multiplexers = /^(tmux|screen|zellij|kiln)\b/;
 
 /** Deprioritising any of these makes the desktop itself slow, which is the opposite of what a load finding is for. */
 const sessionCommands = new Set([
@@ -217,6 +249,15 @@ export interface ProcessInfo {
   stdin?: string;
   /** The scheduler autogroup, one per session, such as `/autogroup-78`. Absent when autogroup is off. */
   autogroup?: string;
+  /** Session id. A pane's process leads its own session, so a session whose leader is gone has lost its pane. */
+  session?: number;
+  /** VmRSS plus VmSwap in bytes. Read only for processes that could be abandoned. */
+  memory?: number;
+  cwd?: string;
+  /** The process's cgroup path. A `.service` is a systemd unit someone set up to run. */
+  cgroup?: string;
+  /** Newest mtime, in ms, of any regular file the process holds open for writing. 0 when it holds none. */
+  written?: number;
 }
 
 export function findingId(category: Category, target: string, state: string): string {
@@ -1833,6 +1874,7 @@ interface RawProcess {
   /** utime + stime in clock ticks, so two snapshots give the CPU used between them. */
   ticks: number;
   age: number;
+  session: number;
   command: string;
 }
 
@@ -1849,6 +1891,7 @@ function readProcess(pid: number, uptime: number): RawProcess | undefined {
       uid: lstatSync(`/proc/${pid}`).uid,
       nice: Number(fields[16]),
       ticks: Number(fields[11]) + Number(fields[12]),
+      session: Number(fields[3]),
       age: uptime - Number(fields[19]) / clockTicks,
       command: readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0/g, " ").trim() || `[${comm}]`,
     };
@@ -1882,11 +1925,12 @@ async function sampleProcesses(milliseconds = sampleMs): Promise<{
   const processes = [...after].flatMap(([pid, now]) => {
     const then = before.get(pid);
     if (!then) return []; // started during the sample, so there is no usage to measure
-    const { ppid, uid, nice, age, command } = now;
+    const { ppid, uid, nice, age, session, command } = now;
     const cpu = ((now.ticks - then.ticks) / clockTicks / seconds) * 100;
     const stdin = attempt(() => readlinkSync(`/proc/${pid}/fd/0`));
     const autogroup = attempt(() => readFileSync(`/proc/${pid}/autogroup`, "utf8").split(" ")[0]);
-    return [{ pid, ppid, uid, nice, age, command, cpu, cpuSeconds: now.ticks / clockTicks, stdin, autogroup }];
+    const cpuSeconds = now.ticks / clockTicks;
+    return [{ pid, ppid, uid, nice, age, session, command, cpu, cpuSeconds, stdin, autogroup }];
   });
   return { processes, cores: availableParallelism(), loadAverage: loadavg()[0] ?? 0 };
 }
@@ -2132,11 +2176,129 @@ function readCgroups(): CgroupUsage[] {
   return found;
 }
 
+/** RSS and swap, cwd, cgroup and the newest write to an open file, read only for a process that could be abandoned. */
+function readFacts(proc: ProcessInfo): ProcessInfo {
+  const status = attempt(() => readFileSync(`/proc/${proc.pid}/status`, "utf8")) ?? "";
+  const kib = (field: string) => Number(new RegExp(`^${field}:\\s+(\\d+) kB`, "m").exec(status)?.[1] ?? 0) * 1024;
+  let written = 0;
+  for (const fd of entries(`/proc/${proc.pid}/fd`)) {
+    const target = attempt(() => readlinkSync(fd));
+    if (!target?.startsWith("/") || target.startsWith("/dev/") || target.endsWith(" (deleted)")) continue;
+    const info = attempt(() => readFileSync(fd.replace("/fd/", "/fdinfo/"), "utf8")) ?? "";
+    const flags = Number.parseInt(/^flags:\s+(\d+)/m.exec(info)?.[1] ?? "0", 8);
+    if ((flags & 3) === 0) continue; // opened read-only
+    const stat = attempt(() => statSync(target));
+    if (stat?.isFile()) written = Math.max(written, stat.mtimeMs);
+  }
+  return {
+    ...proc,
+    memory: kib("VmRSS") + kib("VmSwap"),
+    cwd: attempt(() => readlinkSync(`/proc/${proc.pid}/cwd`)),
+    cgroup: attempt(() => readFileSync(`/proc/${proc.pid}/cgroup`, "utf8").trim().split("\n").at(-1)?.split(":")[2]),
+    written,
+  };
+}
+
+/** The script an interpreter runs, resolved against its working directory. */
+function scriptOf(proc: ProcessInfo): string | undefined {
+  const [program = "", ...args] = proc.command.split(" ");
+  if (!interpreters.test(basename(program))) return undefined;
+  const script = args.find(
+    (arg) => !arg.startsWith("-") && (arg.includes("/") || /\.[cm]?[jt]sx?$|\.(py|sh|rb|pl)$/.test(arg)),
+  );
+  if (!script) return undefined;
+  return script.startsWith("/") || !proc.cwd ? script : join(proc.cwd, script);
+}
+
+/**
+ * Why nobody can reach this process any more, or undefined when someone still can. A live terminal on stdin means a
+ * person or a pane can type into it, and a process in the desktop's own session was autostarted by it. Otherwise it was reparented to init or the user manager, or to a multiplexer
+ * server while the pane session it was started in is gone.
+ */
+function detachment(proc: ProcessInfo, byPid: ReadonlyMap<number, ProcessInfo>): string | undefined {
+  if (/^\/dev\/(pts\/\d+|tty\d*)$/.test(proc.stdin ?? "")) return undefined;
+  // The compositor double-forks what it autostarts, so a tray applet sits under init inside the desktop's session.
+  const leader = proc.session === undefined ? undefined : byPid.get(proc.session);
+  if (leader && sessionCommands.has(commandName(leader.command))) return undefined;
+  const parent = byPid.get(proc.ppid);
+  if (proc.ppid === 1 || (parent && commandName(parent.command) === "systemd")) return "reparented to init";
+  if (parent && multiplexers.test(commandName(parent.command)) && proc.session !== proc.pid) {
+    if (proc.session !== undefined && !byPid.has(proc.session))
+      return `reparented to ${commandName(parent.command)} after its pane closed`;
+  }
+  return undefined;
+}
+
+/**
+ * Long-lived processes nobody can reach that sit idle on RAM and swap, such as a test fixture whose runner was killed
+ * before its cleanup ran. Each signal alone also fits live work, so every one is required: detached, idle over the
+ * sample, older than `abandonedHours`, and either its script was deleted or, unless it daemonised itself on purpose,
+ * it has written no open file for as long. Shells, editors, multiplexers, systemd units and the caller are never offered.
+ */
+function abandonedFindings(context: Context, processes: readonly ProcessInfo[]): Finding[] {
+  const me = process.getuid?.() ?? -1;
+  const asking = callers(processes);
+  const byPid = new Map(processes.map((proc) => [proc.pid, proc]));
+  const holds = readLedger(context.paths).holds.filter((hold) => Date.parse(hold.until) > context.now);
+  const window = abandonedHours * 3600;
+  return processes.flatMap((sampled) => {
+    const name = commandName(sampled.command);
+    if (sampled.uid !== me || asking.has(sampled.pid) || sampled.pid <= 2) return [];
+    if (sampled.age < window || sampled.cpu >= idleCpu) return [];
+    if (keptCommands.has(name) || sessionCommands.has(name)) return [];
+    const how = detachment(sampled, byPid);
+    if (!how) return [];
+    const proc = context.processes ? sampled : readFacts(sampled);
+    const held = proc.memory ?? 0;
+    if (held < minHeldBytes || proc.cgroup?.endsWith(".service")) return [];
+    const script = scriptOf(proc);
+    if (shells.has(name) && !script) return []; // an interactive shell
+    const quiet = (proc.written ?? 0) < context.now - window * 1000;
+    const evidence =
+      script && !existsSync(script)
+        ? `its script ${script} no longer exists`
+        : proc.session !== proc.pid && quiet
+          ? `it has written no open file for ${abandonedHours} hours`
+          : undefined;
+    if (!evidence) return [];
+    const blockers = holds
+      .filter((hold) =>
+        [proc.cwd, script].some((path) => path && (path === hold.path || path.startsWith(`${hold.path}/`))),
+      )
+      .map(holdBlocker);
+    return [
+      {
+        // Apply rescans, so a pid that was reused meanwhile has to be abandoned with this command too.
+        id: findingId("memory", `abandoned\0${proc.pid}`, proc.command),
+        category: "memory",
+        risk: "medium",
+        action: "stop",
+        title: clip(proc.command),
+        paths: [],
+        packages: [],
+        bytes: 0,
+        memory: held,
+        cpu: Math.round(proc.cpu),
+        pids: [proc.pid],
+        reason: `${humanSize(held)} of RAM and swap held, idle for ${Math.round(proc.age / 3600)} hours, ${how}, and ${evidence}. Nothing can reach it, so stopping it frees the memory. Only planned by its id`,
+        explicit: true,
+        blockers,
+      } satisfies Finding,
+    ];
+  });
+}
+
 /**
  * Reports where memory is stalled. `report`, never `trash`: keeper cannot decide whose working set to drop, and the cap
  * that is thrashing was usually set on purpose. High `bytes` here is memory held, not space a cleanup would free.
  */
 async function scanMemory(context: Context): Promise<Finding[]> {
+  // Abandoned holders are worth stopping on a machine with room to spare too, so they skip the pressure gate.
+  const abandoned = abandonedFindings(context, context.processes ?? (await sampleProcesses()).processes);
+  return [...abandoned, ...pressureFindings(context)];
+}
+
+function pressureFindings(context: Context): Finding[] {
   const pressure = context.pressure ?? readPressure();
   const pinned = context.cgroups ?? readCgroups();
   if (pressure.full < memoryStall && pinned.length === 0) return [];
@@ -2207,16 +2369,15 @@ function overlaps(a: string, b: string): boolean {
 }
 
 /** `done` hears each category as it finishes, with its finding count, or undefined when it failed. */
+function holdBlocker(hold: Hold): string {
+  return `held by ${hold.actor} until ${hold.until}: ${hold.reason}. keeper release ${hold.path} ends it early`;
+}
+
 /** Holds are applied on every read, never stored, so a cached finding reflects a hold made or released since. */
 export function withHolds(context: Context, findings: readonly Finding[]): Finding[] {
   const holds = readLedger(context.paths).holds.filter((hold) => Date.parse(hold.until) > context.now);
   return findings.map((finding) => {
-    const held = holds
-      .filter((hold) => finding.paths.some((path) => overlaps(path, hold.path)))
-      .map(
-        (hold) =>
-          `held by ${hold.actor} until ${hold.until}: ${hold.reason}. keeper release ${hold.path} ends it early`,
-      );
+    const held = holds.filter((hold) => finding.paths.some((path) => overlaps(path, hold.path))).map(holdBlocker);
     return held.length ? { ...finding, blockers: [...finding.blockers, ...held] } : finding;
   });
 }

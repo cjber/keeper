@@ -490,7 +490,9 @@ test("memory findings name the cgroup pinned at its cap, and can never be planne
     high: 3 * 1024 ** 3,
     commands: ["cargo build --release"],
   };
-  const { findings } = await scan({ ...ctx, pressure: { some: 80, full: 60 }, cgroups: [pinned] }, ["memory"]);
+  const { findings } = await scan({ ...ctx, processes: [], pressure: { some: 80, full: 60 }, cgroups: [pinned] }, [
+    "memory",
+  ]);
   expect(findings).toHaveLength(1);
   const [finding] = findings;
   expect(finding).toMatchObject({ category: "memory", action: "report" });
@@ -499,12 +501,122 @@ test("memory findings name the cgroup pinned at its cap, and can never be planne
 });
 
 test("memory pressure with no pinned cgroup is still reported, and a healthy machine stays silent", async () => {
-  const stalled = await scan({ ...ctx, pressure: { some: 50, full: 20 }, cgroups: [] }, ["memory"]);
+  const stalled = await scan({ ...ctx, processes: [], pressure: { some: 50, full: 20 }, cgroups: [] }, ["memory"]);
   expect(stalled.findings).toHaveLength(1);
   expect(stalled.findings[0]?.title).toContain("memory pressure");
 
-  const healthy = await scan({ ...ctx, pressure: { some: 2, full: 0 }, cgroups: [] }, ["memory"]);
+  const healthy = await scan({ ...ctx, processes: [], pressure: { some: 2, full: 0 }, cgroups: [] }, ["memory"]);
   expect(healthy.findings).toEqual([]);
+});
+
+/** An idle process, a day old, holding 400M, as the memory scan would read it from /proc. */
+function idle(overrides: Partial<ProcessInfo> = {}): ProcessInfo {
+  return proc({
+    pid: 700,
+    cpu: 0,
+    age: 30 * 3600,
+    session: 650,
+    command: "bun scripts/tui-fixture.tsx",
+    stdin: "/dev/null",
+    memory: 400 * 1024 ** 2,
+    cwd: home,
+    cgroup: "/user.slice/user-1000.slice/session-2.scope",
+    written: 0,
+    ...overrides,
+  });
+}
+
+const quiet = { pressure: { some: 0, full: 0 }, cgroups: [] };
+const stops = async (processes: ProcessInfo[]) =>
+  (await scan({ ...ctx, ...quiet, processes }, ["memory"])).findings.filter((finding) => finding.action === "stop");
+
+test("an idle orphan holding memory whose script is gone is offered for stopping", async () => {
+  const { findings } = await scan({ ...ctx, ...quiet, processes: [idle()] }, ["memory"]);
+  expect(findings).toHaveLength(1);
+  expect(findings[0]).toMatchObject({
+    category: "memory",
+    action: "stop",
+    risk: "medium",
+    explicit: true,
+    pids: [700],
+    bytes: 0,
+    memory: 400 * 1024 ** 2,
+    blockers: [],
+  });
+  expect(findings[0]?.reason).toContain("no longer exists");
+});
+
+test("a fixture reparented to a tmux server after its pane closed is abandoned", async () => {
+  const tmux = proc({ pid: 300, cpu: 0, age: 40 * 3600, command: "tmux new-session -d", stdin: "/dev/null" });
+  const orphan = idle({ ppid: 300, session: 640, stdin: "/dev/pts/9 (deleted)" });
+  expect((await stops([tmux, orphan])).map((finding) => finding.pids)).toEqual([[700]]);
+});
+
+test("a live idle process in a pane with an attached tmux client is never offered", async () => {
+  const tmux = proc({ pid: 300, cpu: 0, age: 40 * 3600, command: "tmux new-session -d", stdin: "/dev/null" });
+  const client = proc({ pid: 310, ppid: 200, cpu: 0, age: 40 * 3600, command: "tmux attach", stdin: "/dev/pts/3" });
+  const pane = proc({
+    pid: 320,
+    ppid: 300,
+    session: 320,
+    cpu: 0,
+    age: 40 * 3600,
+    command: "-zsh",
+    stdin: "/dev/pts/5",
+  });
+  // Its script was deleted and it wrote nothing for hours, but its terminal is live, so a person can still use it.
+  const work = idle({ ppid: 320, session: 320, stdin: "/dev/pts/5" });
+  // A child the pane's shell started, reparented to the server, keeps the live pane terminal too.
+  const background = idle({ pid: 701, ppid: 300, session: 320, stdin: "/dev/pts/5" });
+  expect(await stops([tmux, client, pane, work, background])).toEqual([]);
+});
+
+test("live work, daemons, services, shells, editors and young or busy processes are not abandoned", async () => {
+  const script = join(home, "server.ts");
+  writeFileSync(script, "");
+  const recent = Date.now() - 60_000;
+  const cases = [
+    idle({ age: 2 * 3600 }), // too young
+    idle({ cpu: 5 }), // busy during the sample
+    idle({ memory: 1024 ** 2 }), // holds too little to matter
+    idle({ cgroup: "/user.slice/user-1000.slice/user@1000.service/app.slice/syncthing.service" }),
+    idle({ command: "zsh", stdin: "/dev/pts/4 (deleted)" }),
+    idle({ command: "nvim notes.md" }),
+    idle({ command: "tmux -L kiln new-session -d" }),
+    idle({ ppid: 400 }), // its parent is alive and not init
+    idle({ command: "/usr/bin/python /usr/bin/udiskie", session: 1608 }), // autostarted by the desktop
+    idle({ command: `bun ${script}`, written: recent }), // script exists and it writes
+    idle({ command: "/usr/bin/opencode serve", session: 700 }), // daemonised on purpose, nothing missing
+  ];
+  const desktop = proc({ pid: 1608, cpu: 0, command: "/usr/bin/start-hyprland" });
+  expect(await stops([desktop, proc({ pid: 400, cpu: 0, command: "bun test" }), ...cases])).toEqual([]);
+  // A process with its script in place that has written nothing for hours, and that did not daemonise itself, is.
+  expect(await stops([idle({ command: `bun ${script}` })])).toHaveLength(1);
+});
+
+test("a hold on the directory an abandoned process runs in blocks stopping it", async () => {
+  const project = join(home, "project");
+  mkdirSync(project);
+  writeLedger(ctx.paths, {
+    holds: [{ path: project, until: "2099-01-01T00:00:00Z", reason: "coming back", actor: "a" }],
+    claims: [],
+  });
+  const [finding] = await stops([idle({ cwd: project })]);
+  expect(finding?.blockers.join()).toContain("coming back");
+  expect(finding && eligible(finding)).toBe(false);
+});
+
+test("applying an abandoned-memory stop ends the process", async () => {
+  const child = Bun.spawn(["sleep", "30"], { stdout: "ignore", stderr: "ignore" });
+  const idleCtx: Context = {
+    ...ctx,
+    ...quiet,
+    processes: [idle({ pid: child.pid, command: "bun /gone/fixture.tsx" })],
+  };
+  const { findings } = await scan(idleCtx, ["memory"]);
+  const applied = await applyPlan(createPlan(ctx.paths, findings, 7), idleCtx);
+  expect(applied.stopped).toBe(1);
+  expect(await Promise.race([child.exited.then(() => "exited"), Bun.sleep(2000).then(() => "running")])).toBe("exited");
 });
 
 test("applying a load plan lowers the priority and undo puts it back", async () => {

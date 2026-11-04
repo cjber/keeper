@@ -72,12 +72,14 @@ export function readAudit(paths: Paths, limit: number): unknown[] {
   }
 }
 
-function alive(pid: number): boolean {
+/** Whether a process exists. EPERM means it does but another user owns it, and 0 or less names a process group. */
+export function alive(pid: number | undefined): boolean {
+  if (!pid || pid <= 0) return false;
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
   }
 }
 

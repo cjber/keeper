@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { cachedScan } from "./cache";
 import { dangerous, health, runCli, schema } from "./cli";
 import { freshen } from "./freshen";
 import { BusyError, type Ledger, readLedger, updateLedger, withLock, writeLedger } from "./ledger";
@@ -23,6 +24,7 @@ import {
   dockerFindings,
   type ProcessInfo,
   type PullRequest,
+  sampleMs,
   scan,
   tmpPatterns,
   worktreeDirs,
@@ -251,6 +253,29 @@ test("stale temp entries are one row that apply moves to trash and undo restores
   expect(leaked.map((dir) => readFileSync(join(dir, "f"), "utf8"))).toEqual(["x", "x", "x"]);
 });
 
+test("display and session files are never offered, and a lock whose PID is alive is blocked", async () => {
+  const tmp = ctx.paths.tmp;
+  const display = [".X1-lock", ".X11-unix", ".ICE-unix", ".font-unix", ".XIM-unix", ".Test-unix"].map((name) =>
+    join(tmp, name),
+  );
+  for (const path of display) {
+    if (path.endsWith("-lock")) writeFileSync(path, `${String(process.pid).padStart(10)}\n`);
+    else mkdirSync(path);
+    age(path);
+  }
+  const live = join(tmp, "build.lock");
+  writeFileSync(live, String(process.pid));
+  age(live);
+  const dead = join(tmp, "stale.lock");
+  writeFileSync(dead, "999999999\n");
+  age(dead);
+  const { findings } = await scan(ctx, ["tmp"]);
+  const paths = findings.flatMap((finding) => finding.paths);
+  expect(display.filter((path) => paths.includes(path))).toEqual([]);
+  expect(findings.find((finding) => finding.paths.includes(live))?.blockers.join()).toContain("alive");
+  expect(findings.filter(eligible).flatMap((finding) => finding.paths)).toEqual([dead]);
+});
+
 test("claims refuse home, its parents and repositories", async () => {
   const repo = join(home, "repo");
   mkdirSync(join(repo, ".git"), { recursive: true });
@@ -345,8 +370,63 @@ function proc(overrides: Partial<ProcessInfo> = {}): ProcessInfo {
     age: 600,
     command: "cargo build --release",
     ...overrides,
+    cpuSeconds: overrides.cpuSeconds ?? ((overrides.cpu ?? 120) / 100) * (overrides.age ?? 600),
   };
 }
+
+test("load groups split by process tree, so one project's bun is never reniced with another's", async () => {
+  const tmux = proc({ pid: 100, cpu: 0, command: "tmux new -s work" });
+  const paneA = proc({ pid: 101, ppid: 100, cpu: 0, command: "zsh" });
+  const paneB = proc({ pid: 102, ppid: 100, cpu: 0, command: "zsh" });
+  const tests = proc({ pid: 110, ppid: 101, cpu: 90, command: "bun test HomeConversation.test.tsx" });
+  const worker = proc({ pid: 111, ppid: 110, cpu: 60, command: "bun test --worker" });
+  const server = proc({ pid: 120, ppid: 102, cpu: 80, command: "bun /other/src/index.tsx" });
+  const { findings } = await scan(
+    { ...ctx, processes: [tmux, paneA, paneB, tests, worker, server], cores: 2, loadAverage: 9 },
+    ["load"],
+  );
+  expect(findings.map((finding) => finding.pids).sort()).toEqual([[110, 111], [120]]);
+  expect(new Set(findings.map((finding) => finding.id)).size).toBe(2);
+});
+
+test("a build whose workers are all young is still named once they have used real CPU", async () => {
+  const daemons = [115, 80, 70].map((cpu, i) =>
+    proc({ pid: 200 + i, ppid: 1, cpu, age: 229, command: `/usr/lib/jvm/bin/java -cp worker${i}.jar` }),
+  );
+  const { findings } = await scan({ ...ctx, processes: daemons, cores: 2, loadAverage: 9 }, ["load"]);
+  expect(findings.map((finding) => finding.cpu).sort()).toEqual([115, 70, 80]);
+});
+
+test("kernel threads are never load findings, and the session that ran keeper is never reniced", async () => {
+  const kernel = [
+    proc({ pid: 2, ppid: 0, uid: 0, command: "[kthreadd]" }),
+    proc({ pid: 300, ppid: 2, uid: 0, command: "[kswapd0]" }),
+    proc({ pid: 301, ppid: 2, uid: 0, command: "[kworker/8:2-events]" }),
+  ];
+  const caller = proc({ pid: process.ppid, ppid: 1, command: "claude --remote-control" });
+  const { findings } = await scan({ ...ctx, processes: [...kernel, caller], cores: 2, loadAverage: 9 }, ["load"]);
+  expect(findings.map((finding) => finding.pids)).toEqual([[process.ppid]]);
+  expect(findings[0]?.blockers.join()).toContain("the session that started it");
+});
+
+test("load is sampled for a full second, and --cached says load is always scanned now", async () => {
+  expect(sampleMs).toBeGreaterThanOrEqual(1000);
+  const hot = { ...ctx, processes: [proc()], cores: 2, loadAverage: 9 };
+  const report = await cachedScan(hot, { reuse: true, only: ["load", "tmp"] });
+  expect(report.live).toEqual(["load"]);
+  expect((await cachedScan(hot, { reuse: false, only: ["load"] })).live).toEqual([]);
+});
+
+test("a flag the command does not take is refused rather than dropped", async () => {
+  const errors = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    expect(await runCli(["claim", "/", "--reason", "dogfood"])).toBe(2);
+    expect(String(errors.mock.calls[0]?.[0])).toContain("claim does not take --reason");
+    expect(await runCli(["scan", "--days", "3"])).toBe(2);
+  } finally {
+    errors.mockRestore();
+  }
+});
 
 test("load findings appear only on an oversubscribed machine, grouped by command", async () => {
   const group = [proc(), proc({ pid: 11, ppid: 10, cpu: 30 })];

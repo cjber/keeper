@@ -7,6 +7,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+- **The temp scan leaves a running display alone.** X and session files such as `/tmp/.X1-lock` and `/tmp/.X11-unix`
+  are never offered, and any lock file whose PID is still alive is blocked until that process exits.
+- **Load findings name the right work.** A group is one command within one process tree, so a dev server in one pane
+  and a test run in another, or two agent sessions, are separate rows that renice separately. The session that ran
+  keeper is blocked, as keeper itself already was.
+- **Busy builds are named even when every worker is young.** A group also counts once its members have used two
+  core-minutes, so a build that keeps starting fresh workers is no longer missed.
+- **No kernel threads in load findings.** `[kswapd0]` and `[kworker/...]` are left out instead of showing as blocked.
+- **Steadier CPU readings.** Load is sampled over a second rather than 200 ms, and `keeper scan --cached` says when
+  load or memory were scanned now because they are never cached.
+- **Commands refuse options they do not take.** `keeper claim PATH --reason R` used to succeed and drop the reason; it
+  now exits with a usage error, as does any option a command does not read.
+
 ## [0.2.2] - 2026-11-04
 
 - **A worktree whose PR a bot rebased before merging is proven.** When the merged PR's head is not the local commit,

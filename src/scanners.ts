@@ -38,6 +38,8 @@ export const sampleMs = 1000;
 const clockTicks = 100;
 /** The bottom of the range: what nice can give without root. */
 export const lowestPriority = 19;
+/** An orphan whose terminal is gone and that has been running this long is dead weight, not a burst. */
+const orphanMinutes = 30;
 /** Below this share of time spent fully stalled, memory pressure is not what a person is feeling. */
 const memoryStall = 10;
 /** A cgroup this close to its memory.high cap is being throttled rather than merely busy. */
@@ -175,6 +177,8 @@ export interface Context {
   pullRequests?: (repo: string, branch?: string) => Promise<PullRequest[]>;
   cores?: number;
   loadAverage?: number;
+  /** Whether the kernel shares CPU between session autogroups. Absent means read /proc/sys/kernel/sched_autogroup_enabled. */
+  autogroup?: boolean;
   /** Memory pressure and capped cgroups, so a test can describe a stalled machine without reproducing one. */
   pressure?: MemoryPressure;
   cgroups?: readonly CgroupUsage[];
@@ -209,6 +213,10 @@ export interface ProcessInfo {
   /** CPU seconds used over the process's whole life. */
   cpuSeconds: number;
   command: string;
+  /** Where fd 0 points. `/dev/pts/N (deleted)` means the terminal it was started in has closed. */
+  stdin?: string;
+  /** The scheduler autogroup, one per session, such as `/autogroup-78`. Absent when autogroup is off. */
+  autogroup?: string;
 }
 
 export function findingId(category: Category, target: string, state: string): string {
@@ -1876,9 +1884,37 @@ async function sampleProcesses(milliseconds = sampleMs): Promise<{
     if (!then) return []; // started during the sample, so there is no usage to measure
     const { ppid, uid, nice, age, command } = now;
     const cpu = ((now.ticks - then.ticks) / clockTicks / seconds) * 100;
-    return [{ pid, ppid, uid, nice, age, command, cpu, cpuSeconds: now.ticks / clockTicks }];
+    const stdin = attempt(() => readlinkSync(`/proc/${pid}/fd/0`));
+    const autogroup = attempt(() => readFileSync(`/proc/${pid}/autogroup`, "utf8").split(" ")[0]);
+    return [{ pid, ppid, uid, nice, age, command, cpu, cpuSeconds: now.ticks / clockTicks, stdin, autogroup }];
   });
   return { processes, cores: availableParallelism(), loadAverage: loadavg()[0] ?? 0 };
+}
+
+/** Another user's process, or one that exited, cannot be read, which is the same as not knowing. */
+function attempt<T>(read: () => T): T | undefined {
+  try {
+    return read();
+  } catch {
+    return undefined;
+  }
+}
+
+function autogroupEnabled(): boolean {
+  return attempt(() => readFileSync("/proc/sys/kernel/sched_autogroup_enabled", "utf8").trim()) === "1";
+}
+
+/**
+ * An interactive program whose terminal closed while it ignored the hangup: reparented to init, its stdin a pseudo
+ * terminal that no longer exists. Nobody can use or quit it any more, so one that keeps the CPU busy is stopped.
+ */
+function orphaned(proc: ProcessInfo): boolean {
+  return (
+    proc.ppid === 1 &&
+    /^\/dev\/pts\/\d+ \(deleted\)$/.test(proc.stdin ?? "") &&
+    proc.cpu >= minGroupCpu &&
+    proc.age >= orphanMinutes * 60
+  );
 }
 
 /** Where a process tree stops: init, a multiplexer or remote login, or the desktop session itself. */
@@ -1927,11 +1963,42 @@ async function scanLoad(context: Context): Promise<Finding[]> {
       }
     : await sampleProcesses();
   const { cores, loadAverage } = sample;
-  if (loadAverage <= cores * loadPerCore) return [];
+  const me = process.getuid?.() ?? -1;
+  const asking = callers(sample.processes);
+  const orphans = sample.processes.filter((proc) => proc.uid === me && !asking.has(proc.pid) && orphaned(proc));
+  // An orphan busy for half an hour is worth stopping on a quiet machine too, so it skips the load gate.
+  const stops = orphans.map(
+    (proc) =>
+      ({
+        // Apply rescans, so a pid that was reused meanwhile has to be an orphaned dead terminal with this command too.
+        id: findingId("load", `orphan\0${proc.pid}`, proc.command),
+        category: "load",
+        risk: "medium",
+        action: "stop",
+        title: clip(proc.command),
+        paths: [],
+        packages: [],
+        bytes: 0,
+        cpu: Math.round(proc.cpu),
+        pids: [proc.pid],
+        reason: `${Math.round(proc.cpu)}% of one core for ${Math.round(proc.age / 60)} minutes after its terminal closed. Nothing can use or quit it any more, so stopping it loses no work anyone can reach. Only planned by its id`,
+        explicit: true,
+        blockers: [],
+      }) satisfies Finding,
+  );
+  if (loadAverage <= cores * loadPerCore) return stops;
+  const stopped = new Set(orphans.map((proc) => proc.pid));
   // kthreadd is pid 2 and the parent of every kernel thread, which no renice from here can or should touch.
-  const processes = sample.processes.filter((proc) => proc.pid !== 2 && proc.ppid !== 2);
+  const processes = sample.processes.filter((proc) => proc.pid !== 2 && proc.ppid !== 2 && !stopped.has(proc.pid));
   const roots = treeRoots(processes);
-  const asking = callers(processes);
+  // With autogroup on the scheduler splits CPU between sessions first, so only a session's autogroup nice moves CPU
+  // away from it. The desktop's group and the caller's are never lowered, since an agent shell can share either.
+  const autogroupOn = context.autogroup ?? autogroupEnabled();
+  const spared = new Set(
+    processes
+      .filter((proc) => sessionCommands.has(commandName(proc.command)) || asking.has(proc.pid))
+      .map((proc) => proc.autogroup),
+  );
   const groups = new Map<string, { name: string; members: ProcessInfo[] }>();
   for (const proc of processes) {
     const name = commandName(proc.command);
@@ -1940,8 +2007,7 @@ async function scanLoad(context: Context): Promise<Finding[]> {
     group.members.push(proc);
     groups.set(key, group);
   }
-  const me = process.getuid?.() ?? -1;
-  return [...groups].flatMap(([key, { name, members }]) => {
+  const renices = [...groups].flatMap(([key, { name, members }]) => {
     const cpu = members.reduce((sum, member) => sum + member.cpu, 0);
     const heaviest = members.reduce((hot, member) => (member.cpu > hot.cpu ? member : hot));
     const oldest = members.reduce((long, member) => (member.age > long.age ? member : long));
@@ -1957,6 +2023,11 @@ async function scanLoad(context: Context): Promise<Finding[]> {
         "includes this keeper run or the session that started it, and keeper never lowers its caller: a scan after it exits judges the rest",
       );
     if (heaviest.uid !== me) blockers.push("owned by another user");
+    // One member per autogroup is enough to name it.
+    const named = new Map<string, number>();
+    for (const { autogroup, pid } of members)
+      if (autogroupOn && autogroup && !spared.has(autogroup) && !named.has(autogroup)) named.set(autogroup, pid);
+    const autogroups = [...named.values()];
     return [
       {
         // Command and tree are the state: workers come and go, and "rustc in this build is hammering the machine" is
@@ -1973,9 +2044,11 @@ async function scanLoad(context: Context): Promise<Finding[]> {
         pids,
         reason: `${Math.round(cpu)}% of one core while load is ${loadAverage.toFixed(1)} on ${cores} cores. Lowering its priority keeps it running and gives the CPU back to the apps you are using`,
         blockers,
+        ...(autogroups.length ? { autogroups } : {}),
       } satisfies Finding,
     ];
   });
+  return [...stops, ...renices];
 }
 
 /** argv[0] without its directory, which is what a person would call the program. */

@@ -338,9 +338,10 @@ async function dispatch(
         : "keeper scan";
       const moved = outcome.bytes > 0 ? `, ${size(outcome.bytes)} moved` : "";
       const lowered = outcome.reniced > 0 ? `, ${count(outcome.reniced, "process", "processes")} deprioritised` : "";
+      const ended = outcome.stopped > 0 ? `, ${count(outcome.stopped, "process", "processes")} stopped` : "";
       return {
         value: { ...outcome, next: partial ? "keeper scan" : next },
-        text: `applied ${outcome.applied.length}, stale ${outcome.stale.length}, failed ${outcome.failed.length}${moved}${lowered}. undo: ${outcome.transaction ?? "none"}`,
+        text: `applied ${outcome.applied.length}, stale ${outcome.stale.length}, failed ${outcome.failed.length}${moved}${lowered}${ended}. undo: ${outcome.transaction ?? "none"}`,
         code: partial
           ? exit.partial
           : outcome.applied.length === 0 && outcome.stale.length > 0

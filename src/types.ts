@@ -29,6 +29,7 @@ export type Risk = (typeof risks)[number];
 /**
  * `report` findings carry evidence for a person and can never be planned.
  * `renice` is the only action that changes no data, which is why it is medium risk rather than low: `auto` runs it never.
+ * `stop` ends a process whose terminal is gone. It cannot be undone, so it is medium risk and planned only by its id.
  */
 export type Action =
   | "trash"
@@ -41,6 +42,7 @@ export type Action =
   | "docker-image-prune"
   | "docker-builder-prune"
   | "renice"
+  | "stop"
   | "truncate"
   | "report";
 
@@ -72,8 +74,10 @@ export interface Finding {
   inodes?: number;
   /** Percent of one core the finding's processes used during the sample. Absent for everything that is not `load`. */
   cpu?: number;
-  /** Pids the finding judged, so `renice` can target the command without a second scan. */
+  /** Pids the finding judged, so `renice` and `stop` can target the command without a second scan. */
   pids?: number[];
+  /** One pid per session autogroup that `renice` also lowers, set only while the kernel's autogroup is on. */
+  autogroups?: number[];
 }
 
 export interface Scan {
@@ -121,6 +125,8 @@ export interface Transaction {
 export interface Reniced {
   pid: number;
   nice: number;
+  /** The nice was the autogroup's, set through /proc/PID/autogroup, rather than the process's own. */
+  autogroup?: true;
 }
 
 export function eligible(finding: Finding): boolean {

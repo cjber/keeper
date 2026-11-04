@@ -491,7 +491,9 @@ test("applying a load plan lowers the priority and undo puts it back", async () 
       loadAverage: 8,
     };
     const { findings } = await scan(hot, ["load"]);
-    expect(niceness(child.pid)).toBe(0);
+    // The child inherits the test's own nice, which a reniced shell has already raised.
+    const start = niceness(child.pid);
+    expect(start).toBeLessThan(19);
 
     const applied = await applyPlan(createPlan(ctx.paths, findings, 7), hot);
     expect(applied.reniced).toBe(1);
@@ -500,7 +502,84 @@ test("applying a load plan lowers the priority and undo puts it back", async () 
     const restored = await undo(ctx.paths, applied.transaction as string);
     // Raising a nice value back needs root, so the honest contract is that it is either restored or reported.
     expect(restored.reniced + restored.stuck.length).toBe(1);
-    expect(niceness(child.pid)).toBe(restored.reniced ? 0 : 19);
+    expect(niceness(child.pid)).toBe(restored.reniced ? start : 19);
+  } finally {
+    child.kill();
+  }
+});
+
+test("an orphan whose terminal is gone is stopped, not reniced, even on a quiet machine", async () => {
+  const hours = 4 * 3600;
+  const tui = proc({ pid: 500, cpu: 88, age: hours, command: "bun /src/index.tsx", stdin: "/dev/pts/7 (deleted)" });
+  const daemon = proc({ pid: 501, cpu: 88, age: hours, command: "/usr/bin/syncthing", stdin: "/dev/null" });
+  const live = proc({ pid: 502, ppid: 400, cpu: 88, age: hours, command: "htop", stdin: "/dev/pts/8" });
+  for (const loadAverage of [9, 0.5]) {
+    const { findings } = await scan({ ...ctx, processes: [tui, daemon, live], cores: 2, loadAverage }, ["load"]);
+    const stop = findings.filter((finding) => finding.action === "stop");
+    expect(stop).toHaveLength(1);
+    expect(stop[0]).toMatchObject({ category: "load", risk: "medium", explicit: true, pids: [500], blockers: [] });
+    expect(findings.some((finding) => finding.action === "renice" && finding.pids?.includes(500))).toBe(false);
+  }
+  // A dead terminal alone is not enough: a short burst is left to finish.
+  const young = await scan({ ...ctx, processes: [{ ...tui, age: 120 }], cores: 2, loadAverage: 0.5 }, ["load"]);
+  expect(young.findings).toEqual([]);
+});
+
+test("applying a stop finding ends the process", async () => {
+  const child = Bun.spawn(["sleep", "30"], { stdout: "ignore", stderr: "ignore" });
+  const hot: Context = {
+    ...ctx,
+    processes: [proc({ pid: child.pid, cpu: 90, age: 7200, command: "sleep 30", stdin: "/dev/pts/9 (deleted)" })],
+    cores: 2,
+    loadAverage: 0.5,
+  };
+  const { findings } = await scan(hot, ["load"]);
+  const stop = findings.filter((finding) => finding.action === "stop");
+  const applied = await applyPlan(createPlan(ctx.paths, stop, 7), hot);
+  expect(applied.stopped).toBe(1);
+  expect(await Promise.race([child.exited.then(() => "exited"), Bun.sleep(2000).then(() => "running")])).toBe("exited");
+});
+
+test("with autogroup on, renice lowers each session's autogroup but never the desktop's", async () => {
+  const desktop = proc({ pid: 50, cpu: 5, command: "Hyprland", autogroup: "/autogroup-78" });
+  const sharing = proc({ pid: 60, cpu: 120, command: "cargo build", autogroup: "/autogroup-78" });
+  const own = proc({ pid: 70, cpu: 120, command: "bun test", autogroup: "/autogroup-90" });
+  const own2 = proc({ pid: 71, ppid: 70, cpu: 60, command: "bun test --worker", autogroup: "/autogroup-90" });
+  const processes = [desktop, sharing, own, own2];
+  const on = await scan({ ...ctx, processes, cores: 2, loadAverage: 9, autogroup: true }, ["load"]);
+  const byPid = (pid: number) => on.findings.find((finding) => finding.pids?.includes(pid));
+  expect(byPid(70)?.autogroups).toEqual([70]);
+  expect(byPid(60)?.autogroups).toBeUndefined();
+  const off = await scan({ ...ctx, processes, cores: 2, loadAverage: 9, autogroup: false }, ["load"]);
+  expect(off.findings.every((finding) => finding.autogroups === undefined)).toBe(true);
+});
+
+const autogroupOf = (pid: number) => {
+  try {
+    const [name, , nice] = readFileSync(`/proc/${pid}/autogroup`, "utf8").trim().split(" ");
+    return { name: name as string, nice: Number(nice) };
+  } catch {
+    return undefined;
+  }
+};
+
+test.skipIf(!autogroupOf(process.pid))("applying a load plan lowers the autogroup and undo puts it back", async () => {
+  // setsid gives the child a session, and so an autogroup, of its own.
+  const child = Bun.spawn(["setsid", "sleep", "30"], { stdout: "ignore", stderr: "ignore" });
+  try {
+    for (let i = 0; i < 40 && autogroupOf(child.pid)?.name === autogroupOf(process.pid)?.name; i++) await Bun.sleep(50);
+    const hot: Context = {
+      ...ctx,
+      processes: [proc({ pid: child.pid, cpu: 300, command: "sleep 30", autogroup: autogroupOf(child.pid)?.name })],
+      cores: 2,
+      loadAverage: 8,
+      autogroup: true,
+    };
+    const { findings } = await scan(hot, ["load"]);
+    const applied = await applyPlan(createPlan(ctx.paths, findings, 7), hot);
+    expect(autogroupOf(child.pid)?.nice).toBe(19);
+    await undo(ctx.paths, applied.transaction as string);
+    expect(autogroupOf(child.pid)?.nice).toBe(0);
   } finally {
     child.kill();
   }

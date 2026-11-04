@@ -7,6 +7,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+- **Orphans whose terminal closed are offered for stopping.** A process reparented to init, whose stdin is a terminal
+  that no longer exists, and that has kept a quarter of a core busy for 30 minutes is a `stop` finding (SIGTERM, then
+  SIGKILL), on a quiet machine too. It is medium risk and planned only by its id, and it no longer hides in a renice row.
+- **Renice works under autogroup.** With `/proc/sys/kernel/sched_autogroup_enabled` on, the scheduler shares CPU
+  between sessions first, so a process's own nice barely moved CPU. A load finding now also lowers its session's
+  autogroup, never the desktop's or the caller's, and undo puts the autogroup back.
 - **The temp scan leaves a running display alone.** X and session files such as `/tmp/.X1-lock` and `/tmp/.X11-unix`
   are never offered, and any lock file whose PID is still alive is blocked until that process exits.
 - **Load findings name the right work.** A group is one command within one process tree, so a dev server in one pane

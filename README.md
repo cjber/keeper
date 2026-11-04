@@ -29,7 +29,9 @@ behind, moves it to a trash you can undo, and proves its work before it touches 
 - **Nothing is final until purge.** Paths move to a trash, and `keeper undo` restores them. Local branches are deleted
   only at purge, and only if they have not moved.
 - **It renices instead of killing.** When the machine is overloaded, keeper names the commands holding the CPU and can
-  lower their priority, so the work survives.
+  lower their priority, so the work survives. With the kernel's autogroup on, it lowers each session's autogroup too,
+  never the desktop's. The one exception is an orphan whose terminal has closed and that has kept a core busy for half an
+  hour: nobody can use or quit it, so keeper offers to stop it, by id only.
 
 ## Install
 
@@ -123,7 +125,7 @@ a blocked row per group that counts what is waiting and why. Holds, claims and k
 | `downloads` | Stale downloads, finished installers, and partials (partials over a day old are low) | low or medium, by id only |
 | `screenshots` | Stale images in the Pictures `Screenshots` and grim/hyprshot folders | medium, by id only |
 | `duplicates` | Identical files in different personal document trees, keeping the newest copy and offering the rest | medium, by id only |
-| `load` | Commands holding the CPU while the machine is oversubscribed | medium |
+| `load` | Commands holding the CPU while the machine is oversubscribed, and orphans busy since their terminal closed | medium, stopping by id only |
 | `memory` | Cgroups at their `memory.high` cap, and memory pressure | report only |
 
 Apps, large files, downloads, screenshots and duplicates are personal or application data, so they are only planned

@@ -115,6 +115,8 @@ export interface Outcome {
   bytes: number;
   /** Processes whose priority was lowered, which frees no space but is the point of a quiet machine again. */
   reniced: number;
+  /** Orphaned processes that were ended. Unlike a renice, undo cannot bring them back. */
+  stopped: number;
   transaction?: string;
 }
 
@@ -179,8 +181,67 @@ function removeEmptyParents(path: string, home: string): void {
   }
 }
 
-/** `slot` is the finding's own directory in the transaction, so names from different findings never meet. */
-async function execute(finding: Finding, paths: Paths, tx: Transaction, slot: string): Promise<void> {
+/** How long a stopped process gets to exit on SIGTERM before SIGKILL. */
+const stopGraceMs = 5000;
+
+function autogroupNice(pid: number): number | undefined {
+  try {
+    return Number(readFileSync(`/proc/${pid}/autogroup`, "utf8").split(" ")[2]);
+  } catch {
+    return undefined;
+  }
+}
+
+/** The kernel lets an unprivileged caller change an autogroup's nice once per 100 ms, machine-wide, and EAGAINs. */
+async function setAutogroupNice(pid: number, nice: number): Promise<boolean> {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    try {
+      writeFileSync(`/proc/${pid}/autogroup`, String(nice));
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EAGAIN") return false;
+      await Bun.sleep(110);
+    }
+  }
+  return false;
+}
+
+/** A zombie has already exited and only waits for its parent, so it counts as gone. */
+function running(pid: number): boolean {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    return stat[stat.lastIndexOf(")") + 2] !== "Z";
+  } catch {
+    return false;
+  }
+}
+
+/** SIGTERM, then SIGKILL after the grace period. A process that exits on its own meanwhile is not an error. */
+async function stop(pid: number): Promise<boolean> {
+  if (!running(pid)) return false;
+  for (const signal of ["SIGTERM", "SIGKILL"] as const) {
+    try {
+      process.kill(pid, signal);
+    } catch {
+      return true; // it exited between the check and the signal
+    }
+    for (const deadline = Date.now() + stopGraceMs; Date.now() < deadline; await Bun.sleep(100))
+      if (!running(pid)) return true;
+  }
+  return !running(pid);
+}
+
+/**
+ * `slot` is the finding's own directory in the transaction, so names from different findings never meet. Returns how
+ * many processes it stopped.
+ */
+async function execute(finding: Finding, paths: Paths, tx: Transaction, slot: string): Promise<number> {
+  if (finding.action === "stop") {
+    let stopped = 0;
+    for (const pid of finding.pids ?? []) if (await stop(pid)) stopped++;
+    if (stopped === 0) throw new Error("the process had already exited");
+    return stopped;
+  }
   if (finding.action === "renice") {
     let changed = 0;
     for (const pid of finding.pids ?? []) {
@@ -190,8 +251,16 @@ async function execute(finding: Finding, paths: Paths, tx: Transaction, slot: st
       tx.reniced.push({ pid, nice });
       changed++;
     }
+    // A process's own nice only competes inside its session's autogroup, so the group is lowered too. Raising the
+    // nice of an autogroup needs no root, which also makes it the part undo can always put back.
+    for (const pid of finding.autogroups ?? []) {
+      const nice = autogroupNice(pid);
+      if (nice === undefined || nice >= lowestPriority || !(await setAutogroupNice(pid, lowestPriority))) continue;
+      tx.reniced.push({ pid, nice, autogroup: true });
+      changed++;
+    }
     if (changed === 0) throw new Error("no process in this group could be reniced");
-    return;
+    return 0;
   }
   if (finding.action === "trash") {
     // Names repeat across a finding's parents, so each repeat goes in a slot of its own.
@@ -213,7 +282,7 @@ async function execute(finding: Finding, paths: Paths, tx: Transaction, slot: st
       if (finding.category === "transcripts") removeEmptyParents(original, paths.home);
     }
     if (error) throw new Error(error);
-    return;
+    return 0;
   }
   if (finding.action === "truncate") {
     for (const path of finding.paths) {
@@ -222,7 +291,7 @@ async function execute(finding: Finding, paths: Paths, tx: Transaction, slot: st
       const tail = await Bun.file(path).slice(start).arrayBuffer();
       writeFileSync(path, Buffer.from(tail));
     }
-    return;
+    return 0;
   }
   const command: Record<string, string[]> = {
     paccache: ["sudo", "-n", "paccache", "-rk1"],
@@ -239,6 +308,7 @@ async function execute(finding: Finding, paths: Paths, tx: Transaction, slot: st
   const result = await run(argv);
   if (result.code !== 0) throw new Error(result.stderr || `${argv[0]} exited ${result.code}`);
   if (finding.action === "remove-packages") tx.removedPackages.push(...finding.packages);
+  return 0;
 }
 
 /** Rescans and re-matches ids first: a plan is approval for the state it saw, not for whatever is there now. */
@@ -260,7 +330,7 @@ async function applyUnlocked(plan: Plan, ctx: Context): Promise<Outcome> {
       )
     ).findings.map((finding) => [finding.id, finding]),
   );
-  const outcome: Outcome = { applied: [], stale: [], failed: [], bytes: 0, reniced: 0 };
+  const outcome: Outcome = { applied: [], stale: [], failed: [], bytes: 0, reniced: 0, stopped: 0 };
   const id = newId();
   const base = join(ctx.paths.trash, id);
   mkdirSync(base, { recursive: true });
@@ -280,7 +350,7 @@ async function applyUnlocked(plan: Plan, ctx: Context): Promise<Outcome> {
     }
     const reniced = tx.reniced.length;
     try {
-      await execute(finding, ctx.paths, tx, join(base, String(index)));
+      outcome.stopped += await execute(finding, ctx.paths, tx, join(base, String(index)));
       outcome.applied.push(findingId);
       outcome.bytes += finding.bytes;
       outcome.reniced += tx.reniced.length - reniced;
@@ -317,6 +387,7 @@ export function transactions(paths: Paths): Transaction[] {
 
 /** Raising a nice value back needs root, so an unprivileged attempt is followed by keeper's usual `sudo -n`. */
 async function restorePriority(entry: Reniced): Promise<boolean> {
+  if (entry.autogroup) return setAutogroupNice(entry.pid, entry.nice);
   const argv = ["renice", "-n", String(entry.nice), "-p", String(entry.pid)];
   return (await run(argv)).code === 0 || (await run(["sudo", "-n", ...argv])).code === 0;
 }

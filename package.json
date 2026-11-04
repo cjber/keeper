@@ -1,6 +1,6 @@
 {
   "name": "keeper",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Agent-first cleanup for Arch: stale worktrees, AUR clones, caches and agent leftovers",
   "license": "MIT",
   "repository": "github:cjber/keeper",

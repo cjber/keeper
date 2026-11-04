@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-04
+
 - **Abandoned processes holding memory are offered for stopping.** The memory scan now names long-lived idle processes
   nobody can reach, such as a test fixture whose runner was killed before its cleanup ran, with the RAM and swap each
   holds. Every signal is required: detached (reparented to init, or to a multiplexer server after its pane closed),

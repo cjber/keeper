@@ -14,7 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cachedScan, categoriesOf, lastKnown } from "./cache";
-import { dangerous, health, runCli, schema } from "./cli";
+import { claimRefusal, health, runCli, schema, scratchRoots } from "./cli";
 import { freshen } from "./freshen";
 import { BusyError, type Ledger, readLedger, updateLedger, withLock, writeLedger } from "./ledger";
 import { applyPlan, bulkPlan, context, createPlan, loadConfig, purge, undo } from "./ops";
@@ -276,14 +276,40 @@ test("display and session files are never offered, and a lock whose PID is alive
   expect(findings.filter(eligible).flatMap((finding) => finding.paths)).toEqual([dead]);
 });
 
-test("claims refuse home, its parents and repositories", async () => {
+test("claims refuse home, its parents and repositories outside a scratch root", async () => {
+  const roots = scratchRoots(home, ["~/batch"]);
   const repo = join(home, "repo");
-  mkdirSync(join(repo, ".git"), { recursive: true });
-  writeFileSync(join(repo, ".git/HEAD"), "ref");
-  expect(dangerous(home, home)).toBe(true);
-  expect(dangerous("/", home)).toBe(true);
-  expect(dangerous(repo, home)).toBe(true);
-  expect(dangerous(join(home, "scratch"), home)).toBe(false);
+  await git(home, "init", "-q", repo);
+  expect(claimRefusal(home, home, roots)?.message).toContain("too broad");
+  expect(claimRefusal("/", home, roots)?.message).toContain("too broad");
+  const refused = claimRefusal(repo, home, roots);
+  expect(refused?.message).toContain("is a git repository outside a scratch root");
+  expect(refused?.next).toContain("~/.cache/agent-scratch/NAME");
+  expect(claimRefusal(join(home, "scratch"), home, roots)).toBeUndefined();
+  expect(claimRefusal(join(home, ".cache/agent-scratch"), home, roots)).toBeUndefined();
+});
+
+test("a git clone under a scratch root is claimable, and cleaned as claimed scratch through trash", async () => {
+  const roots = scratchRoots(home, ["~/batch"]);
+  expect(roots).toEqual([join(home, ".cache/agent-scratch"), join(home, "batch")]);
+  const clone = join(home, ".cache/agent-scratch/clone");
+  const batchClone = join(home, "batch/clone");
+  for (const path of [clone, batchClone]) {
+    await git(home, "init", "-q", path);
+    expect(claimRefusal(path, home, roots)).toBeUndefined();
+  }
+  writeFileSync(join(clone, "file"), "work");
+  age(clone);
+  const claimed = { ...ctx, config: { ...ctx.config, agentRoots: [] } };
+  writeLedger(ctx.paths, { holds: [], claims: [{ path: clone, actor: "a", at: "now" }] });
+  const { findings } = await scan(claimed, ["agent"]);
+  expect(findings).toHaveLength(1);
+  expect(findings[0]).toMatchObject({ category: "agent", risk: "low", action: "trash", paths: [clone] });
+  const applied = await applyPlan(createPlan(ctx.paths, findings, 7), claimed);
+  expect(existsSync(clone)).toBe(false);
+  await undo(ctx.paths, applied.transaction as string);
+  expect(readFileSync(join(clone, "file"), "utf8")).toBe("work");
+  expect(existsSync(join(clone, ".git/HEAD"))).toBe(true);
 });
 
 test("a live lock makes a second mutation fail as busy, and a dead lock is taken over", async () => {

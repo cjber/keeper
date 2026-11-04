@@ -31,8 +31,9 @@ behind, moves it to a trash you can undo, and proves its work before it touches 
 - **It renices instead of killing.** When the machine is overloaded, keeper names the commands holding the CPU and can
   lower their priority, so the work survives. With the kernel's autogroup on, it lowers each session's autogroup too,
   never the desktop's; with it off, it lowers the session process the work hangs from, so what it starts next inherits
-  the low priority. The one exception is an orphan whose terminal has closed and that has kept a core busy for half an
-  hour: nobody can use or quit it, so keeper offers to stop it, by id only.
+  the low priority. The exceptions are processes nobody can reach any more: an orphan whose terminal has closed and that
+  has kept a core busy for half an hour, and an idle one holding memory for hours after whatever started it went away.
+  keeper offers to stop those, by id only.
 
 ## Install
 
@@ -127,7 +128,13 @@ a blocked row per group that counts what is waiting and why. Holds, claims and k
 | `screenshots` | Stale images in the Pictures `Screenshots` and grim/hyprshot folders | medium, by id only |
 | `duplicates` | Identical files in different personal document trees, keeping the newest copy and offering the rest | medium, by id only |
 | `load` | Commands holding the CPU while the machine is oversubscribed, and orphans busy since their terminal closed | medium, stopping by id only |
-| `memory` | Cgroups at their `memory.high` cap, and memory pressure | report only |
+| `memory` | Cgroups at their `memory.high` cap, memory pressure, and abandoned processes holding RAM and swap | report only, stopping by id only |
+
+A process counts as abandoned only when every signal agrees: no live terminal on stdin and reparented to init, or to a
+tmux, screen, zellij or kiln server after its pane closed; no CPU over the one second sample; older than 6 hours; at
+least 16M of RAM plus swap; and either the script on its command line no longer exists or, unless it daemonised itself,
+it has written no open file for 6 hours. Shells, editors, multiplexer servers, systemd services, anything the desktop
+autostarted and anything whose working directory or script a hold covers are never offered.
 
 Apps, large files, downloads, screenshots and duplicates are personal or application data, so they are only planned
 when you name their id. `keeper plan` with no ids never takes them, even with `--max-risk medium`.

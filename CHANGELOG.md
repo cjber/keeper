@@ -7,6 +7,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+- **Abandoned processes holding memory are offered for stopping.** The memory scan now names long-lived idle processes
+  nobody can reach, such as a test fixture whose runner was killed before its cleanup ran, with the RAM and swap each
+  holds. Every signal is required: detached (reparented to init, or to a multiplexer server after its pane closed),
+  no CPU over the sample, over 6 hours old, and its script deleted or no file written for 6 hours. Each is a `stop`
+  finding (SIGTERM, then SIGKILL), medium risk and planned only by its id. Shells, editors, multiplexer servers,
+  systemd services, desktop autostarts and held paths are never offered.
 - **Scratch clones can be claimed.** `keeper claim` accepts a git clone under `~/.cache/agent-scratch` or a configured
   agent root, and it is cleaned like any claimed scratch: trashed once stale, restorable with `keeper undo`. A
   repository anywhere else is still refused, now with a message that says it is a repository rather than "too broad".

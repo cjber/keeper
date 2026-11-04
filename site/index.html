@@ -176,7 +176,7 @@ footer { margin-top: 72px; color: var(--muted); font-size: 13px; text-align: cen
   <li><strong><code>logs</code></strong><span>Configured logs over 50M, cut to their last 5M. Low.</span></li>
   <li><strong><code>snapshots</code></strong><span>Timeshift snapshots, which keep deleted data on disk. Report only.</span></li>
   <li><strong><code>load</code></strong><span>Commands holding the CPU while the machine is oversubscribed. Medium.</span></li>
-  <li><strong><code>memory</code></strong><span>Cgroups at their <code>memory.high</code> cap, and memory pressure. Report only.</span></li>
+  <li><strong><code>memory</code></strong><span>Cgroups at their <code>memory.high</code> cap and memory pressure, report only. Idle abandoned processes holding RAM and swap, stopped by id only.</span></li>
 </ul>
 <h3>Personal and application data</h3>
 <ul class="points">

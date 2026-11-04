@@ -7,6 +7,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+- **Planning load findings by id is fast.** Load and memory findings are now remembered, though never reused, so
+  `keeper plan LOAD-ID...` rescans only the load category instead of every category on the machine. Apply still rescans
+  every id it runs.
+- **New children stay deprioritised with autogroup off.** A load finding also lowers the session process its work
+  hangs from, such as an agent or a pane's shell, so the test runners and linters it starts next inherit the low
+  priority. The desktop session and the session that ran keeper are never lowered.
 - **Orphans whose terminal closed are offered for stopping.** A process reparented to init, whose stdin is a terminal
   that no longer exists, and that has kept a quarter of a core busy for 30 minutes is a `stop` finding (SIGTERM, then
   SIGKILL), on a quiet machine too. It is medium risk and planned only by its id, and it no longer hides in a renice row.

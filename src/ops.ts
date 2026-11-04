@@ -244,7 +244,7 @@ async function execute(finding: Finding, paths: Paths, tx: Transaction, slot: st
   }
   if (finding.action === "renice") {
     let changed = 0;
-    for (const pid of finding.pids ?? []) {
+    for (const pid of [...(finding.pids ?? []), ...(finding.parent ? [finding.parent] : [])]) {
       const nice = niceness(pid);
       if (nice === undefined || nice >= lowestPriority) continue; // gone, or already at the bottom
       if ((await run(["renice", "-n", String(lowestPriority), "-p", String(pid)])).code !== 0) continue;

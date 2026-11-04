@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cachedScan } from "./cache";
+import { cachedScan, categoriesOf, lastKnown } from "./cache";
 import { dangerous, health, runCli, schema } from "./cli";
 import { freshen } from "./freshen";
 import { BusyError, type Ledger, readLedger, updateLedger, withLock, writeLedger } from "./ledger";
@@ -581,6 +581,60 @@ test.skipIf(!autogroupOf(process.pid))("applying a load plan lowers the autogrou
     await undo(ctx.paths, applied.transaction as string);
     expect(autogroupOf(child.pid)?.nice).toBe(0);
   } finally {
+    child.kill();
+  }
+});
+
+test("planning load ids rescans only load, and the wizard never shows an old load reading", async () => {
+  const hot = { ...ctx, processes: [proc()], cores: 2, loadAverage: 9 };
+  const { findings } = await cachedScan(hot, { reuse: false, only: ["load", "tmp"] });
+  const load = findings.find((finding) => finding.category === "load");
+  expect(load).toBeDefined();
+  expect(categoriesOf(hot, [load?.id as string])).toEqual(["load"]);
+  expect(lastKnown(hot)?.findings.some((finding) => finding.category === "load") ?? false).toBe(false);
+});
+
+test("with autogroup off, renice also lowers the session parent so new children inherit it", async () => {
+  const tmux = proc({ pid: 100, cpu: 0, command: "tmux new -s work" });
+  const agent = proc({ pid: 101, ppid: 100, cpu: 0, command: "claude" });
+  const tests = proc({ pid: 110, ppid: 101, cpu: 90, command: "bun test" });
+  const worker = proc({ pid: 111, ppid: 110, cpu: 60, command: "bun test --worker" });
+  const processes = [tmux, agent, tests, worker];
+  const off = await scan({ ...ctx, processes, cores: 2, loadAverage: 9, autogroup: false }, ["load"]);
+  expect(off.findings.find((finding) => finding.pids?.includes(110))?.parent).toBe(101);
+  const on = await scan({ ...ctx, processes, cores: 2, loadAverage: 9, autogroup: true }, ["load"]);
+  expect(on.findings.find((finding) => finding.pids?.includes(110))?.parent).toBeUndefined();
+  // The session that ran keeper is never lowered, as its parent or otherwise.
+  const own = [proc({ pid: process.ppid, ppid: 100, cpu: 0, command: "claude" }), { ...tests, ppid: process.ppid }];
+  const asked = await scan({ ...ctx, processes: [tmux, ...own], cores: 2, loadAverage: 9, autogroup: false }, ["load"]);
+  expect(asked.findings.find((finding) => finding.pids?.includes(110))?.parent).toBeUndefined();
+});
+
+test("applying a load plan lowers the session parent and undo reports it", async () => {
+  const parent = Bun.spawn(["sleep", "30"], { stdout: "ignore", stderr: "ignore" });
+  const child = Bun.spawn(["sleep", "30"], { stdout: "ignore", stderr: "ignore" });
+  try {
+    const start = niceness(parent.pid) as number;
+    const hot: Context = {
+      ...ctx,
+      processes: [
+        proc({ pid: 100, cpu: 0, command: "tmux" }),
+        proc({ pid: parent.pid, ppid: 100, cpu: 0, command: "zsh" }),
+        proc({ pid: child.pid, ppid: parent.pid, cpu: 300, command: "sleep 30" }),
+      ],
+      cores: 2,
+      loadAverage: 8,
+      autogroup: false,
+    };
+    const { findings } = await scan(hot, ["load"]);
+    const applied = await applyPlan(createPlan(ctx.paths, findings, 7), hot);
+    expect(niceness(parent.pid)).toBe(19);
+    expect(applied.reniced).toBe(2);
+    const restored = await undo(ctx.paths, applied.transaction as string);
+    expect(restored.reniced + restored.stuck.length).toBe(2);
+    expect(niceness(parent.pid)).toBe(restored.stuck.some((entry) => entry.pid === parent.pid) ? 19 : start);
+  } finally {
+    parent.kill();
     child.kill();
   }
 });

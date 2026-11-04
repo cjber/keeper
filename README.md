@@ -30,7 +30,8 @@ behind, moves it to a trash you can undo, and proves its work before it touches 
   only at purge, and only if they have not moved.
 - **It renices instead of killing.** When the machine is overloaded, keeper names the commands holding the CPU and can
   lower their priority, so the work survives. With the kernel's autogroup on, it lowers each session's autogroup too,
-  never the desktop's. The one exception is an orphan whose terminal has closed and that has kept a core busy for half an
+  never the desktop's; with it off, it lowers the session process the work hangs from, so what it starts next inherits
+  the low priority. The one exception is an orphan whose terminal has closed and that has kept a core busy for half an
   hour: nobody can use or quit it, so keeper offers to stop it, by id only.
 
 ## Install

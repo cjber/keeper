@@ -41,6 +41,7 @@ async function open(
     findings: items,
     warnings: [],
     cached: [],
+    live: [],
   });
   const loads = mock((reuse: boolean) => reuse);
   const actions: Actions = {

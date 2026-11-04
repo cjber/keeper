@@ -34,7 +34,7 @@ const help = `keeper keeps an Arch machine clean. Output is JSON when stdout is 
 
   keeper                         open the wizard (terminal only)
   keeper scan [--category C] [--stale-days N] [--app-stale-days N] [--cached]
-                                 list findings; --cached reuses categories scanned recently
+                                 list findings; --cached reuses categories scanned recently, never load or memory
   keeper plan [ID...] [--category C] [--max-risk low|medium] [--stale-days N] [--app-stale-days N]
                                  save a plan of eligible findings; apps and personal files need their id
   keeper apply PLAN --yes        rescan, then apply what is unchanged
@@ -66,6 +66,8 @@ Categories: ${categories.join(", ")}.`;
 
 interface Flags {
   positional: string[];
+  /** Every option given, so a command can refuse one it does not take rather than drop it. */
+  given: string[];
   json: boolean;
   yes: boolean;
   cron: boolean;
@@ -92,6 +94,7 @@ class UsageError extends Error {
 function parse(args: readonly string[]): Flags {
   const flags: Flags = {
     positional: [],
+    given: [],
     json: false,
     yes: false,
     cron: false,
@@ -108,6 +111,7 @@ function parse(args: readonly string[]): Flags {
       if (next === undefined) throw new UsageError(`${arg} needs a value`);
       return next;
     };
+    if (arg.startsWith("-")) flags.given.push(arg);
     if (arg === "--json") flags.json = true;
     else if (arg === "--yes") flags.yes = true;
     else if (arg === "--cron") flags.cron = true;
@@ -142,6 +146,25 @@ function parse(args: readonly string[]): Flags {
   return flags;
 }
 
+/** The options each command reads. `--json` works everywhere. */
+const options: Record<string, readonly string[]> = {
+  scan: ["--category", "--stale-days", "--app-stale-days", "--cached"],
+  plan: ["--category", "--max-risk", "--stale-days", "--app-stale-days"],
+  apply: ["--yes"],
+  purge: ["--older-days"],
+  hold: ["--reason", "--days"],
+  history: ["--days"],
+  auto: ["--older-days"],
+  timer: ["--cron"],
+  undo: [],
+  claim: [],
+  release: [],
+  status: [],
+  log: [],
+  sample: [],
+  schema: [],
+};
+
 /** Short size: 512K, 340M, 2.3G. */
 export function size(bytes: number): string {
   const units = ["B", "K", "M", "G", "T"];
@@ -175,7 +198,7 @@ export function schema() {
       "true means a person has to name the finding's id in `keeper plan`. A plan with no ids never takes it, whatever --max-risk says",
     bytes: "uncompressed size, so a compressing filesystem frees less. Only purge's freed field is measured",
     eligible: "blockers is empty and action is not report",
-    scan: "schemaVersion, scannedAt, categoryScannedAt (when each category was scanned), cached (categories reused), findings, warnings",
+    scan: "schemaVersion, scannedAt, categoryScannedAt (when each category was scanned), cached (categories reused), live (categories --cached could not reuse, because they describe this moment), findings, warnings",
     environment: { KEEPER_ACTOR: "name recorded in holds, claims and the log" },
     cacheMinutes: maxAge,
     history:
@@ -268,7 +291,7 @@ async function dispatch(
       const total = report.findings.filter(eligible).reduce((sum, finding) => sum + finding.bytes, 0);
       return {
         value: { ...report, next: "keeper plan [ID...] [--max-risk medium]" },
-        text: `${report.findings.map(line).join("\n")}\n\n${size(total)} eligible, uncompressed${report.cached.length ? `. Reused from the cache: ${report.cached.join(", ")}` : ""}\nApps and personal files show by id and are only planned when you name them.`,
+        text: `${report.findings.map(line).join("\n")}\n\n${size(total)} eligible, uncompressed${report.cached.length ? `. Reused from the cache: ${report.cached.join(", ")}` : ""}${report.live.length ? `. Never cached, so scanned now: ${report.live.join(", ")}` : ""}\nApps and personal files show by id and are only planned when you name them.`,
       };
     }
     case "plan": {
@@ -503,6 +526,9 @@ export async function runCli(args: readonly string[]): Promise<number | undefine
       if (process.stdin.isTTY && process.stdout.isTTY) return undefined;
       throw new UsageError("the wizard needs a terminal. Run keeper --help");
     }
+    const allowed = options[command];
+    const extra = flags.given.find((flag) => flag !== "--json" && !allowed?.includes(flag));
+    if (allowed && extra) throw new UsageError(`${command} does not take ${extra}`);
     const result = await dispatch(flags, command, rest);
     // Commands that see or change free space leave a reading, so the history fills in without the timer.
     if (sampled.has(command)) await sample(defaultPaths()).catch(() => undefined);

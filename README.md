@@ -98,7 +98,8 @@ suffix, such as a test suite's `mkdtemp` leftovers, are one finding, named by th
 `tmp` looks only at entries you own, directly in `$TMPDIR` (or `/tmp`), and in `claude-<uid>`, where Claude Code
 keeps one directory per session. An entry is offered once nothing inside it has changed for a day, and never while a
 process has a file or its working directory there, a process listens on a socket there, or, for a Claude Code session,
-a process of that session is still running. Entries over 100M are listed one by one; the rest are grouped by name, with
+a process of that session is still running, or a lock file names a process that is still alive. X and session files
+(`.X<n>-lock`, `.X11-unix`, `.ICE-unix`, `.font-unix`, `.XIM-unix`, `.Test-unix`) are never offered. Entries over 100M are listed one by one; the rest are grouped by name, with
 a blocked row per group that counts what is waiting and why. Holds, claims and keeper's own state are never included.
 
 ## What it finds

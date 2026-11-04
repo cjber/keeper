@@ -124,6 +124,8 @@ export function lastKnown(context: Context): Scan | undefined {
 export interface CachedScan extends Scan {
   /** Categories served from the cache rather than scanned now. */
   cached: Category[];
+  /** Categories reuse was asked for but that describe this moment, so they were scanned now anyway. */
+  live: Category[];
 }
 
 /**
@@ -171,6 +173,7 @@ export async function cachedScan(
     },
     findings: [...report.findings, ...withHolds(context, reused)].sort((a, b) => b.bytes - a.bytes),
     cached,
+    live: reuse ? only.filter((category) => maxAge[category] === 0) : [],
   };
 }
 

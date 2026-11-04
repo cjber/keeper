@@ -3,7 +3,7 @@ import { createReadStream, existsSync, lstatSync, readdirSync, readFileSync, rea
 import { lstat, readdir } from "node:fs/promises";
 import { availableParallelism, loadavg } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { readLedger } from "./ledger";
+import { alive, readLedger } from "./ledger";
 import { ageDays, expandHome, holders, type Paths, run, sizes } from "./system";
 import { type Category, categories, count, type Finding, type Risk, type Scan, schemaVersion } from "./types";
 import { coveredDays, readUsage, type UsageLedger } from "./usage";
@@ -27,9 +27,14 @@ const partialHashBytes = 64 * 1024;
 const loadPerCore = 1.25;
 /** Groups below this share of a core are noise, and renicing them would change nothing. */
 const minGroupCpu = 25;
-/** Short bursts are normal; only work that has held the CPU this long is deprioritised. */
+/**
+ * Short bursts are normal; only work that has held the CPU this long is deprioritised. A build that keeps starting
+ * fresh workers never has an old member, so a group also counts once its members have used `minGroupCoreMinutes`.
+ */
 const minGroupMinutes = 5;
-const sampleMs = 200;
+const minGroupCoreMinutes = 2;
+/** Long enough that one scheduler burst cannot swing a group by tens of points between two scans. */
+export const sampleMs = 1000;
 const clockTicks = 100;
 /** The bottom of the range: what nice can give without root. */
 export const lowestPriority = 19;
@@ -201,6 +206,8 @@ export interface ProcessInfo {
   cpu: number;
   /** Seconds since the process started. */
   age: number;
+  /** CPU seconds used over the process's whole life. */
+  cpuSeconds: number;
   command: string;
 }
 
@@ -591,6 +598,25 @@ const tmpOwnRowBytes = 100 * 1024 ** 2;
 /** A bound socket is how a server such as tmux keeps its temp dir in use without an open file there. */
 const tmpSocket = "holds a socket a running program listens on, offered once it exits";
 
+/**
+ * X and session files a running display depends on: the `.X<n>-lock` that names its server's PID and the socket
+ * directories. A lock is a plain file nobody keeps open, so no other blocker sees it, and these are never offered.
+ */
+const tmpDisplay = /^(\.X\d+-lock|\.(X11|ICE|font|XIM|Test)-unix)$/;
+const tmpLockAlive = "a lock file naming a process that is still alive, offered once it exits";
+
+/** The PID a small lock file holds, as `uv.lock` style tools and X write it, or undefined when it is not one. */
+function lockPid(path: string): number | undefined {
+  if (!/[-.]lock$/i.test(path)) return undefined;
+  try {
+    if (statSync(path).size > 32) return undefined;
+    const match = /^\s*(\d+)\s*$/.exec(readFileSync(path, "latin1"));
+    return match ? Number(match[1]) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 interface TmpEntry {
   path: string;
   bytes: number;
@@ -768,7 +794,12 @@ async function scanTmp(context: Context): Promise<Finding[]> {
     return true;
   };
   const entries = [...top.entries.filter((entry) => entry.path !== claude), ...sessions.entries]
-    .filter((entry) => ours(entry.path) && !kept.some((path) => overlaps(path, entry.path)))
+    .filter(
+      (entry) =>
+        ours(entry.path) &&
+        !(dirname(entry.path) === root && tmpDisplay.test(basename(entry.path))) &&
+        !kept.some((path) => overlaps(path, entry.path)),
+    )
     .sort((a, b) => (a.path < b.path ? -1 : 1));
   // Keyed by entry, so a million open files cost one pass rather than one per entry.
   const keyOf = (path: string) => {
@@ -787,6 +818,7 @@ async function scanTmp(context: Context): Promise<Finding[]> {
   const blockersOf = (entry: TmpEntry, grouped: boolean) => [
     ...(busy.has(entry.path) ? [inUse] : []),
     ...(listening.has(entry.path) ? [tmpSocket] : []),
+    ...(alive(lockPid(entry.path)) ? [tmpLockAlive] : []),
     ...(mixed.has(entry.path) ? ["holds files another user owns or keeper cannot read, so it cannot move whole"] : []),
     ...(references.sessions.has(basename(entry.path)) && entry.path.startsWith(`${claude}/`)
       ? ["its Claude Code session is still running, offered once it exits"]
@@ -1843,14 +1875,48 @@ async function sampleProcesses(milliseconds = sampleMs): Promise<{
     const then = before.get(pid);
     if (!then) return []; // started during the sample, so there is no usage to measure
     const { ppid, uid, nice, age, command } = now;
-    return [{ pid, ppid, uid, nice, age, command, cpu: ((now.ticks - then.ticks) / clockTicks / seconds) * 100 }];
+    const cpu = ((now.ticks - then.ticks) / clockTicks / seconds) * 100;
+    return [{ pid, ppid, uid, nice, age, command, cpu, cpuSeconds: now.ticks / clockTicks }];
   });
   return { processes, cores: availableParallelism(), loadAverage: loadavg()[0] ?? 0 };
 }
 
+/** Where a process tree stops: init, a multiplexer or remote login, or the desktop session itself. */
+function treeBoundary(proc: ProcessInfo): boolean {
+  const name = commandName(proc.command);
+  return proc.pid <= 2 || sessionCommands.has(name) || /^(tmux|screen|zellij|sshd|login)\b/.test(name);
+}
+
 /**
- * Groups by command, not by process group: a desktop session puts the window manager, terminals and everything a build
- * spawns into one group, so renicing that group would slow the very thing that has to stay responsive.
+ * The process a tree of work hangs from: the highest ancestor below a terminal, multiplexer pane or init that the same
+ * user owns. Two projects in two panes are two trees, while a build and every worker it spawns are one.
+ */
+function treeRoots(processes: readonly ProcessInfo[]): Map<number, number> {
+  const byPid = new Map(processes.map((proc) => [proc.pid, proc]));
+  const roots = new Map<number, number>();
+  for (const proc of processes) {
+    let at = proc;
+    for (let parent = byPid.get(at.ppid); parent && parent.uid === at.uid && !treeBoundary(parent); ) {
+      at = parent;
+      parent = byPid.get(at.ppid);
+    }
+    roots.set(proc.pid, at.pid);
+  }
+  return roots;
+}
+
+/** This keeper run and every process above it, which is the session that asked for the scan. */
+function callers(processes: readonly ProcessInfo[]): Set<number> {
+  const byPid = new Map(processes.map((proc) => [proc.pid, proc]));
+  const found = new Set<number>([process.pid]);
+  for (let at = byPid.get(process.ppid); at && !found.has(at.pid); at = byPid.get(at.ppid)) found.add(at.pid);
+  return found;
+}
+
+/**
+ * Groups by command within one process tree, not by process group or by name alone: a desktop session puts the window
+ * manager, terminals and everything a build spawns into one process group, and a name alone puts every project's
+ * `bun` or `claude` into one row, so renicing either would slow work nobody chose. Kernel threads are not offered.
  */
 async function scanLoad(context: Context): Promise<Finding[]> {
   const sample = context.processes
@@ -1862,30 +1928,40 @@ async function scanLoad(context: Context): Promise<Finding[]> {
     : await sampleProcesses();
   const { cores, loadAverage } = sample;
   if (loadAverage <= cores * loadPerCore) return [];
-  const groups = new Map<string, ProcessInfo[]>();
-  for (const proc of sample.processes) {
+  // kthreadd is pid 2 and the parent of every kernel thread, which no renice from here can or should touch.
+  const processes = sample.processes.filter((proc) => proc.pid !== 2 && proc.ppid !== 2);
+  const roots = treeRoots(processes);
+  const asking = callers(processes);
+  const groups = new Map<string, { name: string; members: ProcessInfo[] }>();
+  for (const proc of processes) {
     const name = commandName(proc.command);
-    groups.set(name, [...(groups.get(name) ?? []), proc]);
+    const key = `${name}\0${roots.get(proc.pid)}`;
+    const group = groups.get(key) ?? { name, members: [] };
+    group.members.push(proc);
+    groups.set(key, group);
   }
   const me = process.getuid?.() ?? -1;
-  return [...groups].flatMap(([name, members]) => {
+  return [...groups].flatMap(([key, { name, members }]) => {
     const cpu = members.reduce((sum, member) => sum + member.cpu, 0);
     const heaviest = members.reduce((hot, member) => (member.cpu > hot.cpu ? member : hot));
     const oldest = members.reduce((long, member) => (member.age > long.age ? member : long));
-    if (cpu < minGroupCpu || oldest.age < minGroupMinutes * 60) return [];
+    const used = members.reduce((sum, member) => sum + member.cpuSeconds, 0);
+    const sustained = oldest.age >= minGroupMinutes * 60 || used >= minGroupCoreMinutes * 60;
+    if (cpu < minGroupCpu || !sustained) return [];
     const pids = members.map((member) => member.pid).sort((a, b) => a - b);
     const blockers: string[] = [];
     if (sessionCommands.has(name)) blockers.push("part of your desktop session, which is what has to stay responsive");
     if (members.every((member) => member.nice >= lowestPriority)) blockers.push("already at the bottom priority");
-    if (pids.includes(process.pid))
+    if (pids.some((pid) => asking.has(pid)))
       blockers.push(
-        "includes this keeper run, and keeper never lowers its own priority: a scan after it exits judges the rest",
+        "includes this keeper run or the session that started it, and keeper never lowers its caller: a scan after it exits judges the rest",
       );
     if (heaviest.uid !== me) blockers.push("owned by another user");
     return [
       {
-        // The command name is the state: workers come and go, and "rustc is hammering this machine" is what was judged.
-        id: findingId("load", name, "cpu"),
+        // Command and tree are the state: workers come and go, and "rustc in this build is hammering the machine" is
+        // what was judged.
+        id: findingId("load", key, "cpu"),
         category: "load",
         risk: "medium",
         action: "renice",

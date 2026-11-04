@@ -78,6 +78,11 @@ export interface Finding {
   pids?: number[];
   /** One pid per session autogroup that `renice` also lowers, set only while the kernel's autogroup is on. */
   autogroups?: number[];
+  /**
+   * The session process the group hangs from, such as an agent or a pane's shell, which `renice` also lowers while
+   * autogroup is off so the children it starts next inherit the low priority.
+   */
+  parent?: number;
 }
 
 export interface Scan {

@@ -1991,6 +1991,7 @@ async function scanLoad(context: Context): Promise<Finding[]> {
   // kthreadd is pid 2 and the parent of every kernel thread, which no renice from here can or should touch.
   const processes = sample.processes.filter((proc) => proc.pid !== 2 && proc.ppid !== 2 && !stopped.has(proc.pid));
   const roots = treeRoots(processes);
+  const byPid = new Map(processes.map((proc) => [proc.pid, proc]));
   // With autogroup on the scheduler splits CPU between sessions first, so only a session's autogroup nice moves CPU
   // away from it. The desktop's group and the caller's are never lowered, since an agent shell can share either.
   const autogroupOn = context.autogroup ?? autogroupEnabled();
@@ -2028,6 +2029,16 @@ async function scanLoad(context: Context): Promise<Finding[]> {
     for (const { autogroup, pid } of members)
       if (autogroupOn && autogroup && !spared.has(autogroup) && !named.has(autogroup)) named.set(autogroup, pid);
     const autogroups = [...named.values()];
+    const root = byPid.get(roots.get(heaviest.pid) ?? -1);
+    const parent =
+      !autogroupOn &&
+      root &&
+      !pids.includes(root.pid) &&
+      root.uid === me &&
+      !asking.has(root.pid) &&
+      !sessionCommands.has(commandName(root.command))
+        ? root.pid
+        : undefined;
     return [
       {
         // Command and tree are the state: workers come and go, and "rustc in this build is hammering the machine" is
@@ -2045,6 +2056,7 @@ async function scanLoad(context: Context): Promise<Finding[]> {
         reason: `${Math.round(cpu)}% of one core while load is ${loadAverage.toFixed(1)} on ${cores} cores. Lowering its priority keeps it running and gives the CPU back to the apps you are using`,
         blockers,
         ...(autogroups.length ? { autogroups } : {}),
+        ...(parent ? { parent } : {}),
       } satisfies Finding,
     ];
   });

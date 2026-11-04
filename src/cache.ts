@@ -102,11 +102,14 @@ export function forgetUnder(paths: Paths, moved: readonly string[]): void {
   write(paths, cache);
 }
 
-/** Everything stored, however old, for the wizard to show while it scans. Never a basis for acting. */
+/**
+ * Everything stored, however old, for the wizard to show while it scans. Never a basis for acting. Load and memory
+ * describe a past moment, so they are left out.
+ */
 export function lastKnown(context: Context): Scan | undefined {
   const stored = read(context.paths);
   if (!stored || stored.fingerprint !== fingerprint(context)) return undefined;
-  const entries = Object.entries(stored.entries) as [Category, Entry][];
+  const entries = (Object.entries(stored.entries) as [Category, Entry][]).filter(([category]) => maxAge[category] > 0);
   if (!entries.length) return undefined;
   const oldest = entries.map(([, entry]) => entry.scannedAt).sort()[0] as string;
   return {
@@ -156,7 +159,8 @@ export async function cachedScan(
     context,
     only.filter((category) => !cached.includes(category)),
     (category, findings) => {
-      if (findings && maxAge[category] > 0) scanned[category] = { scannedAt: at, findings };
+      // Load and memory are stored too, never to be reused, so planning their ids rescans only their category.
+      if (findings) scanned[category] = { scannedAt: at, findings };
       done?.(category, findings?.length, false);
     },
   );

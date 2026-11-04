@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cachedScan, forget, forgetUnder } from "./cache";
+import { cachedScan, categoriesOf, forget, forgetUnder } from "./cache";
 import { freeChart, spaceBars, waits } from "./charts";
 import { readEvents, readSamples, sample } from "./history";
 import { audit, writeLedger } from "./ledger";
@@ -48,6 +48,16 @@ test("a recent category is reused until its max age, a full rescan or a forget",
   await cachedScan(ctx, { reuse: false, only: ["agent"] });
   forget(ctx.paths, ["agent"]);
   expect((await cachedScan(ctx, { only: ["agent"] })).cached).toEqual([]);
+});
+
+test("planning known ids rescans only their categories, and an unknown id rescans everything", async () => {
+  const [finding] = (await cachedScan(ctx, { only: ["agent", "docker"] })).findings;
+  if (!finding) throw new Error("no agent finding");
+  // Any age will do: the rescan still validates the id, the cache only says where to look.
+  const later = { ...ctx, now: ctx.now + 600 * minute };
+  expect(categoriesOf(later, [finding.id])).toEqual(["agent"]);
+  expect(categoriesOf(later, [finding.id, "0000000000"])).toBeUndefined();
+  expect(categoriesOf({ ...ctx, staleDays: 0 }, [finding.id])).toBeUndefined();
 });
 
 test("an apply drops cached findings inside the paths it moved, whatever their category", async () => {

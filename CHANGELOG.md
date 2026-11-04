@@ -7,6 +7,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+- **A worktree whose PR a bot rebased before merging is proven.** When the merged PR's head is not the local commit,
+  keeper compares content: if every file the local commits changed is identical in the PR's merge commit, the
+  worktree is finished, so it no longer stays blocked as commits on no remote.
+- **Planning by id rescans only what it needs.** `keeper plan ID` rescans just the categories that held those ids in
+  the last scan, so a single finding plans in the time its own category takes, without `--category`.
 - **Finds what tests and agents leave in the temp dir.** The new `tmp` category offers your entries in `$TMPDIR` or
   `/tmp` once nothing in them has changed for a day and no process has a file, working directory or listening socket
   there. Claude Code's temp dir is judged per session, and a session that is still running is left alone. Each finding

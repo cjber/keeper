@@ -147,6 +147,8 @@ export interface PullRequest {
   state: "OPEN" | "CLOSED" | "MERGED";
   headRefName: string;
   headRefOid: string;
+  /** The commit the merge landed on the default branch, the squash commit for a squash merge. */
+  mergeCommit?: { oid: string } | null;
 }
 
 export interface Context {
@@ -260,7 +262,7 @@ const pullRequestLimit = 1000;
 
 /** No gh, no auth or no network means no proof, which leaves a worktree behind the age window and approval. */
 async function listPullRequests(repo: string, branch?: string): Promise<PullRequest[]> {
-  const fields = "number,state,headRefName,headRefOid";
+  const fields = "number,state,headRefName,headRefOid,mergeCommit";
   const filter = branch ? ["--head", branch] : [];
   const command = ["gh", "pr", "list", "--state", "all", "--limit", String(pullRequestLimit), ...filter];
   const result = await run([...command, "--json", fields], repo);
@@ -280,13 +282,14 @@ const unfinishedOperations = ["rebase-merge", "rebase-apply", "BISECT_LOG", "MER
  * of it when the PR gained commits pushed from elsewhere. The commit test matters because branch names get reused, and
  * a branch can gain commits after its PR merged. The ancestor test needs commits that no remote holds: without them the
  * checkout has no work of its own, like a branch just cut from main under a reused name, so only the age window may
- * judge it.
+ * judge it. A PR a bot rebased before merging holds none of the local commits, so it proves the checkout by content
+ * instead: every file the local commits changed is exactly as the merge commit landed it.
  */
 async function findMerged(
   pullRequests: readonly PullRequest[],
   branch: string,
   head: string,
-  git: (...args: string[]) => Promise<{ code: number }>,
+  git: (...args: string[]) => Promise<{ code: number; stdout: string }>,
   ownCommits: boolean,
 ): Promise<PullRequest | undefined> {
   const candidates = pullRequests.filter((pr) => pr.state === "MERGED" && pr.headRefName === branch);
@@ -295,7 +298,27 @@ async function findMerged(
   for (const pr of candidates) {
     if ((await git("merge-base", "--is-ancestor", "HEAD", pr.headRefOid)).code === 0) return pr;
   }
+  for (const pr of candidates) {
+    if (pr.mergeCommit?.oid && (await landedContent(pr.mergeCommit.oid, git))) return pr;
+  }
   return undefined;
+}
+
+/** Every file changed since HEAD forked from the merge commit's history is identical in the merge commit. */
+async function landedContent(
+  merge: string,
+  git: (...args: string[]) => Promise<{ code: number; stdout: string }>,
+): Promise<boolean> {
+  // A merge commit this clone never fetched fails here, which leaves the checkout unproven.
+  const base = await git("merge-base", "HEAD", merge);
+  if (base.code !== 0 || !base.stdout) return false;
+  const changed = await git("diff", "--no-renames", "--name-only", "-z", base.stdout, "HEAD");
+  const files = changed.stdout.split("\0").filter(Boolean);
+  if (changed.code !== 0 || !files.length) return false;
+  return (
+    (await git("diff", "--quiet", "--no-renames", merge, "HEAD", "--", ...files.map((f) => `:(literal)${f}`))).code ===
+    0
+  );
 }
 
 type PullRequestLookup = (commonDir: string, path: string, branch: string) => Promise<PullRequest[]>;

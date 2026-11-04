@@ -118,7 +118,7 @@ footer { margin-top: 72px; color: var(--muted); font-size: 13px; text-align: cen
 
 <h2>Why keeper</h2>
 <ul class="points">
-  <li><strong>It proves before it removes.</strong><span>A worktree counts as finished only when a merged pull request holds every commit it has, or when every commit is on the default branch. Anything else waits for approval.</span></li>
+  <li><strong>It proves before it removes.</strong><span>A worktree counts as finished only when a merged pull request holds every commit it has, or landed every file its commits changed after a rebase, or when every commit is on the default branch. Anything else waits for approval.</span></li>
   <li><strong>Agents are the primary user.</strong><span>Every command returns JSON when piped, and each exit code names the next step. The wizard is a thin layer over the same calls.</span></li>
   <li><strong>Agents can protect their work.</strong><span><code>keeper hold</code> outranks every scanner until it expires, so a session can mark a worktree it will return to.</span></li>
   <li><strong>Nothing is final until purge.</strong><span>Paths move to a trash, and <code>keeper undo</code> restores them. Local branches are deleted only at purge, and only if they have not moved.</span></li>

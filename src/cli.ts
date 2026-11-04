@@ -58,6 +58,7 @@ Sizes are uncompressed, so btrfs with compression frees less than they show. Spa
 Worktrees are low risk only with proof: a merged PR with the same commit, or every commit on the default branch.
 Exit codes: 0 ok, 1 error, 2 usage, 3 needs --yes, 4 plan is entirely stale, 5 partly applied, so scan again, 6 another run holds the lock, so retry.
 Set KEEPER_ACTOR to name yourself in holds, claims and the log.
+Agents: npx skills add cjber/keeper installs the keeper skill, which says when to hold, plan and apply.
 A load finding appears only while the machine is oversubscribed, and renicing needs --max-risk medium.
 Apps, large files, downloads, screenshots and duplicates are only planned by explicit id. A bare keeper plan never
 takes them, even with --max-risk medium, because only you can say which app or personal file may go.

@@ -1,0 +1,23 @@
+# keeper
+
+> keeper keeps an Arch machine clean, with your agent doing the deciding. It finds what is safe to remove on a machine where coding agents leave worktrees, build output, caches and transcripts, proves it, and moves it to a trash you can undo.
+
+Install: `paru -S keeper-bin`, `paru -S keeper`, or `npm i -g @cillianb/keeper`. Run once without installing: `npx @cillianb/keeper scan`.
+
+## Agent skill
+
+Install the skill before driving keeper: `npx skills add cjber/keeper`, or in Claude Code `/plugin marketplace add cjber/keeper` then `/plugin install keeper@keeper`.
+
+- [keeper skill](https://github.com/cjber/keeper/blob/main/skills/keeper/SKILL.md): free disk space, judge blocked worktrees, diagnose a loaded or memory-starved machine
+
+## How agents use it
+
+- Every command returns JSON when piped, and each exit code names the next step (`keeper --help` lists them).
+- `keeper scan`, then `keeper plan`, then `keeper apply PLAN --yes`. Medium-risk items need the user's approval.
+- `keeper hold PATH --reason R` protects a worktree you will return to; `keeper claim PATH` declares scratch.
+- Set `KEEPER_ACTOR` to name yourself in holds, claims and the log.
+
+## Docs
+
+- [README](https://github.com/cjber/keeper/blob/main/README.md)
+- [Changelog](https://github.com/cjber/keeper/blob/main/CHANGELOG.md)

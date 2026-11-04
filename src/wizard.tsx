@@ -42,8 +42,9 @@ export const liveActions: Actions = {
     const ctx = context();
     const outcome = await applyPlan(createPlan(ctx.paths, findings, ctx.staleDays, ctx.appStaleDays), ctx);
     const lowered = outcome.reniced ? `lowered the priority of ${count(outcome.reniced, "process", "processes")}` : "";
+    const ended = outcome.stopped ? `stopped ${count(outcome.stopped, "process", "processes")}` : "";
     const done =
-      [outcome.bytes ? `moved ${size(outcome.bytes)} to trash` : "", lowered].filter(Boolean).join(" and ") ||
+      [outcome.bytes ? `moved ${size(outcome.bytes)} to trash` : "", lowered, ended].filter(Boolean).join(" and ") ||
       "applied";
     const stale = findings.filter((finding) => outcome.stale.includes(finding.id)).map((finding) => finding.title);
     return [

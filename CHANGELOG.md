@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-04
+
 - **A worktree whose PR a bot rebased before merging is proven.** When the merged PR's head is not the local commit,
   keeper compares content: if every file the local commits changed is identical in the PR's merge commit, the
   worktree is finished, so it no longer stays blocked as commits on no remote.

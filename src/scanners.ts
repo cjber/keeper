@@ -326,8 +326,11 @@ export function worktreeDirs(root: string): string[] {
 /** The newest pull requests in one call. A busy repository has more, so a branch missing here is looked up by name. */
 const pullRequestLimit = 1000;
 
-/** gh saying it cannot help in this repo at all, which no retry changes: not installed, not logged in, not GitHub. */
-const noGitHub = [/no git remotes found/, /none of the git remotes/, /gh auth login/, /not a git repository/];
+/** gh saying this repo is not on GitHub, which no retry changes. */
+const noGitHub = [/no git remotes found/, /none of the git remotes/, /not a git repository/];
+
+/** Exit codes for gh missing (127) and gh not logged in (4), which no retry changes either. */
+const noGh = [127, 4];
 
 /**
  * A repo gh cannot serve has no pull requests, which leaves its worktrees behind the age window and approval. Any other
@@ -338,7 +341,7 @@ async function listPullRequests(repo: string, branch?: string): Promise<PullRequ
   const filter = branch ? ["--head", branch] : [];
   const command = ["gh", "pr", "list", "--state", "all", "--limit", String(pullRequestLimit), ...filter];
   const result = await run([...command, "--json", fields], repo);
-  if (result.code === 127 || noGitHub.some((pattern) => pattern.test(result.stderr))) return [];
+  if (noGh.includes(result.code) || noGitHub.some((pattern) => pattern.test(result.stderr))) return [];
   if (result.code !== 0) throw new Error(result.stderr.split("\n")[0] || `gh exited ${result.code}`);
   return JSON.parse(result.stdout) as PullRequest[];
 }

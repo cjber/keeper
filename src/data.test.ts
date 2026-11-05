@@ -154,6 +154,7 @@ test("a path inside another category's finding counts once, under its own catego
     blockers: string[] = [],
   ) => ({
     id,
+    state: id,
     category,
     risk: "low" as const,
     action: "trash" as const,
@@ -178,6 +179,7 @@ test("a path inside another category's finding counts once, under its own catego
 test("build output inside a blocked worktree counts as build, once, and waits groups by first blocker", () => {
   const finding = (category: "worktree" | "build", path: string, bytes: number, blockers: string[]) => ({
     id: path,
+    state: path,
     category,
     risk: "low" as const,
     action: "trash" as const,

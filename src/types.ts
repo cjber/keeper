@@ -1,4 +1,4 @@
-export const schemaVersion = 6;
+export const schemaVersion = 7;
 
 export const categories = [
   "worktree",
@@ -47,8 +47,10 @@ export type Action =
   | "report";
 
 export interface Finding {
-  /** Hash of category, target and state, so an id stops matching once the thing it judged changes. */
+  /** Hash of category and target alone, so the same thing keeps its id from one scan to the next. */
   id: string;
+  /** Hash of what the finding judged. Apply refuses a finding whose state moved since it was planned. */
+  state: string;
   category: Category;
   risk: Risk;
   action: Action;
@@ -101,6 +103,8 @@ export interface Plan {
   id: string;
   createdAt: string;
   findingIds: string[];
+  /** Each finding's state when planned, by id. A plan without it is from an older keeper and applies nothing. */
+  states?: Record<string, string>;
   /** The categories its findings came from, so apply rescans only those. Older plans lack it and rescan all. */
   categories?: Category[];
   bytes: number;

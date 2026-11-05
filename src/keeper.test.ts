@@ -17,7 +17,7 @@ import { cachedScan, categoriesOf, lastKnown } from "./cache";
 import { claimRefusal, health, runCli, schema, scratchRoots } from "./cli";
 import { freshen } from "./freshen";
 import { BusyError, type Ledger, readLedger, updateLedger, withLock, writeLedger } from "./ledger";
-import { applyPlan, bulkPlan, context, createPlan, loadConfig, purge, undo } from "./ops";
+import { applyPlan, bulkPlan, context, createPlan, loadConfig, pickById, purge, undo } from "./ops";
 import {
   type Context,
   defaultConfig,
@@ -894,6 +894,91 @@ test("a branch older than the newest page of PRs is looked up by name", async ()
   expect(report.findings[0]?.reason).toContain("PR #7");
 });
 
+test("a pull request lookup that fails once is retried, and the proof it finds stands", async () => {
+  const path = await worktree("flaky");
+  const head = await git(path, "rev-parse", "HEAD");
+  let calls = 0;
+  const flaky = async () => {
+    if (++calls === 1) throw new Error("timeout");
+    return pull("MERGED", head, "b-flaky")();
+  };
+  const report = await scan({ ...ctx, pullRequests: flaky, retryPause: 1 }, ["worktree"]);
+  expect(calls).toBe(2);
+  expect(report.warnings).toEqual([]);
+  expect(report.findings[0]).toMatchObject({ risk: "low", blockers: [] });
+});
+
+test("a pull request lookup that keeps failing warns once for the repo and blocks its worktrees", async () => {
+  const first = await worktree("down");
+  const second = join(home, ".worktrees/down-two");
+  await git(join(home, "down-main"), "worktree", "add", "-q", "-b", "b-down-two", second);
+  for (const path of [first, second]) age(path);
+  for (const name of ["down", "down-two"]) age(join(home, `down-main/.git/worktrees/${name}/logs/HEAD`));
+  let calls = 0;
+  const down = async (): Promise<PullRequest[]> => {
+    calls++;
+    throw new Error("HTTP 502");
+  };
+  const failing = { ...ctx, pullRequests: down, retryPause: 1 };
+  const report = await cachedScan(failing, { only: ["worktree"] });
+  expect(calls).toBe(3);
+  expect(report.warnings).toHaveLength(1);
+  expect(report.warnings[0]).toContain(join(home, "down-main"));
+  expect(report.warnings[0]).toContain("HTTP 502");
+  for (const finding of report.findings) {
+    expect(finding.blockers.join()).toContain("could not be listed");
+    expect(eligible(finding)).toBe(false);
+  }
+  // An incomplete scan is never reused, so the next one asks GitHub again.
+  const head = await git(first, "rev-parse", "HEAD");
+  const again = await cachedScan({ ...ctx, pullRequests: pull("MERGED", head, "b-down") }, { only: ["worktree"] });
+  expect(again.cached).toEqual([]);
+  expect(again.findings.find((finding) => finding.paths[0] === first)?.reason).toContain("PR #7");
+});
+
+test("a finding keeps its id when its state moves, and apply refuses the moved state", async () => {
+  const path = await worktree("moving");
+  const admin = join(home, "moving-main/.git/worktrees/moving/logs/HEAD");
+  age(path);
+  age(admin);
+  const before = (await scan(ctx, ["worktree"])).findings[0] as Finding;
+  expect(eligible(before)).toBe(true);
+  const plan = createPlan(ctx.paths, [before], 7);
+  await git(path, "commit", "-qm", "more", "--allow-empty");
+  await git(path, "push", "-q", "origin", "HEAD:b-moving");
+  age(path);
+  age(admin);
+  const after = (await scan(ctx, ["worktree"])).findings[0] as Finding;
+  expect(after.id).toBe(before.id);
+  expect(after.state).not.toBe(before.state);
+  expect(eligible(after)).toBe(true);
+  const outcome = await applyPlan(plan, ctx);
+  expect(outcome.stale).toEqual([before.id]);
+  expect(existsSync(path)).toBe(true);
+});
+
+test("planning by id skips an unknown or blocked id and keeps the rest", () => {
+  const finding = (id: string, blockers: string[]): Finding => ({
+    id,
+    state: id,
+    category: "agent",
+    title: id,
+    paths: [`/${id}`],
+    packages: [],
+    bytes: 1,
+    risk: "low",
+    action: "trash",
+    reason: "",
+    blockers,
+  });
+  const { chosen, skipped } = pickById([finding("ready", []), finding("busy", ["in use"])], ["gone", "busy", "ready"]);
+  expect(chosen.map((found) => found.id)).toEqual(["ready"]);
+  expect(skipped).toEqual([
+    { id: "gone", reason: "no such finding now" },
+    { id: "busy", reason: "not eligible: in use" },
+  ]);
+});
+
 test("a reused branch name is not proof, because the commit differs", async () => {
   await worktree("reused");
   const report = await scan({ ...ctx, pullRequests: pull("MERGED", "0".repeat(40), "b-reused") }, ["worktree"]);
@@ -1161,6 +1246,7 @@ test("health names each reason the nightly runs cannot be trusted, and nothing w
 test("a plan counts a worktree's own build output once, inside the worktree", () => {
   const finding = (id: string, path: string, bytes: number): Finding => ({
     id,
+    state: id,
     category: id === "tree" ? "worktree" : "build",
     title: id,
     paths: [path],
@@ -1182,6 +1268,7 @@ test("a plan counts a worktree's own build output once, inside the worktree", ()
 test("a bulk plan never takes apps or personal files, whatever the risk ceiling", () => {
   const finding = (id: string, category: Finding["category"], risk: Finding["risk"]): Finding => ({
     id,
+    state: id,
     category,
     title: id,
     paths: [`/${id}`],

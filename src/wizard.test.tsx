@@ -10,6 +10,7 @@ import { type Actions, Wizard } from "./wizard";
 
 const finding = (id: string, risk: Finding["risk"], blockers: string[] = []): Finding => ({
   id,
+  state: id,
   category: "aur",
   risk,
   action: "trash",

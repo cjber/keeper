@@ -38,6 +38,8 @@ interface Entry {
   scannedAt: string;
   /** Before holds, which are applied on every read. */
   findings: Finding[];
+  /** The scan warned, so a missing proof may be a failed lookup. Kept for its ids, never reused. */
+  incomplete?: true;
 }
 
 interface Cache {
@@ -133,7 +135,8 @@ export interface CachedScan extends Scan {
 
 /**
  * Scans the categories past their max age and reuses the rest. With reuse off it scans everything, and either way it
- * stores what it scanned. A category that failed is never stored, so a failure cannot pass for an empty result.
+ * stores what it scanned. A category that failed is never stored, and one that warned is never reused, so a failure
+ * cannot pass for a clean result.
  */
 export async function cachedScan(
   context: Context,
@@ -149,7 +152,7 @@ export async function cachedScan(
   const usable = stored?.fingerprint === print ? stored.entries : {};
   const fresh = (category: Category) => {
     const entry = usable[category];
-    return reuse && entry && context.now - Date.parse(entry.scannedAt) < maxAge[category] * minute;
+    return reuse && entry && !entry.incomplete && context.now - Date.parse(entry.scannedAt) < maxAge[category] * minute;
   };
   const cached = only.filter(fresh);
   for (const category of cached) done?.(category, usable[category]?.findings.length, true);
@@ -158,9 +161,9 @@ export async function cachedScan(
   const report = await scan(
     context,
     only.filter((category) => !cached.includes(category)),
-    (category, findings) => {
+    (category, findings, warned) => {
       // Load and memory are stored too, never to be reused, so planning their ids rescans only their category.
-      if (findings) scanned[category] = { scannedAt: at, findings };
+      if (findings) scanned[category] = { scannedAt: at, findings, incomplete: warned || undefined };
       done?.(category, findings?.length, false);
     },
   );

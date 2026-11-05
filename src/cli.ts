@@ -12,6 +12,7 @@ import {
   createPlan,
   freeBytes,
   loadConfig,
+  pickById,
   purge,
   readPlan,
   transactions,
@@ -67,7 +68,7 @@ const help = `keeper keeps an Arch machine clean. Output is JSON when stdout is 
 
 Sizes are uncompressed, so btrfs with compression frees less than they show. Space returns at purge, which reports what it freed.
 Worktrees are low risk only with proof: a merged PR with the same commit or the same changed files, or every commit on the default branch.
-Exit codes: 0 ok, 1 error, 2 usage, 3 needs --yes, 4 plan is entirely stale, 5 partly applied, so scan again, 6 another run holds the lock, so retry.
+Exit codes: 0 ok, 1 error, 2 usage, 3 needs --yes, 4 plan is entirely stale, 5 partly done: some ids skipped or some items not applied, so scan again, 6 another run holds the lock, so retry.
 Set KEEPER_ACTOR to name yourself in holds, claims and the log.
 Agents: npx skills add cjber/keeper installs the keeper skill, which says when to hold, plan and apply.
 A load finding appears only while the machine is oversubscribed, and renicing needs --max-risk medium.
@@ -331,19 +332,17 @@ async function dispatch(
       // Ids found in the last scan rescan only their own categories, rather than every category on the machine.
       const only = flags.category ?? (rest.length ? categoriesOf(ctx, rest) : undefined);
       const report = await cachedScan(ctx, { reuse: false, only });
-      const chosen = rest.length
-        ? rest.map((id) => {
-            const finding = report.findings.find((candidate) => candidate.id === id);
-            if (!finding) throw new UsageError(`no finding ${id}`);
-            if (!eligible(finding))
-              throw new UsageError(`${id} is not eligible: ${finding.blockers.join("; ") || finding.action}`);
-            return finding;
-          })
-        : bulkPlan(report.findings, flags.maxRisk);
+      const { chosen, skipped } = rest.length
+        ? pickById(report.findings, rest)
+        : { chosen: bulkPlan(report.findings, flags.maxRisk), skipped: [] };
+      if (rest.length && !chosen.length)
+        throw new UsageError(skipped.map(({ id, reason }) => `${id}: ${reason}`).join("; "), "keeper scan");
       const plan = createPlan(paths, chosen, flags.staleDays, flags.appStaleDays);
+      const skippedText = skipped.map(({ id, reason }) => `\nskipped ${id}: ${reason}`).join("");
       return {
-        value: { ...plan, next: `keeper apply ${plan.id} --yes` },
-        text: `plan ${plan.id}: ${count(chosen.length, "item")}, ${size(plan.bytes)}`,
+        value: { ...plan, skipped, next: `keeper apply ${plan.id} --yes` },
+        text: `plan ${plan.id}: ${count(chosen.length, "item")}, ${size(plan.bytes)}${skippedText}`,
+        code: skipped.length ? exit.partial : undefined,
       };
     }
     case "apply": {

@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-05
+
 - **Finding ids stay the same between scans.** An id now names the thing, such as a worktree's path, rather than its
   state, so ids collected from one scan still work in `keeper plan` minutes later. Each finding also carries a `state`,
   and `apply` still refuses anything whose state moved since it was planned. Plans saved by older versions apply

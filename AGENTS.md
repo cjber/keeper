@@ -35,7 +35,9 @@ Every version needs a `CHANGELOG.md` entry. `python3 scripts/wordmark.py` regene
 - Scanners never write. Run git with `--no-optional-locks`, because `git status` otherwise refreshes the index and destroys the activity signal.
 - A safety rule belongs in a scanner as a blocker, so agents, the timer and the wizard all get it.
 - Do not treat atime, or the git index mtime, as evidence of use.
-- `apply` rescans and matches ids. Never add a path that skips that check.
+- A finding's id is its category and target; its `state` is what was judged. `apply` rescans and matches both id and
+  state. Never add a path that skips that check.
+- A failed lookup is a warning and a blocker, never an empty answer: a missing PR list must not read as "no PRs".
 - Only low-risk findings may run unattended. A worktree is low risk only with proof, and packages stay behind approval.
 - Apps and personal files (`apps`, `large`, `downloads`, `screenshots`, `duplicates`) carry `explicit`, so a plan with no ids never takes them, whatever `--max-risk` says. Only an explicit id selects them.
 - `large` and `duplicates` skip application trees: Wine prefixes, Steam, Lutris, Heroic, GOG, `~/Games` style libraries, flatpak data, VM stores, and any directory holding an install marker. A duplicate is offered only across different top-level personal document folders.

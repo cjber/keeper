@@ -94,6 +94,7 @@ export function createPlan(
     id: newId(),
     createdAt: new Date(now).toISOString(),
     findingIds: findings.map((finding) => finding.id),
+    states: Object.fromEntries(findings.map((finding) => [finding.id, finding.state])),
     categories: [...new Set(findings.map((finding) => finding.category))],
     bytes: findings.reduce((sum, finding) => sum + finding.bytes, 0),
     staleDays,
@@ -101,6 +102,27 @@ export function createPlan(
   };
   writeJson(join(paths.state, "plans", `${plan.id}.json`), plan);
   return plan;
+}
+
+/**
+ * The findings named by id. An id that vanished or gained a blocker since the scan is skipped with its reason, so one
+ * of them never costs the rest of the plan.
+ */
+export function pickById(
+  findings: readonly Finding[],
+  ids: readonly string[],
+): { chosen: Finding[]; skipped: { id: string; reason: string }[] } {
+  const byId = new Map(findings.map((finding) => [finding.id, finding]));
+  const chosen: Finding[] = [];
+  const skipped: { id: string; reason: string }[] = [];
+  for (const id of ids) {
+    const finding = byId.get(id);
+    if (!finding) skipped.push({ id, reason: "no such finding now" });
+    else if (!eligible(finding))
+      skipped.push({ id, reason: `not eligible: ${finding.blockers.join("; ") || finding.action}` });
+    else chosen.push(finding);
+  }
+  return { chosen, skipped };
 }
 
 export function readPlan(paths: Paths, id: string): Plan {
@@ -344,7 +366,7 @@ async function applyUnlocked(plan: Plan, ctx: Context): Promise<Outcome> {
   };
   for (const [index, findingId] of plan.findingIds.entries()) {
     const finding = current.get(findingId);
-    if (!finding || !eligible(finding)) {
+    if (!finding || finding.state !== plan.states?.[findingId] || !eligible(finding)) {
       outcome.stale.push(findingId);
       continue;
     }

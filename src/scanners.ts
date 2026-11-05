@@ -205,8 +205,12 @@ export interface Context {
   picturesDir?: string;
   /** Sampled processes, so a test never has to race a real machine. Absent means the scan reads /proc. */
   processes?: readonly ProcessInfo[];
-  /** Replaces the GitHub lookup in tests. With a branch, it lists only that branch's pull requests. */
+  /** Replaces the GitHub lookup in tests. With a branch, it lists only that branch's pull requests. A throw is a failure. */
   pullRequests?: (repo: string, branch?: string) => Promise<PullRequest[]>;
+  /** Milliseconds before the first retry of a failed pull request lookup. Tests shorten it. */
+  retryPause?: number;
+  /** Hears a problem that left a category incomplete without failing it. `scan` sets it per category. */
+  warn?: (message: string) => void;
   cores?: number;
   loadAverage?: number;
   /** Whether the kernel shares CPU between session autogroups. Absent means read /proc/sys/kernel/sched_autogroup_enabled. */
@@ -260,8 +264,14 @@ export interface ProcessInfo {
   written?: number;
 }
 
-export function findingId(category: Category, target: string, state: string): string {
-  return createHash("sha256").update(`${category}\0${target}\0${state}`).digest("hex").slice(0, 10);
+const digest = (...parts: string[]) => createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 10);
+
+/**
+ * The id names the thing, so an id from one scan still finds it in the next. The state names what was judged, so a
+ * plan approved for one state is never applied to another.
+ */
+export function findingId(category: Category, target: string, state: string): { id: string; state: string } {
+  return { id: digest(category, target), state: digest(category, target, state) };
 }
 
 function entries(path: string): string[] {
@@ -316,17 +326,35 @@ export function worktreeDirs(root: string): string[] {
 /** The newest pull requests in one call. A busy repository has more, so a branch missing here is looked up by name. */
 const pullRequestLimit = 1000;
 
-/** No gh, no auth or no network means no proof, which leaves a worktree behind the age window and approval. */
+/** gh saying this repo is not on GitHub, which no retry changes. */
+const noGitHub = [/no git remotes found/, /none of the git remotes/, /not a git repository/];
+
+/** Exit codes for gh missing (127) and gh not logged in (4), which no retry changes either. */
+const noGh = [127, 4];
+
+/**
+ * A repo gh cannot serve has no pull requests, which leaves its worktrees behind the age window and approval. Any other
+ * failure throws: a timeout or rate limit on a busy machine says nothing about whether a branch was merged.
+ */
 async function listPullRequests(repo: string, branch?: string): Promise<PullRequest[]> {
   const fields = "number,state,headRefName,headRefOid,mergeCommit";
   const filter = branch ? ["--head", branch] : [];
   const command = ["gh", "pr", "list", "--state", "all", "--limit", String(pullRequestLimit), ...filter];
   const result = await run([...command, "--json", fields], repo);
-  if (result.code !== 0) return [];
-  try {
-    return JSON.parse(result.stdout) as PullRequest[];
-  } catch {
-    return [];
+  if (noGh.includes(result.code) || noGitHub.some((pattern) => pattern.test(result.stderr))) return [];
+  if (result.code !== 0) throw new Error(result.stderr.split("\n")[0] || `gh exited ${result.code}`);
+  return JSON.parse(result.stdout) as PullRequest[];
+}
+
+/** Tries a lookup that failed again after a pause, longer each time, before giving up on it. */
+async function retried<T>(attempt: () => Promise<T>, pause: number, attempts = 3): Promise<T> {
+  for (let tries = 1; ; tries++) {
+    try {
+      return await attempt();
+    } catch (error) {
+      if (tries >= attempts) throw error;
+      await Bun.sleep(pause * tries);
+    }
   }
 }
 
@@ -377,7 +405,8 @@ async function landedContent(
   );
 }
 
-type PullRequestLookup = (commonDir: string, path: string, branch: string) => Promise<PullRequest[]>;
+/** Undefined when the repo's pull requests could not be listed, which is not the same as having none. */
+type PullRequestLookup = (commonDir: string, path: string, branch: string) => Promise<PullRequest[] | undefined>;
 
 async function inspectWorktree(
   path: string,
@@ -414,7 +443,11 @@ async function inspectWorktree(
   if (holders(path, context.live)) blockers.push(inUse);
   const operation = unfinishedOperations.find((name) => gitDir && existsSync(join(gitDir, name)));
   if (operation) blockers.push(`${operation} is in progress, finish or abort it`);
-  const pullRequests = valid && commonDir ? await lookup(commonDir, path, branch) : [];
+  const listed = valid && commonDir ? await lookup(commonDir, path, branch) : [];
+  // An open pull request cannot be ruled out either, so the worktree waits for a scan that can list them.
+  if (!listed)
+    blockers.push("its pull requests could not be listed, so neither a merge nor an open PR is known. Scan again");
+  const pullRequests = listed ?? [];
   const open = pullRequests.find((pr) => pr.state === "OPEN" && pr.headRefName === branch);
   if (open) blockers.push(`PR #${open.number} is open, merge or close it`);
   const ownCommits = ahead.code === 0 && Number(ahead.stdout) > 0;
@@ -442,7 +475,7 @@ async function inspectWorktree(
   // Only a merge outruns the age window. A branch just cut from main is also contained in it, and is about to be used.
   if (!merged && touched < context.staleDays) blockers.push(touchedAgo(touched, context.staleDays));
   return {
-    id: findingId("worktree", path, `${head}\0${status.stdout}\0${proof}\0${open?.number ?? ""}`),
+    ...findingId("worktree", path, `${head}\0${status.stdout}\0${proof}\0${open?.number ?? ""}`),
     category: "worktree",
     risk: proof ? "low" : "medium",
     action: "trash",
@@ -477,14 +510,26 @@ async function scanWorktrees(context: Context): Promise<Finding[]> {
   const leftovers = context.paths.worktrees.flatMap(leftoverDirs);
   const bytes = await sizes([...dirs, ...leftovers]);
   const fetch = context.pullRequests ?? listPullRequests;
-  const known = new Map<string, Promise<PullRequest[]>>();
+  const failed = new Set<string>();
+  // One warning per repo, because one failed lookup leaves every worktree of that repo unproven.
+  const list = (commonDir: string, path: string, branch?: string) =>
+    retried(() => fetch(path, branch), context.retryPause ?? 2000).catch((error: unknown) => {
+      if (!failed.has(commonDir)) {
+        failed.add(commonDir);
+        const repo = commonDir.replace(/\/\.git$/, "");
+        context.warn?.(`pull requests of ${repo} could not be listed, so its worktrees stay unproven: ${error}`);
+      }
+      return undefined;
+    });
+  const known = new Map<string, Promise<PullRequest[] | undefined>>();
   const lookup: PullRequestLookup = async (commonDir, path, branch) => {
-    const found = known.get(commonDir) ?? fetch(path);
+    const found = known.get(commonDir) ?? list(commonDir, path);
     known.set(commonDir, found);
     const all = await found;
     // A full page means older pull requests went unlisted, so a branch it lacks gets a lookup of its own.
-    if (all.length < pullRequestLimit || branch === "HEAD" || all.some((pr) => pr.headRefName === branch)) return all;
-    return fetch(path, branch);
+    if (!all || all.length < pullRequestLimit || branch === "HEAD" || all.some((pr) => pr.headRefName === branch))
+      return all;
+    return list(commonDir, path, branch);
   };
   return found([
     ...(await Promise.all(
@@ -512,7 +557,7 @@ async function inspectLeftover(path: string, context: Context, bytes: number): P
   if (holders(path, context.live)) blockers.push(inUse);
   if (age < context.staleDays) blockers.push(touchedAgo(age, context.staleDays));
   return {
-    id: findingId("worktree", path, `leftover\0${bytes}`),
+    ...findingId("worktree", path, `leftover\0${bytes}`),
     category: "worktree",
     risk: "medium",
     action: "trash",
@@ -545,7 +590,7 @@ async function scanAur(context: Context): Promise<Finding[]> {
     );
   const bytes = await sizes([...uninstalled, ...artifacts]);
   const finding = (path: string, title: string, reason: string): Finding => ({
-    id: findingId("aur", path, String(bytes.get(path))),
+    ...findingId("aur", path, String(bytes.get(path))),
     category: "aur",
     risk: "low",
     action: "trash",
@@ -577,7 +622,7 @@ async function scanPacmanCache(): Promise<Finding[]> {
   const bytes = Math.round(Number(saved[1]) * (units[saved[2] as string] ?? 1));
   return [
     {
-      id: findingId("pacman-cache", "paccache", String(bytes)),
+      ...findingId("pacman-cache", "paccache", String(bytes)),
       category: "pacman-cache",
       risk: "low",
       action: "paccache",
@@ -598,7 +643,7 @@ async function scanOrphans(): Promise<Finding[]> {
   const bytes = info.stdout.split("\n").reduce((sum, size) => sum + (Number(size) || 0), 0);
   return [
     {
-      id: findingId("orphans", "orphans", packages.join(",")),
+      ...findingId("orphans", "orphans", packages.join(",")),
       category: "orphans",
       risk: "medium",
       action: "remove-packages",
@@ -627,7 +672,7 @@ async function scanAgent(context: Context): Promise<Finding[]> {
     if (holders(path, context.live)) blockers.push(inUse);
     if (age < context.staleDays) blockers.push(touchedAgo(age, context.staleDays));
     return {
-      id: findingId("agent", path, `${statSync(path).mtimeMs}`),
+      ...findingId("agent", path, `${statSync(path).mtimeMs}`),
       category: "agent",
       risk: "low",
       action: "trash",
@@ -797,7 +842,8 @@ function tmpFinding(title: string, members: readonly TmpEntry[], blockers: strin
   const state = members.map((entry) => `${entry.path}\0${entry.bytes}\0${entry.mtime}`).join("\0");
   const inodes = members.reduce((sum, entry) => sum + entry.inodes, 0);
   return {
-    id: findingId("tmp", title, state),
+    // A pattern splits into a ready row and a waiting row under the same title, so the id tells them apart.
+    ...findingId("tmp", `${title}\0${blockers.length ? "waiting" : "ready"}`, state),
     category: "tmp",
     risk: "low",
     action: "trash",
@@ -985,7 +1031,7 @@ async function scanBuild(context: Context): Promise<Finding[]> {
   ).filter((entry) => entry !== undefined);
   const bytes = await sizes(ignored.map((entry) => entry.path));
   return ignored.map(({ path, recent }) => ({
-    id: findingId("build", path, `${bytes.get(path)}\0${recent}`),
+    ...findingId("build", path, `${bytes.get(path)}\0${recent}`),
     category: "build",
     risk: "low",
     action: "trash",
@@ -1032,7 +1078,7 @@ async function scanTranscripts(context: Context): Promise<Finding[]> {
   if (files.length === 0) return [];
   return [
     {
-      id: findingId("transcripts", "transcripts", files.map(([, path]) => path).join("\0")),
+      ...findingId("transcripts", "transcripts", files.map(([, path]) => path).join("\0")),
       category: "transcripts",
       risk: "low",
       action: "trash",
@@ -1080,7 +1126,7 @@ async function scanPackageCaches(context: Context): Promise<Finding[]> {
       if (!cache.prunes && size < cleanAboveBytes) return undefined;
       const gib = Math.round(size / 1024 ** 3);
       return {
-        id: findingId("package-cache", path, String(size)),
+        ...findingId("package-cache", path, String(size)),
         category: "package-cache",
         risk: "low",
         action: cache.action,
@@ -1146,7 +1192,7 @@ export function dockerFindings(usage: DockerUsage, reclaimableBuildCache: number
   if (dangling.length) {
     const bytes = dangling.reduce((sum, image) => sum + dockerBytes(image.Size), 0);
     findings.push({
-      id: findingId("docker", "dangling-images", `${dangling.length}:${bytes}`),
+      ...findingId("docker", "dangling-images", `${dangling.length}:${bytes}`),
       category: "docker",
       risk: "low",
       action: "docker-image-prune",
@@ -1160,7 +1206,7 @@ export function dockerFindings(usage: DockerUsage, reclaimableBuildCache: number
   }
   if (reclaimableBuildCache > 0) {
     findings.push({
-      id: findingId("docker", "build-cache", String(reclaimableBuildCache)),
+      ...findingId("docker", "build-cache", String(reclaimableBuildCache)),
       category: "docker",
       risk: "low",
       action: "docker-builder-prune",
@@ -1178,7 +1224,7 @@ export function dockerFindings(usage: DockerUsage, reclaimableBuildCache: number
     const project = (volume: DockerVolume) => /com\.docker\.compose\.project=([^,]+)/.exec(volume.Labels)?.[1];
     const projects = [...new Set(unused.map((volume) => project(volume) ?? volume.Name))];
     findings.push({
-      id: findingId("docker", "volumes", unused.map((volume) => volume.Name).join(",")),
+      ...findingId("docker", "volumes", unused.map((volume) => volume.Name).join(",")),
       category: "docker",
       risk: "high",
       action: "report",
@@ -1200,7 +1246,7 @@ async function scanSnapshots(): Promise<Finding[]> {
   if (count === 0) return [];
   return [
     {
-      id: findingId("snapshots", "timeshift", String(count)),
+      ...findingId("snapshots", "timeshift", String(count)),
       category: "snapshots",
       risk: "high",
       action: "report",
@@ -1226,7 +1272,7 @@ async function scanLogs(context: Context): Promise<Finding[]> {
     if (size <= logCapBytes) return [];
     return [
       {
-        id: findingId("logs", path, String(size)),
+        ...findingId("logs", path, String(size)),
         category: "logs",
         risk: "low",
         action: "truncate",
@@ -1351,7 +1397,7 @@ export function appFindings(
       : `Candidate: not seen in ${count(coverage, "day")} of sampling, ${appStaleDays} needed to confirm, ${humanSize(pkg.bytes)} installed. Only an explicit id removes it`;
     return [
       {
-        id: findingId("apps", pkg.name, lastSeen ?? "never"),
+        ...findingId("apps", pkg.name, lastSeen ?? "never"),
         category: "apps",
         risk: "medium",
         action: "remove-packages",
@@ -1643,7 +1689,7 @@ async function scanDownloads(context: Context): Promise<Finding[]> {
     }. Only planned by its id`;
     return [
       {
-        id: findingId("downloads", path, `${stat.size}\0${Math.round(stat.mtimeMs)}`),
+        ...findingId("downloads", path, `${stat.size}\0${Math.round(stat.mtimeMs)}`),
         category: "downloads",
         risk,
         action: "trash",
@@ -1678,7 +1724,7 @@ async function scanScreenshots(context: Context): Promise<Finding[]> {
       if ((context.now - stat.mtimeMs) / 86_400_000 < context.staleDays) return [];
       return [
         {
-          id: findingId("screenshots", path, `${stat.size}\0${Math.round(stat.mtimeMs)}`),
+          ...findingId("screenshots", path, `${stat.size}\0${Math.round(stat.mtimeMs)}`),
           category: "screenshots",
           risk: "medium",
           action: "trash",
@@ -1737,7 +1783,7 @@ async function scanLarge(context: Context): Promise<Finding[]> {
     if (insideAppTree(path, context.paths.home, appTrees)) return [];
     return [
       {
-        id: findingId("large", path, `${bytes}\0${Math.round(Number(mtime) * 1000)}`),
+        ...findingId("large", path, `${bytes}\0${Math.round(Number(mtime) * 1000)}`),
         category: "large",
         risk: "medium",
         action: "trash",
@@ -1851,7 +1897,7 @@ async function scanDuplicates(context: Context): Promise<Finding[]> {
   return duplicates.map(
     ({ kept, copy }) =>
       ({
-        id: findingId("duplicates", copy.path, `${copy.bytes}\0${copy.mtime}`),
+        ...findingId("duplicates", copy.path, `${copy.bytes}\0${copy.mtime}`),
         category: "duplicates",
         risk: "medium",
         action: "trash",
@@ -2015,7 +2061,7 @@ async function scanLoad(context: Context): Promise<Finding[]> {
     (proc) =>
       ({
         // Apply rescans, so a pid that was reused meanwhile has to be an orphaned dead terminal with this command too.
-        id: findingId("load", `orphan\0${proc.pid}`, proc.command),
+        ...findingId("load", `orphan\0${proc.pid}`, proc.command),
         category: "load",
         risk: "medium",
         action: "stop",
@@ -2087,7 +2133,7 @@ async function scanLoad(context: Context): Promise<Finding[]> {
       {
         // Command and tree are the state: workers come and go, and "rustc in this build is hammering the machine" is
         // what was judged.
-        id: findingId("load", key, "cpu"),
+        ...findingId("load", key, "cpu"),
         category: "load",
         risk: "medium",
         action: "renice",
@@ -2269,7 +2315,7 @@ function abandonedFindings(context: Context, processes: readonly ProcessInfo[]):
     return [
       {
         // Apply rescans, so a pid that was reused meanwhile has to be abandoned with this command too.
-        id: findingId("memory", `abandoned\0${proc.pid}`, proc.command),
+        ...findingId("memory", `abandoned\0${proc.pid}`, proc.command),
         category: "memory",
         risk: "medium",
         action: "stop",
@@ -2305,7 +2351,7 @@ function pressureFindings(context: Context): Finding[] {
   if (pinned.length === 0) {
     return [
       {
-        id: findingId("memory", "pressure", "stall"),
+        ...findingId("memory", "pressure", "stall"),
         category: "memory",
         risk: "medium",
         action: "report",
@@ -2322,7 +2368,7 @@ function pressureFindings(context: Context): Finding[] {
     const name = cgroupName(cgroup.path);
     const command = cgroup.commands[0];
     return {
-      id: findingId("memory", cgroup.path, String(cgroup.high)),
+      ...findingId("memory", cgroup.path, String(cgroup.high)),
       category: "memory",
       risk: "medium",
       action: "report",
@@ -2382,27 +2428,35 @@ export function withHolds(context: Context, findings: readonly Finding[]): Findi
   });
 }
 
-/** Scans each category, reporting its findings, before holds, as it finishes, or undefined when it failed. */
+/**
+ * Scans each category, reporting its findings, before holds, as it finishes, or undefined when it failed. `warned` says
+ * the category finished but is incomplete, so it must not stand in for a later scan.
+ */
 export async function scan(
   context: Context,
   only: readonly Category[] = categories,
-  done?: (category: Category, findings: Finding[] | undefined) => void,
+  done?: (category: Category, findings: Finding[] | undefined, warned: boolean) => void,
 ): Promise<Scan> {
   const warnings: string[] = [];
   const results = await Promise.all(
-    only.map((category) =>
-      scanners[category](context).then(
+    only.map((category) => {
+      let warned = false;
+      const warn = (message: string) => {
+        warned = true;
+        warnings.push(`${category}: ${message}`);
+      };
+      return scanners[category]({ ...context, warn }).then(
         (findings) => {
-          done?.(category, findings);
+          done?.(category, findings, warned);
           return findings;
         },
         (error) => {
           warnings.push(`${category}: ${error}`);
-          done?.(category, undefined);
+          done?.(category, undefined, true);
           return [] as Finding[];
         },
-      ),
-    ),
+      );
+    }),
   );
   const at = new Date(context.now).toISOString();
   return {

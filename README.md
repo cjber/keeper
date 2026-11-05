@@ -84,7 +84,9 @@ trash                    keeper undo TX restores. keeper purge deletes for good 
 ```
 
 An agent can only add a blocker. It has no way to clear one, so a bad judgement can keep a file but never lose one.
-Each finding's id is a hash of the state that was judged, so approval covers that state and nothing newer.
+Each finding's id names the thing itself, such as a worktree's path, so it stays the same from one scan to the next.
+A plan also records the state that was judged, so approval covers that state and nothing newer. `keeper plan ID...`
+skips an id that is gone or blocked, says why, and plans the rest.
 
 ## Sizes and freed space
 
@@ -228,7 +230,7 @@ actually sampled to judge every unseen app against it. With no samples at all, a
 | 2 | Usage error |
 | 3 | Needs `--yes`, which needs someone's approval |
 | 4 | The whole plan is stale, so make a new one |
-| 5 | Partly applied, so scan again |
+| 5 | Partly done: `plan` skipped some ids, or `apply` left some items, so scan again |
 | 6 | Another run holds the lock, so retry |
 
 Set `KEEPER_ACTOR` to name yourself in holds, claims and the log.

@@ -7,6 +7,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-05
+
+- **Finding ids stay the same between scans.** An id now names the thing, such as a worktree's path, rather than its
+  state, so ids collected from one scan still work in `keeper plan` minutes later. Each finding also carries a `state`,
+  and `apply` still refuses anything whose state moved since it was planned. Plans saved by older versions apply
+  nothing, so plan again after upgrading.
+- **One bad id no longer aborts a plan.** `keeper plan ID...` skips an id that is gone or blocked, lists each one under
+  `skipped` with its reason, plans the rest and exits 5. It fails only when no id could be planned.
+- **A failed pull request lookup is reported, not read as "no pull requests".** On a busy machine one failed
+  `gh pr list` used to drop the merged proof of every worktree in that repo without a word. The lookup is now retried
+  twice, then the scan warns once naming the repo, its worktrees get a blocker saying their pull requests could not be
+  listed, and that incomplete result is never reused from the cache. A repo gh cannot serve at all (gh missing, not
+  logged in, no GitHub remote) still has no proof and no warning.
+
 ## [0.3.0] - 2026-11-04
 
 - **Abandoned processes holding memory are offered for stopping.** The memory scan now names long-lived idle processes

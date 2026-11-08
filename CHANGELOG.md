@@ -7,6 +7,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+- **keeper no longer slows down the apps you are using.** Every command now runs at the lowest CPU priority and idle
+  disk priority, and the du and git calls a scan starts inherit both. Several agents scanning at once on a busy
+  machine used to push the load past 60 on 16 cores; now keeper only uses time the rest of the machine leaves free.
+
 ## [0.3.1] - 2026-11-05
 
 - **Finding ids stay the same between scans.** An id now names the thing, such as a worktree's path, rather than its

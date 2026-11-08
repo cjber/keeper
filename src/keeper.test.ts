@@ -112,6 +112,8 @@ test("a pushed, clean, idle worktree is the only eligible one", async () => {
   expect(by(dirty)?.blockers).toContain("1 uncommitted or untracked file, commit, stash or delete it");
   expect(by(live)?.blockers.join()).toContain("running process");
   expect(by(recent)?.blockers.join()).toContain("touched");
+  expect(by(clean)?.bytes).toBeGreaterThan(0);
+  expect(by(dirty)?.bytes).toBe(0);
 });
 
 test("a commit only on this machine blocks the worktree", async () => {

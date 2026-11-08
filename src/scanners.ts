@@ -408,12 +408,7 @@ async function landedContent(
 /** Undefined when the repo's pull requests could not be listed, which is not the same as having none. */
 type PullRequestLookup = (commonDir: string, path: string, branch: string) => Promise<PullRequest[] | undefined>;
 
-async function inspectWorktree(
-  path: string,
-  context: Context,
-  bytes: number,
-  lookup: PullRequestLookup,
-): Promise<Finding> {
+async function inspectWorktree(path: string, context: Context, lookup: PullRequestLookup): Promise<Finding> {
   const git = (...args: string[]) => run(["git", "--no-optional-locks", "-C", path, ...args]);
   const blockers: string[] = [];
   const [names, status, ahead, defaultBranch] = await Promise.all([
@@ -482,7 +477,7 @@ async function inspectWorktree(
     title: `${relativeToRoot(path, context.paths.worktrees)} (${branch || "unknown branch"})`,
     paths: [path],
     packages: [],
-    bytes,
+    bytes: 0,
     // The reason states the proof alone; uncommitted files and the like are blockers, so the two never contradict.
     reason: proof || "No merged pull request or default branch holds its commits",
     blockers,
@@ -508,7 +503,6 @@ function headAge(gitDir: string, now: number): number {
 async function scanWorktrees(context: Context): Promise<Finding[]> {
   const dirs = context.paths.worktrees.flatMap(worktreeDirs);
   const leftovers = context.paths.worktrees.flatMap(leftoverDirs);
-  const bytes = await sizes([...dirs, ...leftovers]);
   const fetch = context.pullRequests ?? listPullRequests;
   const failed = new Set<string>();
   // One warning per repo, because one failed lookup leaves every worktree of that repo unproven.
@@ -531,14 +525,18 @@ async function scanWorktrees(context: Context): Promise<Finding[]> {
       return all;
     return list(commonDir, path, branch);
   };
-  return found([
-    ...(await Promise.all(
-      dirs.map((dir) => unlessGone(dir, () => inspectWorktree(dir, context, bytes.get(dir) ?? 0, lookup))),
-    )),
-    ...(await Promise.all(
-      leftovers.map((dir) => unlessGone(dir, () => inspectLeftover(dir, context, bytes.get(dir) ?? 0))),
-    )),
-  ]);
+  // Walking a checkout is the costly part of a scan, and most worktrees are blocked, so only one that could be planned
+  // is measured. A blocked finding keeps 0 bytes, which reads as an unknown size.
+  const checkouts = found(
+    await Promise.all(dirs.map((dir) => unlessGone(dir, () => inspectWorktree(dir, context, lookup)))),
+  );
+  const bytes = await sizes(
+    checkouts.filter((finding) => !finding.blockers.length).flatMap((finding) => finding.paths),
+  );
+  return [
+    ...checkouts.map((finding) => ({ ...finding, bytes: bytes.get(finding.paths[0] as string) ?? 0 })),
+    ...found(await Promise.all(leftovers.map((dir) => unlessGone(dir, () => inspectLeftover(dir, context))))),
+  ];
 }
 
 /** A directory beside worktrees that is not a checkout, usually what a manual removal left behind. */
@@ -548,7 +546,7 @@ function leftoverDirs(root: string): string[] {
     .flatMap((dir) => entries(dir).filter((child) => isDirectory(child) && !existsSync(join(child, ".git"))));
 }
 
-async function inspectLeftover(path: string, context: Context, bytes: number): Promise<Finding> {
+async function inspectLeftover(path: string, context: Context): Promise<Finding> {
   // Branch names with a slash nest worktrees a level deeper, so this one may be a parent of live checkouts.
   const nested = await run(["find", path, "-maxdepth", "3", "-name", ".git", "-print", "-quit"]);
   const age = await newestAge(path, context.now);
@@ -556,6 +554,7 @@ async function inspectLeftover(path: string, context: Context, bytes: number): P
   if (nested.stdout) blockers.push("contains a checkout");
   if (holders(path, context.live)) blockers.push(inUse);
   if (age < context.staleDays) blockers.push(touchedAgo(age, context.staleDays));
+  const bytes = blockers.length ? 0 : ((await sizes([path])).get(path) ?? 0);
   return {
     ...findingId("worktree", path, `leftover\0${bytes}`),
     category: "worktree",

@@ -11,6 +11,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   by older versions lapse a day after the audit log says they were made, so the week-long holds left by finished agent
   sessions no longer keep most worktrees from ever being offered. An older hold missing from the audit log keeps its
   end date, and the scan warns about it.
+
+## [0.3.2] - 2026-11-08
+
 - **keeper no longer slows down the apps you are using.** Every command now runs at the lowest CPU priority and idle
   disk priority, and the du and git calls a scan starts inherit both. Several agents scanning at once on a busy
   machine used to push the load past 60 on 16 cores; now keeper only uses time the rest of the machine leaves free.

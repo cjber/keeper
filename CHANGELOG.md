@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-08
+
 - **A hold lasts one day.** `keeper hold` protects a path for 1 day, and `--days` can only shorten that. Holds made
   by older versions lapse a day after the audit log says they were made, so the week-long holds left by finished agent
   sessions no longer keep most worktrees from ever being offered. An older hold missing from the audit log keeps its

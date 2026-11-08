@@ -172,6 +172,25 @@ test("a hold blocks a finding that would otherwise be ready, until it expires", 
   const expired = new Date(Date.now() - 1000).toISOString();
   writeLedger(ctx.paths, { holds: [{ path: batch, until: expired, reason: "old", actor: "a" }], claims: [] });
   expect((await scan(ctx, ["agent"])).findings[0]?.blockers).toEqual([]);
+  const made = new Date(Date.now() - 25 * 3_600_000).toISOString();
+  writeLedger(ctx.paths, { holds: [{ path: batch, until, reason: "long", actor: "a", at: made }], claims: [] });
+  expect((await scan(ctx, ["agent"])).findings[0]?.blockers).toEqual([]);
+});
+
+test("a hold made before holds recorded their start lapses a day after the audit log says it was made", async () => {
+  const batch = join(home, "batch");
+  mkdirSync(batch);
+  age(batch);
+  const until = new Date(Date.now() + 5 * 86_400_000).toISOString();
+  const hold = { path: batch, until, reason: "legacy", actor: "a" };
+  writeLedger(ctx.paths, { holds: [hold], claims: [] });
+  mkdirSync(ctx.paths.state, { recursive: true });
+  const entry = (hoursAgo: number) =>
+    `${JSON.stringify({ at: new Date(Date.now() - hoursAgo * 3_600_000).toISOString(), event: "hold", ...hold })}\n`;
+  writeFileSync(join(ctx.paths.state, "audit.jsonl"), entry(2));
+  expect((await scan(ctx, ["agent"])).findings[0]?.blockers.join()).toContain("held by a");
+  writeFileSync(join(ctx.paths.state, "audit.jsonl"), entry(48));
+  expect((await scan(ctx, ["agent"])).findings[0]?.blockers).toEqual([]);
 });
 
 test("a claimed path becomes a finding once stale", async () => {

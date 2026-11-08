@@ -212,7 +212,7 @@ actually sampled to judge every unseen app against it. With no samples at all, a
 | `keeper apply PLAN --yes` | Rescans, then applies what is unchanged |
 | `keeper undo TX` | Restores a transaction from trash |
 | `keeper purge` | Deletes trash over 14 days old for good |
-| `keeper hold PATH --reason R` | Protects a path for 7 days, or `--days N` |
+| `keeper hold PATH --reason R` | Protects a path for 1 day at most; `--days N` shortens it |
 | `keeper claim PATH` | Declares your own scratch disposable once stale. A git clone is claimable only under `~/.cache/agent-scratch` or an agent root |
 | `keeper release PATH` | Drops a hold or claim |
 | `keeper log` | Shows recent mutations and who made them |

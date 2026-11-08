@@ -18,7 +18,12 @@ export interface Hold {
   until: string;
   reason: string;
   actor: string;
+  /** When it was made. Holds written before this field existed find it in the audit log. */
+  at?: string;
 }
+
+/** A hold protects a path for one working day at most, so a hold left by a finished session lapses on its own. */
+export const holdLimitMs = 86_400_000;
 
 export interface Claim {
   path: string;
@@ -61,6 +66,36 @@ export function audit(paths: Paths, event: string, detail: object): void {
   mkdirSync(paths.state, { recursive: true });
   const entry = { at: new Date().toISOString(), actor: actor(), event, ...detail };
   appendFileSync(join(paths.state, "audit.jsonl"), `${JSON.stringify(entry)}\n`);
+}
+
+/**
+ * The holds still in force at `now`, each ending at its `until` or a day after it was made, whichever comes first.
+ * A hold whose start cannot be found keeps its `until`, with a warning, rather than being dropped.
+ */
+export function liveHolds(paths: Paths, now: number): Hold[] {
+  const holds = readLedger(paths).holds;
+  const made = holds.some((hold) => !hold.at) ? holdEvents(paths) : new Map<string, string>();
+  return holds.flatMap((hold) => {
+    const at = hold.at ?? made.get(`${hold.path}\0${hold.until}`);
+    if (!at)
+      console.warn(`keeper: no record of when the hold on ${hold.path} was made, so it lasts until ${hold.until}`);
+    const end = at ? Math.min(Date.parse(hold.until), Date.parse(at) + holdLimitMs) : Date.parse(hold.until);
+    return end > now ? [{ ...hold, until: new Date(end).toISOString() }] : [];
+  });
+}
+
+function holdEvents(paths: Paths): Map<string, string> {
+  const events = readAudit(paths, Number.MAX_SAFE_INTEGER) as {
+    event?: string;
+    path?: string;
+    until?: string;
+    at?: string;
+  }[];
+  return new Map(
+    events
+      .filter((entry) => entry.event === "hold" && entry.at)
+      .map((entry) => [`${entry.path}\0${entry.until}`, entry.at as string]),
+  );
 }
 
 export function readAudit(paths: Paths, limit: number): unknown[] {

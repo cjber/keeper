@@ -22,7 +22,7 @@ export interface Hold {
   at?: string;
 }
 
-/** A hold protects a path for one working day at most, so a hold left by a finished session lapses on its own. */
+/** A hold protects a path for one day at most, so a hold left by a finished session lapses on its own. */
 export const holdLimitMs = 86_400_000;
 
 export interface Claim {
@@ -77,10 +77,11 @@ export function liveHolds(paths: Paths, now: number): Hold[] {
   const made = holds.some((hold) => !hold.at) ? holdEvents(paths) : new Map<string, string>();
   return holds.flatMap((hold) => {
     const at = hold.at ?? made.get(`${hold.path}\0${hold.until}`);
+    const end = at ? Math.min(Date.parse(hold.until), Date.parse(at) + holdLimitMs) : Date.parse(hold.until);
+    if (end <= now) return [];
     if (!at)
       console.warn(`keeper: no record of when the hold on ${hold.path} was made, so it lasts until ${hold.until}`);
-    const end = at ? Math.min(Date.parse(hold.until), Date.parse(at) + holdLimitMs) : Date.parse(hold.until);
-    return end > now ? [{ ...hold, until: new Date(end).toISOString() }] : [];
+    return [{ ...hold, until: new Date(end).toISOString() }];
   });
 }
 

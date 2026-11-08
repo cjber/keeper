@@ -25,7 +25,7 @@ To reclaim worktrees that lack proof, judge them before planning. Scan with `--c
 
 Protect work and declare scratch as you go, because this is how keeper knows intent:
 
-- Leaving a worktree or directory you will return to: `keeper hold PATH --reason "why" --days N`.
+- Leaving a worktree or directory you will return to: `keeper hold PATH --reason "why"`. A hold lasts 1 day at most; hold again the next day if the work continues.
 - Creating scratch outside a repo: `keeper claim PATH`.
 - Set `KEEPER_ACTOR` to your session name so `keeper log` shows who did what.
 - Exit code 6 means another run holds the lock, so wait and retry.

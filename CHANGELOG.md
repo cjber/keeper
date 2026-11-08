@@ -7,6 +7,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+- **A hold lasts one day.** `keeper hold` protects a path for 1 day, and `--days` can only shorten that. Holds made
+  by older versions lapse a day after the audit log says they were made, so the week-long holds left by finished agent
+  sessions no longer keep most worktrees from ever being offered. An older hold missing from the audit log keeps its
+  end date, and the scan warns about it.
+
 ## [0.3.2] - 2026-11-08
 
 - **keeper no longer slows down the apps you are using.** Every command now runs at the lowest CPU priority and idle

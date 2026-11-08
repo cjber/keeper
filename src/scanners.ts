@@ -3,7 +3,7 @@ import { createReadStream, existsSync, lstatSync, readdirSync, readFileSync, rea
 import { lstat, readdir } from "node:fs/promises";
 import { availableParallelism, loadavg } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { alive, type Hold, readLedger } from "./ledger";
+import { alive, type Hold, liveHolds, readLedger } from "./ledger";
 import { ageDays, expandHome, holders, type Paths, run, sizes } from "./system";
 import { type Category, categories, count, type Finding, type Risk, type Scan, schemaVersion } from "./types";
 import { coveredDays, readUsage, type UsageLedger } from "./usage";
@@ -874,7 +874,7 @@ async function scanTmp(context: Context): Promise<Finding[]> {
     tmpForeign(root, uid),
   ]);
   const ledger = readLedger(context.paths);
-  const holds = ledger.holds.filter((hold) => Date.parse(hold.until) > context.now).map((hold) => hold.path);
+  const holds = liveHolds(context.paths, context.now).map((hold) => hold.path);
   const kept = [
     ...ledger.claims.map((claim) => claim.path),
     ...holds,
@@ -2285,7 +2285,7 @@ function abandonedFindings(context: Context, processes: readonly ProcessInfo[]):
   const me = process.getuid?.() ?? -1;
   const asking = callers(processes);
   const byPid = new Map(processes.map((proc) => [proc.pid, proc]));
-  const holds = readLedger(context.paths).holds.filter((hold) => Date.parse(hold.until) > context.now);
+  const holds = liveHolds(context.paths, context.now);
   const window = abandonedHours * 3600;
   return processes.flatMap((sampled) => {
     const name = commandName(sampled.command);
@@ -2421,7 +2421,7 @@ function holdBlocker(hold: Hold): string {
 
 /** Holds are applied on every read, never stored, so a cached finding reflects a hold made or released since. */
 export function withHolds(context: Context, findings: readonly Finding[]): Finding[] {
-  const holds = readLedger(context.paths).holds.filter((hold) => Date.parse(hold.until) > context.now);
+  const holds = liveHolds(context.paths, context.now);
   return findings.map((finding) => {
     const held = holds.filter((hold) => finding.paths.some((path) => overlaps(path, hold.path))).map(holdBlocker);
     return held.length ? { ...finding, blockers: [...finding.blockers, ...held] } : finding;

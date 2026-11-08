@@ -4,7 +4,17 @@ import packageJson from "../package.json";
 import { cachedScan, categoriesOf, forget, maxAge } from "./cache";
 import { freshen, primaryCheckouts } from "./freshen";
 import { readEvents, readSamples, sample } from "./history";
-import { actor, audit, BusyError, type Claim, type Hold, readAudit, readLedger, updateLedger } from "./ledger";
+import {
+  actor,
+  audit,
+  BusyError,
+  type Claim,
+  type Hold,
+  holdLimitMs,
+  liveHolds,
+  readAudit,
+  updateLedger,
+} from "./ledger";
 import {
   applyPlan,
   bulkPlan,
@@ -38,7 +48,6 @@ import { recordUsage } from "./usage";
 export const exit = { ok: 0, error: 1, usage: 2, needsConfirmation: 3, stalePlan: 4, partial: 5, busy: 6 } as const;
 
 const trashDays = 14;
-const holdDays = 7;
 /** Each adds evidence or an action, and keeper works without it. */
 const optionalTools = ["gh", "paccache", "expac", "notify-send", "uv"];
 
@@ -53,7 +62,7 @@ const help = `keeper keeps an Arch machine clean. Output is JSON when stdout is 
   keeper undo TX                 restore a transaction from trash
   keeper purge [--older-days N]  delete trash for good (default ${trashDays})
   keeper hold PATH --reason R [--days N]
-                                 protect a path you will return to (default ${holdDays} days)
+                                 protect a path you will return to (1 day at most; --days N shortens it)
   keeper claim PATH              declare your own scratch as disposable once stale
   keeper release PATH            drop your hold or claim on a path
   keeper status                  trash, holds, schedule, last run and what needs attention
@@ -409,11 +418,16 @@ async function dispatch(
       if (!target || !flags.reason) throw new UsageError("usage: keeper hold PATH --reason R [--days N]");
       const path = resolve(target);
       if (!existsSync(path)) throw new UsageError(`${path} does not exist`);
+      const length = (flags.days ?? 1) * 86_400_000;
+      if (length > holdLimitMs)
+        throw new UsageError("a hold lasts 1 day at most; hold again tomorrow if the work continues");
+      const now = Date.now();
       const hold: Hold = {
         path,
-        until: new Date(Date.now() + (flags.days ?? holdDays) * 86_400_000).toISOString(),
+        until: new Date(now + length).toISOString(),
         reason: flags.reason,
         actor: actor(),
+        at: new Date(now).toISOString(),
       };
       await updateLedger(paths, (ledger) => ({
         ...ledger,
@@ -492,7 +506,7 @@ async function dispatch(
       const lastRun = readAudit(paths, 500)
         .filter((entry): entry is AutoRun => (entry as { event?: string }).event === "auto")
         .at(-1);
-      const holds = readLedger(paths).holds.filter((hold) => Date.parse(hold.until) > Date.now());
+      const holds = liveHolds(paths, Date.now());
       const schedule = await scheduleStatus();
       const result = schedule === "systemd" ? await lastServiceResult() : undefined;
       const problems = health(schedule, lastRun, result, Date.now());

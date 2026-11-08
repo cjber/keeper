@@ -117,7 +117,8 @@ export function ageDays(path: string, now = Date.now()): number {
   return (now - statSync(path).mtimeMs) / 86_400_000;
 }
 
-export async function sizes(paths: readonly string[], limit = 8): Promise<Map<string, number>> {
+/** Two at a time: du spends its time walking inodes in the kernel, which idle priority does not yield. */
+export async function sizes(paths: readonly string[], limit = 2): Promise<Map<string, number>> {
   const result = new Map<string, number>();
   let next = 0;
   await Promise.all(

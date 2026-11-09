@@ -135,7 +135,8 @@ a blocked row per group that counts what is waiting and why. Holds, claims and k
 A process counts as abandoned only when every signal agrees: no live terminal on stdin and reparented to init, or to a
 tmux, screen, zellij or kiln server after its pane closed; no CPU over the one second sample; older than 6 hours; at
 least 16M of RAM plus swap; and either the script on its command line no longer exists or, unless it daemonised itself,
-it has written no open file for 6 hours. Shells, editors, multiplexer servers, systemd services, anything the desktop
+it has written no open file other than its own stdout and stderr for 6 hours. A log its old supervisor redirected
+output into shows only that the process is still retrying, not work anyone will use. Shells, editors, multiplexer servers, systemd services, anything the desktop
 autostarted and anything whose working directory or script a hold covers are never offered.
 
 Apps, large files, downloads, screenshots and duplicates are personal or application data, so they are only planned

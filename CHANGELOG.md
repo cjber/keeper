@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-11-09
+
 - **`keeper scan`, `plan` and `apply` are much faster.** The agent and build scans no longer measure output that is
   inside its idle window or held, which was most of a scan's time: on a machine with about 300G of recent agent
   scratch and build output, those two categories went from over a minute to under a second. A blocked agent or build

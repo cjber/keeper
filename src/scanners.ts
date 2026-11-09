@@ -2227,6 +2227,9 @@ function readFacts(proc: ProcessInfo): ProcessInfo {
   const kib = (field: string) => Number(new RegExp(`^${field}:\\s+(\\d+) kB`, "m").exec(status)?.[1] ?? 0) * 1024;
   let written = 0;
   for (const fd of entries(`/proc/${proc.pid}/fd`)) {
+    // Stdout and stderr are where whoever started it captured its output, the file counterpart of a terminal. A
+    // detached child of a supervisor that has gone appends there while it retries, which shows it alive, not its work.
+    if (/\/fd\/[12]$/.test(fd)) continue;
     const target = attempt(() => readlinkSync(fd));
     if (!target?.startsWith("/") || target.startsWith("/dev/") || target.endsWith(" (deleted)")) continue;
     const info = attempt(() => readFileSync(fd.replace("/fd/", "/fdinfo/"), "utf8")) ?? "";
@@ -2278,7 +2281,7 @@ function detachment(proc: ProcessInfo, byPid: ReadonlyMap<number, ProcessInfo>):
  * Long-lived processes nobody can reach that sit idle on RAM and swap, such as a test fixture whose runner was killed
  * before its cleanup ran. Each signal alone also fits live work, so every one is required: detached, idle over the
  * sample, older than `abandonedHours`, and either its script was deleted or, unless it daemonised itself on purpose,
- * it has written no open file for as long. Shells, editors, multiplexers, systemd units and the caller are never offered.
+ * it has written no open file besides its own output for as long. Shells, editors, multiplexers, systemd units and the caller are never offered.
  */
 function abandonedFindings(context: Context, processes: readonly ProcessInfo[]): Finding[] {
   const me = process.getuid?.() ?? -1;
@@ -2303,7 +2306,7 @@ function abandonedFindings(context: Context, processes: readonly ProcessInfo[]):
       script && !existsSync(script)
         ? `its script ${script} no longer exists`
         : proc.session !== proc.pid && quiet
-          ? `it has written no open file for ${abandonedHours} hours`
+          ? `it has written nothing but its own output for ${abandonedHours} hours`
           : undefined;
     if (!evidence) return [];
     const blockers = holds

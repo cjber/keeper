@@ -203,6 +203,11 @@ export interface Context {
   downloadDir?: string;
   /** XDG pictures dir, or ~/Pictures. Overridable so a test never reads the real user dirs. */
   picturesDir?: string;
+  /**
+   * Also size agent and build findings a blocker keeps from any plan. The wizard sets it so its space bars show what is
+   * waiting; scan, plan and apply leave it off, because those du walks were most of a scan's time and decide nothing.
+   */
+  sizeBlocked?: boolean;
   /** Sampled processes, so a test never has to race a real machine. Absent means the scan reads /proc. */
   processes?: readonly ProcessInfo[];
   /** Replaces the GitHub lookup in tests. With a branch, it lists only that branch's pull requests. A throw is a failure. */
@@ -664,7 +669,6 @@ async function scanAgent(context: Context): Promise<Finding[]> {
   );
   const claimed = readLedger(context.paths).claims.map((claim) => claim.path);
   const roots = [...new Set([...context.config.agentRoots.map(expand), ...claimed, ...cached])].filter(existsSync);
-  const bytes = await sizes(roots);
   const inspect = (path: string): Finding => {
     const age = ageDays(path, context.now);
     const blockers: string[] = [];
@@ -678,12 +682,17 @@ async function scanAgent(context: Context): Promise<Finding[]> {
       title: path.replace(`${context.paths.home}/`, "~/"),
       paths: [path],
       packages: [],
-      bytes: bytes.get(path) ?? 0,
+      bytes: 0,
       reason: "Allowlisted agent output",
       blockers,
     } satisfies Finding;
   };
-  return found(await Promise.all(roots.map((path) => unlessGone(path, () => inspect(path)))));
+  const judged = found(await Promise.all(roots.map((path) => unlessGone(path, () => inspect(path)))));
+  // Agent output inside its idle window is never planned, so only the rest are walked unless the caller wants every size.
+  const bytes = await sizes(
+    judged.filter((finding) => context.sizeBlocked || !finding.blockers.length).flatMap((finding) => finding.paths),
+  );
+  return judged.map((finding) => ({ ...finding, bytes: bytes.get(finding.paths[0] as string) ?? 0 }));
 }
 
 /** A temp entry this large gets a row of its own. Smaller ones are grouped by name, so a leaky test suite is one row. */
@@ -1028,9 +1037,22 @@ async function scanBuild(context: Context): Promise<Finding[]> {
       }),
     )
   ).filter((entry) => entry !== undefined);
-  const bytes = await sizes(ignored.map((entry) => entry.path));
-  return ignored.map(({ path, recent }) => ({
-    ...findingId("build", path, `${bytes.get(path)}\0${recent}`),
+  // A recent or in-use build is never planned, so only the rest are walked unless the caller wants every size.
+  const judged = ignored.map(({ path, recent }) => ({
+    path,
+    recent,
+    blockers: [
+      ...(holders(path, context.live) ? [inUse] : []),
+      ...(recent
+        ? [`built in the last ${count(staleBuildDays, "day")}, offered after ${count(staleBuildDays, "idle day")}`]
+        : []),
+    ],
+  }));
+  const bytes = await sizes(
+    judged.filter((entry) => context.sizeBlocked || !entry.blockers.length).map((entry) => entry.path),
+  );
+  return judged.map(({ path, recent, blockers }) => ({
+    ...findingId("build", path, `${bytes.get(path) ?? 0}\0${recent}`),
     category: "build",
     risk: "low",
     action: "trash",
@@ -1039,12 +1061,7 @@ async function scanBuild(context: Context): Promise<Finding[]> {
     packages: [],
     bytes: bytes.get(path) ?? 0,
     reason: "Git-ignored build output, restored by the next build or install",
-    blockers: [
-      ...(holders(path, context.live) ? [inUse] : []),
-      ...(recent
-        ? [`built in the last ${count(staleBuildDays, "day")}, offered after ${count(staleBuildDays, "idle day")}`]
-        : []),
-    ],
+    blockers,
   }));
 }
 

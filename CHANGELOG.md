@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-09
+
 - **An abandoned process that keeps logging is offered for stopping.** The memory scan used to count writes to a
   process's own stdout and stderr as work, so a detached child that retries forever, such as a tunnel whose app quit,
   looked busy as long as it kept appending to the log its supervisor opened. Only writes to other files now keep a

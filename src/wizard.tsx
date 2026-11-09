@@ -30,7 +30,7 @@ export interface Actions {
 export const liveActions: Actions = {
   cached: () => lastKnown(context()),
   load: async (reuse, done) => {
-    const ctx = context();
+    const ctx = { ...context(), sizeBlocked: true };
     await sample(ctx.paths).catch(() => undefined);
     return cachedScan(ctx, { reuse, done });
   },

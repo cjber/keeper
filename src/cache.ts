@@ -40,6 +40,8 @@ interface Entry {
   findings: Finding[];
   /** The scan warned, so a missing proof may be a failed lookup. Kept for its ids, never reused. */
   incomplete?: true;
+  /** Blocked findings were sized too, so the entry can serve a caller that sets `sizeBlocked`. */
+  sizedBlocked?: true;
 }
 
 interface Cache {
@@ -152,7 +154,13 @@ export async function cachedScan(
   const usable = stored?.fingerprint === print ? stored.entries : {};
   const fresh = (category: Category) => {
     const entry = usable[category];
-    return reuse && entry && !entry.incomplete && context.now - Date.parse(entry.scannedAt) < maxAge[category] * minute;
+    return (
+      reuse &&
+      entry &&
+      !entry.incomplete &&
+      (!context.sizeBlocked || entry.sizedBlocked) &&
+      context.now - Date.parse(entry.scannedAt) < maxAge[category] * minute
+    );
   };
   const cached = only.filter(fresh);
   for (const category of cached) done?.(category, usable[category]?.findings.length, true);
@@ -163,7 +171,13 @@ export async function cachedScan(
     only.filter((category) => !cached.includes(category)),
     (category, findings, warned) => {
       // Load and memory are stored too, never to be reused, so planning their ids rescans only their category.
-      if (findings) scanned[category] = { scannedAt: at, findings, incomplete: warned || undefined };
+      if (findings)
+        scanned[category] = {
+          scannedAt: at,
+          findings,
+          incomplete: warned || undefined,
+          sizedBlocked: context.sizeBlocked || undefined,
+        };
       done?.(category, findings?.length, false);
     },
   );

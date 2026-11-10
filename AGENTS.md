@@ -47,3 +47,7 @@ Every version needs a `CHANGELOG.md` entry. `python3 scripts/wordmark.py` regene
 - An agent's hold beats every scanner. Mutations go through `withLock` and write to the audit log.
 - Delete through trash. Only `purge` is final, so branch deletion and `purgeHook` run there.
 - Tests pass an empty environment to `defaultPaths`, so `XDG_*` cannot point them at real config.
+
+## Standards
+
+- `repo-standards`: the RS-* requirements every cjber repo meets (repo, Actions and security settings, rulesets, CI hardening, community files), a skill in cjber/skills whose `audit.py` checks this repo

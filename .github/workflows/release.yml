@@ -19,6 +19,7 @@ jobs:
   release:
     needs: [binaries]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
       id-token: write # npm trusted publishing and provenance

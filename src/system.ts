@@ -151,7 +151,9 @@ export async function sizes(paths: readonly string[], limit = 2): Promise<Map<st
     Array.from({ length: limit }, async () => {
       while (next < paths.length) {
         const path = paths[next++] as string;
-        const du = await run(["du", "-sxb", path]);
+        // Size walks are the expensive part of every scan. Keep them in the idle CPU and IO classes so a diagnostic
+        // run does not compete with the desktop when the machine is already overloaded.
+        const du = await run(["nice", "-n", "19", "ionice", "-c", "3", "du", "-sxb", path]);
         result.set(path, Number.parseInt(du.stdout, 10) || 0);
       }
     }),

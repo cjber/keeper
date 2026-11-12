@@ -262,6 +262,8 @@ export interface ProcessInfo {
   /** CPU seconds used over the process's whole life. */
   cpuSeconds: number;
   command: string;
+  /** Scheduler state from /proc: D means uninterruptible IO sleep and contributes to load without CPU use. */
+  state?: string;
   /** Where fd 0 points. `/dev/pts/N (deleted)` means the terminal it was started in has closed. */
   stdin?: string;
   /** The scheduler autogroup, one per session, such as `/autogroup-78`. Absent when autogroup is off. */
@@ -1996,6 +1998,8 @@ interface RawProcess {
   age: number;
   session: number;
   command: string;
+  state: string;
+  cgroup?: string;
 }
 
 function readProcess(pid: number, uptime: number): RawProcess | undefined {
@@ -2011,9 +2015,11 @@ function readProcess(pid: number, uptime: number): RawProcess | undefined {
       uid: lstatSync(`/proc/${pid}`).uid,
       nice: Number(fields[16]),
       ticks: Number(fields[11]) + Number(fields[12]),
+      state: fields[0] ?? "?",
       session: Number(fields[3]),
       age: uptime - Number(fields[19]) / clockTicks,
       command: readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0/g, " ").trim() || `[${comm}]`,
+      cgroup: attempt(() => readFileSync(`/proc/${pid}/cgroup`, "utf8").trim().split("\n").at(-1)?.split(":")[2]),
     };
   } catch {
     return undefined; // the process exited while it was being read
@@ -2045,12 +2051,12 @@ async function sampleProcesses(milliseconds = sampleMs): Promise<{
   const processes = [...after].flatMap(([pid, now]) => {
     const then = before.get(pid);
     if (!then) return []; // started during the sample, so there is no usage to measure
-    const { ppid, uid, nice, age, session, command } = now;
+    const { ppid, uid, nice, age, session, command, state, cgroup } = now;
     const cpu = ((now.ticks - then.ticks) / clockTicks / seconds) * 100;
     const stdin = attempt(() => readlinkSync(`/proc/${pid}/fd/0`));
     const autogroup = attempt(() => readFileSync(`/proc/${pid}/autogroup`, "utf8").split(" ")[0]);
     const cpuSeconds = now.ticks / clockTicks;
-    return [{ pid, ppid, uid, nice, age, session, command, cpu, cpuSeconds, stdin, autogroup }];
+    return [{ pid, ppid, uid, nice, age, session, command, cpu, cpuSeconds, stdin, autogroup, state, cgroup }];
   });
   return { processes, cores: availableParallelism(), loadAverage: loadavg()[0] ?? 0 };
 }
@@ -2224,6 +2230,35 @@ async function scanLoad(context: Context): Promise<Finding[]> {
       } satisfies Finding,
     ];
   });
+  const sustained = processes.some(
+    (proc) => proc.age >= minGroupMinutes * 60 || proc.cpuSeconds >= minGroupCoreMinutes * 60,
+  );
+  if (!stops.length && !renices.length && sustained) {
+    const accounted = processes.reduce((sum, proc) => sum + proc.cpu, 0) / 100;
+    const unexplained = loadAverage - accounted;
+    if (unexplained > 1) {
+      const io = processes.filter((proc) => proc.state === "D").length;
+      const hint = io
+        ? `${io} sampled process${io === 1 ? " is" : "es are"} in uninterruptible IO sleep`
+        : "CPU-visible processes do not account for the load";
+      return [
+        ...stops,
+        {
+          ...findingId("load", "unattributed", `${loadAverage}\0${accounted}\0${io}`),
+          category: "load",
+          risk: "low",
+          action: "report",
+          title: "load not explained by CPU work",
+          paths: [],
+          packages: [],
+          bytes: 0,
+          cpu: Math.round(accounted * 100),
+          reason: `Load is ${loadAverage.toFixed(1)} on ${cores} cores, but sampled CPU work accounts for only ${accounted.toFixed(1)} runnable cores: ${hint}. Check the memory category for reclaim pressure and IO wait before renicing anything`,
+          blockers: ["diagnostic only; no process explains the remaining load"],
+        } satisfies Finding,
+      ];
+    }
+  }
   return [...stops, ...renices];
 }
 

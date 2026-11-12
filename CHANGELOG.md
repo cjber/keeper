@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-11-12
+
 - **A stale tree keeper cannot fully remove is blocked instead of half moved.** A move to the trash that has to cross a
   filesystem copies the tree before deleting the source, and a directory without write permission stops that deletion
   partway. The agent and temp scans now report such a tree as blocked, so one fault-injection leftover cannot keep every

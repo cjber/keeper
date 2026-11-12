@@ -485,15 +485,29 @@ async function purgeUnlocked(paths: Paths, olderThanDays: number, now: number): 
   const failed: string[] = [];
   const freeBefore = await freeBytes(paths.home);
   let bytes = 0;
-  for (const tx of transactions(paths)) {
+  const known = new Map(transactions(paths).map((tx) => [tx.id, tx]));
+  // Every directory in the trash is a transaction, but one whose manifest went missing cannot be found by
+  // `transactions`. An interrupted purge leaves exactly that, so past the window it is still trash: delete it.
+  let ids: string[] = [];
+  try {
+    ids = readdirSync(paths.trash);
+  } catch {}
+  for (const id of ids) {
+    const dir = join(paths.trash, id);
     // Clamped, because a file timestamp can land a fraction of a millisecond after the clock read and 0 means everything.
-    const age = Math.max(0, now - statSync(join(paths.trash, tx.id)).mtimeMs);
+    const age = Math.max(0, now - statSync(dir).mtimeMs);
     if (age < olderThanDays * 86_400_000) continue;
-    if (purgeHook && !(await runPurgeHook(expandHome(paths.home)(purgeHook), tx.entries))) {
-      failed.push(tx.id);
+    const tx = known.get(id);
+    if (tx && purgeHook && !(await runPurgeHook(expandHome(paths.home)(purgeHook), tx.entries))) {
+      failed.push(id);
       continue;
     }
-    rmSync(join(paths.trash, tx.id), { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+    // A manifest-less directory names neither a branch nor a worktree, so there is nothing to prune for it.
+    if (!tx) {
+      purged.push(id);
+      continue;
+    }
     for (const gitDir of new Set(tx.entries.flatMap((entry) => (entry.gitDir ? [entry.gitDir] : [])))) {
       await run(["git", "--git-dir", gitDir, "worktree", "prune"]);
     }
@@ -502,7 +516,7 @@ async function purgeUnlocked(paths: Paths, olderThanDays: number, now: number): 
       if (gitDir && branch && head)
         await run(["git", "--git-dir", gitDir, "update-ref", "-d", `refs/heads/${branch}`, head]);
     }
-    purged.push(tx.id);
+    purged.push(id);
     bytes += tx.entries.reduce((sum, entry) => sum + entry.bytes, 0);
   }
   // Flushing a whole filesystem can take seconds, so only a purge that removed something measures.

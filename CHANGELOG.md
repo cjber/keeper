@@ -7,6 +7,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+- **A stale tree keeper cannot fully remove is blocked instead of half moved.** A move to the trash that has to cross a
+  filesystem copies the tree before deleting the source, and a directory without write permission stops that deletion
+  partway. The agent and temp scans now report such a tree as blocked, so one fault-injection leftover cannot keep every
+  nightly run partial.
+- **Trash whose transaction manifest went missing is purged.** An interrupted purge can remove `transaction.json` and
+  leave the entries behind, and `transactions` then never finds the directory again, so its space stayed used forever.
+  `purge` now deletes any trash directory past the window, with or without a manifest.
+
 ## [0.4.3] - 2026-11-09
 
 - **`keeper scan`, `plan` and `apply` are much faster.** The agent and build scans no longer measure output that is

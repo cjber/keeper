@@ -308,6 +308,7 @@ function touchedAgo(days: number, window: number): string {
 }
 
 const inUse = "in use by a running process, offered once it exits";
+const treeUnwritable = "holds a directory keeper cannot write, so it cannot move whole";
 
 const found = <T>(items: (T | undefined)[]): T[] => items.filter((item): item is T => item !== undefined);
 
@@ -661,6 +662,17 @@ async function scanOrphans(): Promise<Finding[]> {
   ];
 }
 
+/**
+ * Directories inside these roots that keeper cannot write. A move to the trash that has to cross a filesystem copies
+ * the tree before removing the source, and a directory without write permission stops that removal partway, leaving
+ * half a finding moved and the run partial, so a tree that holds one is not offered.
+ */
+async function unwritableDirs(roots: readonly string[]): Promise<string[]> {
+  if (roots.length === 0) return [];
+  const found = await run(["find", ...roots, "-xdev", "-type", "d", "!", "-writable", "-printf", "%p\\0"]);
+  return [...found.stdout.split("\0").filter(Boolean), ...quotedPaths(found.stderr)];
+}
+
 async function scanAgent(context: Context): Promise<Finding[]> {
   const expand = expandHome(context.paths.home);
   const patterns = context.config.agentCachePatterns.map((pattern) => new RegExp(pattern));
@@ -688,11 +700,21 @@ async function scanAgent(context: Context): Promise<Finding[]> {
     } satisfies Finding;
   };
   const judged = found(await Promise.all(roots.map((path) => unlessGone(path, () => inspect(path)))));
-  // Agent output inside its idle window is never planned, so only the rest are walked unless the caller wants every size.
-  const bytes = await sizes(
-    judged.filter((finding) => context.sizeBlocked || !finding.blockers.length).flatMap((finding) => finding.paths),
-  );
-  return judged.map((finding) => ({ ...finding, bytes: bytes.get(finding.paths[0] as string) ?? 0 }));
+  // Agent output inside its idle window is never planned, so only the rest are walked unless the caller wants every
+  // size. The same walk catches a directory keeper cannot write, which a move to the trash could not remove.
+  const walked = judged
+    .filter((finding) => context.sizeBlocked || !finding.blockers.length)
+    .flatMap((finding) => finding.paths);
+  const [bytes, unwritable] = await Promise.all([sizes(walked), unwritableDirs(walked)]);
+  const held = (path: string) => unwritable.some((dir) => dir === path || dir.startsWith(`${path}/`));
+  return judged.map((finding) => {
+    const path = finding.paths[0] as string;
+    return {
+      ...finding,
+      blockers: held(path) ? [...finding.blockers, treeUnwritable] : finding.blockers,
+      bytes: bytes.get(path) ?? 0,
+    };
+  });
 }
 
 /** A temp entry this large gets a row of its own. Smaller ones are grouped by name, so a leaky test suite is one row. */
@@ -876,10 +898,11 @@ async function scanTmp(context: Context): Promise<Finding[]> {
   const home = context.paths.home;
   if (root === "/" || root === home || home.startsWith(`${root}/`) || existsSync(join(root, ".git")))
     throw new Error(`${root} holds home or a repository, so it is not scanned as the temp dir. Point TMPDIR at one`);
-  const [top, sessions, foreign] = await Promise.all([
+  const [top, sessions, foreign, unwritable] = await Promise.all([
     tmpUsage(root, 1),
     isDirectory(claude) ? tmpUsage(claude, 2) : { entries: [], unreadable: [] },
     tmpForeign(root, uid),
+    unwritableDirs([root]),
   ]);
   const ledger = readLedger(context.paths);
   const holds = liveHolds(context.paths, context.now).map((hold) => hold.path);
@@ -914,7 +937,7 @@ async function scanTmp(context: Context): Promise<Finding[]> {
   const references = tmpReferences();
   const busy = under(context.live);
   const listening = under(references.sockets);
-  const mixed = under([...foreign, ...top.unreadable, ...sessions.unreadable]);
+  const mixed = under([...foreign, ...unwritable, ...top.unreadable, ...sessions.unreadable]);
   const age = (entry: TmpEntry) => (context.now - entry.mtime * 1000) / 86_400_000;
   const window = Math.min(context.staleDays, tmpStaleDays);
   const recent = `touched less than ${count(window, "day")} ago, offered once idle that long`;
@@ -922,7 +945,9 @@ async function scanTmp(context: Context): Promise<Finding[]> {
     ...(busy.has(entry.path) ? [inUse] : []),
     ...(listening.has(entry.path) ? [tmpSocket] : []),
     ...(alive(lockPid(entry.path)) ? [tmpLockAlive] : []),
-    ...(mixed.has(entry.path) ? ["holds files another user owns or keeper cannot read, so it cannot move whole"] : []),
+    ...(mixed.has(entry.path)
+      ? ["holds files another user owns, or a directory keeper cannot write or read, so it cannot move whole"]
+      : []),
     ...(references.sessions.has(basename(entry.path)) && entry.path.startsWith(`${claude}/`)
       ? ["its Claude Code session is still running, offered once it exits"]
       : []),

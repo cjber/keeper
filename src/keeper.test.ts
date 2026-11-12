@@ -203,6 +203,21 @@ test("a claimed path becomes a finding once stale", async () => {
   expect((await scan(ctx, ["agent"])).findings.map((finding) => finding.paths[0])).toContain(scratch);
 });
 
+test("claimed output holding a directory keeper cannot write is blocked rather than offered and half moved", async () => {
+  const scratch = join(home, ".cache", "agent-scratch", "faultprobe");
+  const locked = join(scratch, "sub");
+  mkdirSync(locked, { recursive: true });
+  writeFileSync(join(locked, "token"), "x");
+  age(scratch);
+  chmodSync(locked, 0o500);
+  writeLedger(ctx.paths, { holds: [], claims: [{ path: scratch, actor: "a", at: "now" }] });
+  const { findings } = await scan(ctx, ["agent"]);
+  chmodSync(locked, 0o700);
+  const finding = findings.find((item) => item.paths[0] === scratch);
+  expect(finding?.blockers).toContain("holds a directory keeper cannot write, so it cannot move whole");
+  expect(findings.filter(eligible)).toEqual([]);
+});
+
 test("temp names group by the pattern their random part leaves", () => {
   const groups = tmpPatterns([
     "nebula-test-home-dyqgGU",
@@ -272,6 +287,22 @@ test("stale temp entries are one row that apply moves to trash and undo restores
   expect(leaked.filter((dir) => existsSync(dir))).toEqual([]);
   await undo(ctx.paths, applied.transaction as string);
   expect(leaked.map((dir) => readFileSync(join(dir, "f"), "utf8"))).toEqual(["x", "x", "x"]);
+});
+
+test("a stale temp tree holding a readable directory keeper cannot write is blocked, not offered", async () => {
+  const tmp = ctx.paths.tmp;
+  const readonly = join(tmp, "leak-Read0nly");
+  const locked = join(readonly, "sub");
+  mkdirSync(locked, { recursive: true });
+  writeFileSync(join(locked, "token"), "x");
+  age(join(locked, "token"));
+  age(locked);
+  age(readonly);
+  chmodSync(locked, 0o500);
+  const { findings } = await scan(ctx, ["tmp"]);
+  chmodSync(locked, 0o700);
+  expect(findings.find((finding) => finding.paths.includes(readonly))?.blockers.join()).toContain("cannot write");
+  expect(findings.filter(eligible).flatMap((finding) => finding.paths)).not.toContain(readonly);
 });
 
 test("display and session files are never offered, and a lock whose PID is alive is blocked", async () => {
@@ -363,6 +394,17 @@ test("purge keeps young trash and removes old trash", async () => {
   expect((await purge(ctx.paths, 14)).purged).toEqual([]);
   expect((await purge(ctx.paths, 0, Date.now() + 1000)).purged).toEqual([transaction as string]);
   expect(existsSync(join(ctx.paths.trash, transaction as string))).toBe(false);
+});
+
+test("purge removes trash whose transaction manifest went missing, once it is past the window", async () => {
+  const orphan = join(ctx.paths.trash, "2a4be12e");
+  mkdirSync(join(orphan, "0/left-behind"), { recursive: true });
+  writeFileSync(join(orphan, "0/left-behind/file"), "x");
+  age(orphan);
+  expect((await purge(ctx.paths, 60)).purged).toEqual([]);
+  expect(existsSync(orphan)).toBe(true);
+  expect((await purge(ctx.paths, 14)).purged).toEqual(["2a4be12e"]);
+  expect(existsSync(orphan)).toBe(false);
 });
 
 test("waitFor returns on time from a command that ignores SIGTERM, as a stuck sync does", async () => {

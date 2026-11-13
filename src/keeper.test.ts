@@ -607,6 +607,14 @@ test("load findings appear only on an oversubscribed machine, grouped by command
   expect(idle.findings).toEqual([]);
 });
 
+test("load reports unaccounted IO wait instead of suggesting a random renice", async () => {
+  const { findings } = await scan({ ...ctx, processes: [proc({ cpu: 0, state: "D" })], cores: 4, loadAverage: 12 }, [
+    "load",
+  ]);
+  expect(findings[0]).toMatchObject({ action: "report", title: "load not explained by CPU work" });
+  expect(findings[0]?.reason).toContain("uninterruptible IO sleep");
+});
+
 test("a burst too short to matter and a command already at the bottom are not eligible", async () => {
   const young = await scan({ ...ctx, processes: [proc({ age: 60 })], cores: 2, loadAverage: 9 }, ["load"]);
   expect(young.findings).toEqual([]);

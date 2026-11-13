@@ -20,7 +20,7 @@ const waiting: (() => void)[] = [];
 export const timedOut = 124;
 
 /**
- * With `timeoutMs`, a command still running after that long is killed and reported as `timedOut`, so a child that
+ * With `timeoutMs`, a command still running after that long is killed with its children and reported as `timedOut`, so a child that
  * never returns cannot hold its slot, and the scan behind it, forever.
  */
 export async function run(argv: string[], cwd?: string, timeoutMs?: number): Promise<Result> {
@@ -48,7 +48,9 @@ export async function waitFor(argv: string[], ms: number): Promise<boolean> {
 
 async function spawn(argv: string[], cwd?: string, timeoutMs?: number): Promise<Result> {
   try {
-    const child = Bun.spawn(argv, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    // A timed command leads its own process group, so the kill below also reaches whatever it started.
+    const detached = timeoutMs !== undefined;
+    const child = Bun.spawn(argv, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", detached });
     const finished = Promise.all([
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),
@@ -63,8 +65,13 @@ async function spawn(argv: string[], cwd?: string, timeoutMs?: number): Promise<
     const result = await Promise.race([finished, expired]);
     clearTimeout(timer);
     if (result) return result;
-    // Not awaited past the kill: a grandchild can keep the pipes open, and the output of a killed command is no answer.
-    child.kill("SIGKILL");
+    // The whole group, because a wrapper's own child would otherwise live on and keep the pipes open.
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      child.kill("SIGKILL");
+    }
+    // Not awaited: a process that left the group can still hold a pipe, and a killed command's output is no answer.
     finished.catch(() => {});
     return { code: timedOut, stdout: "", stderr: `${argv[0]} did not finish within ${timeoutMs / 1000} s` };
   } catch (error) {

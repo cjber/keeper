@@ -587,7 +587,8 @@ async function inspectLeftover(path: string, context: Context): Promise<Finding>
   if (nested.stdout) blockers.push("contains a checkout");
   if (holders(path, context.live)) blockers.push(inUse);
   if (age < context.staleDays) blockers.push(touchedAgo(age, context.staleDays));
-  const bytes = blockers.length ? 0 : ((await sizes([path])).get(path) ?? 0);
+  const wanted = !blockers.length && measured(context, findingId("worktree", path, "").id);
+  const bytes = wanted ? ((await sizes([path])).get(path) ?? 0) : 0;
   return {
     ...findingId("worktree", path, `leftover\0${bytes}`),
     category: "worktree",

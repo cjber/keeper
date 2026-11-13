@@ -423,10 +423,14 @@ test("purge removes a transaction that holds a read-only directory, and the ones
 
 test("run stops a command that outlives its wait and reports it as timed out", async () => {
   const started = Date.now();
-  const result = await run(["sleep", "30"], undefined, 100);
+  // The shell stands for a wrapper that waits on its own child, which must not outlive the kill.
+  const marker = join(home, "still-running");
+  const result = await run(["sh", "-c", `(sleep 1; touch ${marker}) & wait`], undefined, 100);
   expect(result.code).toBe(timedOut);
   expect(result.stderr).toContain("did not finish");
-  expect(Date.now() - started).toBeLessThan(5000);
+  expect(Date.now() - started).toBeLessThan(1000);
+  await Bun.sleep(1200);
+  expect(existsSync(marker)).toBe(false);
 });
 
 test("a gh that never returns is asked once, then leaves its repo's worktrees blocked with a warning", async () => {

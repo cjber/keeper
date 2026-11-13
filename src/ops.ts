@@ -347,7 +347,12 @@ async function applyUnlocked(plan: Plan, ctx: Context): Promise<Outcome> {
   const current = new Map(
     (
       await scan(
-        { ...ctx, staleDays: plan.staleDays, appStaleDays: plan.appStaleDays ?? ctx.appStaleDays },
+        {
+          ...ctx,
+          staleDays: plan.staleDays,
+          appStaleDays: plan.appStaleDays ?? ctx.appStaleDays,
+          sizeOnly: new Set(plan.findingIds),
+        },
         plan.categories,
       )
     ).findings.map((finding) => [finding.id, finding]),
@@ -459,8 +464,13 @@ export interface Purged {
   bytes: number;
   /** Measured gain in free space. Other writers on the machine can make it lower than what was truly released. */
   freed: number;
-  /** Transactions kept because the purge hook failed, so it can run again while their files still exist. */
+  /**
+   * Transactions kept because the purge hook failed or their files could not be removed, so the next purge tries them
+   * again.
+   */
   failed: string[];
+  /** Why each failed transaction was kept, by its id. */
+  errors: Record<string, string>;
 }
 
 export function purge(paths: Paths, olderThanDays: number, now = Date.now()): Promise<Purged> {
@@ -479,10 +489,31 @@ async function runPurgeHook(hook: string, entries: readonly TrashEntry[]): Promi
   return true;
 }
 
+/**
+ * Deletes a trash directory. `rm` cannot unlink entries inside a directory it may not write to, and a trashed tree
+ * keeps its modes, so one read-only directory would hold a whole transaction. The trash is keeper's own, so on a
+ * refusal every directory the user owns gets its permissions back and the removal runs once more. The walk happens only
+ * then, because a purge is usually many gigabytes that need no repair.
+ */
+async function removeTrash(dir: string): Promise<void> {
+  try {
+    rmSync(dir, { recursive: true, force: true });
+    return;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "EACCES" && code !== "EPERM") throw error;
+  }
+  // `-exec ... ;` runs on a directory before find descends into it, so a tree find could not read opens up as it goes.
+  const locked = ["-type", "d", "-user", String(process.getuid?.()), "!", "-perm", "-u=rwx"];
+  await run(["find", dir, "-xdev", ...locked, "-exec", "chmod", "u+rwx", "{}", ";"]);
+  rmSync(dir, { recursive: true, force: true });
+}
+
 async function purgeUnlocked(paths: Paths, olderThanDays: number, now: number): Promise<Purged> {
   const { purgeHook } = loadConfig(paths);
   const purged: string[] = [];
   const failed: string[] = [];
+  const errors: Record<string, string> = {};
   const freeBefore = await freeBytes(paths.home);
   let bytes = 0;
   const known = new Map(transactions(paths).map((tx) => [tx.id, tx]));
@@ -500,9 +531,17 @@ async function purgeUnlocked(paths: Paths, olderThanDays: number, now: number): 
     const tx = known.get(id);
     if (tx && purgeHook && !(await runPurgeHook(expandHome(paths.home)(purgeHook), tx.entries))) {
       failed.push(id);
+      errors[id] = "the purge hook failed";
       continue;
     }
-    rmSync(dir, { recursive: true, force: true });
+    // One transaction that cannot be removed is reported and kept, and the rest are still purged.
+    try {
+      await removeTrash(dir);
+    } catch (error) {
+      failed.push(id);
+      errors[id] = error instanceof Error ? error.message : String(error);
+      continue;
+    }
     // A manifest-less directory names neither a branch nor a worktree, so there is nothing to prune for it.
     if (!tx) {
       purged.push(id);
@@ -520,11 +559,11 @@ async function purgeUnlocked(paths: Paths, olderThanDays: number, now: number): 
     bytes += tx.entries.reduce((sum, entry) => sum + entry.bytes, 0);
   }
   // Flushing a whole filesystem can take seconds, so only a purge that removed something measures.
-  if (purged.length === 0) return { purged, bytes, freed: 0, failed };
+  if (purged.length === 0) return { purged, bytes, freed: 0, failed, errors };
   // Copy-on-write filesystems release space when the transaction commits, so measuring now needs a sync. A busy
   // disk can take far longer to flush, and the lock is held meanwhile, so past two seconds `freed` may undercount.
   await waitFor(["sync", "--file-system", paths.home], 2000);
-  return { purged, bytes, freed: Math.max(0, (await freeBytes(paths.home)) - freeBefore), failed };
+  return { purged, bytes, freed: Math.max(0, (await freeBytes(paths.home)) - freeBefore), failed, errors };
 }
 
 export function withinRisk(finding: Finding, max: Risk): boolean {

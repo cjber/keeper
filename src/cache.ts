@@ -38,7 +38,10 @@ interface Entry {
   scannedAt: string;
   /** Before holds, which are applied on every read. */
   findings: Finding[];
-  /** The scan warned, so a missing proof may be a failed lookup. Kept for its ids, never reused. */
+  /**
+   * The scan warned, so a missing proof may be a failed lookup, or it measured only the ids a plan named. Kept for its
+   * ids, never reused.
+   */
   incomplete?: true;
   /** Blocked findings were sized too, so the entry can serve a caller that sets `sizeBlocked`. */
   sizedBlocked?: true;
@@ -175,7 +178,7 @@ export async function cachedScan(
         scanned[category] = {
           scannedAt: at,
           findings,
-          incomplete: warned || undefined,
+          incomplete: warned || context.sizeOnly !== undefined || undefined,
           sizedBlocked: context.sizeBlocked || undefined,
         };
       done?.(category, findings?.length, false);

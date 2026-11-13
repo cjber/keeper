@@ -279,7 +279,8 @@ medium = "yellow"
 high = "red"
 ```
 
-If `purgeHook` exits non-zero, that transaction stays in the trash and purge tries again next time. `freshen` never
+If `purgeHook` exits non-zero, or a transaction's files cannot be removed, that transaction stays in the trash and purge
+tries again next time: its id is in `failed`, its reason in `errors`, and `keeper purge` exits 5. `freshen` never
 resets, rebases or stashes, and leaves a checkout alone when tracked files changed or a branch has unpushed commits.
 
 ## Requirements

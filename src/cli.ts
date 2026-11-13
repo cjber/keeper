@@ -340,7 +340,8 @@ async function dispatch(
       const ctx = context(flags.staleDays, flags.appStaleDays);
       // Ids found in the last scan rescan only their own categories, rather than every category on the machine.
       const only = flags.category ?? (rest.length ? categoriesOf(ctx, rest) : undefined);
-      const report = await cachedScan(ctx, { reuse: false, only });
+      // Named ids are the only findings a plan can take, so they are the only ones worth measuring.
+      const report = await cachedScan(rest.length ? { ...ctx, sizeOnly: new Set(rest) } : ctx, { reuse: false, only });
       const { chosen, skipped } = rest.length
         ? pickById(report.findings, rest)
         : { chosen: bulkPlan(report.findings, flags.maxRisk), skipped: [] };
@@ -408,9 +409,11 @@ async function dispatch(
     }
     case "purge": {
       const result = await purge(paths, flags.olderDays);
+      const kept = result.failed.map((id) => `\nkept ${id}: ${result.errors[id]}`).join("");
       return {
         value: result,
-        text: `purged ${count(result.purged.length, "transaction")}: ${size(result.freed)} freed on disk, ${size(result.bytes)} uncompressed`,
+        text: `purged ${count(result.purged.length, "transaction")}: ${size(result.freed)} freed on disk, ${size(result.bytes)} uncompressed${kept}`,
+        code: result.failed.length ? exit.partial : undefined,
       };
     }
     case "hold": {

@@ -1,0 +1,18 @@
+warnDays: 30
+staleDays: 365
+idleDays: 90
+secretPatterns: []
+ignore: []
+credentialNames: []
+ignorePaths: []
+sources: []
+keys:
+  - id: aur-ssh-private-key
+    service: aur
+    group: release
+    owner: cjber
+    locations:
+      - github: AUR_SSH_PRIVATE_KEY
+    expires: none
+    expiresNote: an SSH key pair carries no expiry
+    limit: none

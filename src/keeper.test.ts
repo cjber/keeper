@@ -4,7 +4,9 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   truncateSync,
@@ -1224,6 +1226,39 @@ test("a failing purge hook keeps the transaction so it can retry", async () => {
   writeFileSync(join(home, "code"), "0");
   expect(await purge(ctx.paths, 0)).toMatchObject({ purged: [transaction], failed: [] });
   expect(readFileSync(seen, "utf8").trim().split("\n")).toEqual([path, path]);
+});
+
+test("purge keeps a transaction with a filesystem mounted inside it", async () => {
+  const batch = join(home, "batch");
+  mkdirSync(join(batch, "data dir"), { recursive: true });
+  writeFileSync(join(batch, "data dir/file"), "data");
+  age(batch);
+  const { findings } = await scan(ctx, ["agent"]);
+  const { transaction } = await applyPlan(createPlan(ctx.paths, findings, 7), ctx);
+  const [trashed] = readdirSync(join(ctx.paths.trash, transaction as string), { recursive: true })
+    .map((entry) => join(ctx.paths.trash, transaction as string, String(entry)))
+    .filter((entry) => entry.endsWith("data dir"));
+  const mountinfo = join(home, "mountinfo");
+  ctx.paths.mountinfo = mountinfo;
+  const escaped = realpathSync(trashed as string).replaceAll(" ", "\\040");
+  writeFileSync(mountinfo, `22 1 0:21 / / rw - btrfs /dev/root rw\n90 22 0:50 / ${escaped} rw - ext4 /dev/sdb1 rw\n`);
+  const kept = await purge(ctx.paths, 0);
+  expect(kept).toMatchObject({ purged: [], failed: [transaction] });
+  expect(kept.errors[transaction as string]).toContain(realpathSync(trashed as string));
+  expect(existsSync(join(trashed as string, "file"))).toBe(true);
+  writeFileSync(mountinfo, "22 1 0:21 / / rw - btrfs /dev/root rw\n");
+  expect(await purge(ctx.paths, 0)).toMatchObject({ purged: [transaction], failed: [] });
+});
+
+test("an unreadable mount table keeps every transaction", async () => {
+  const batch = join(home, "batch");
+  mkdirSync(batch);
+  writeFileSync(join(batch, "out"), "data");
+  age(batch);
+  const { findings } = await scan(ctx, ["agent"]);
+  const { transaction } = await applyPlan(createPlan(ctx.paths, findings, 7), ctx);
+  ctx.paths.mountinfo = join(home, "missing-mountinfo");
+  expect(await purge(ctx.paths, 0)).toMatchObject({ purged: [], failed: [transaction] });
 });
 
 test("a recent file deep in build output blocks it, though everything near the top is old", async () => {

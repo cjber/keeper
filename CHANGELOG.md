@@ -7,6 +7,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+- **`purge` never deletes a filesystem mounted inside the trash.** A directory holding a mount point can be moved into
+  the trash, and a recursive delete does not stop at the mount, so purging it would have deleted what that filesystem
+  holds. `purge` now reads the kernel's mount table first and keeps any transaction with a mount below it, listing it in
+  `failed` with the mount points in `errors`. An unreadable mount table keeps every transaction.
+
 ## [0.5.0] - 2026-11-13
 
 - **`purge` removes trash that holds a read-only directory.** A trashed tree keeps its permissions, and nothing can be

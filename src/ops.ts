@@ -1,5 +1,15 @@
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { forget, forgetUnder } from "./cache";
 import { audit, withLock } from "./ledger";
@@ -509,6 +519,23 @@ async function removeTrash(dir: string): Promise<void> {
   rmSync(dir, { recursive: true, force: true });
 }
 
+/**
+ * Mount points strictly below `dir`. A recursive remove does not stop at a mount point, and a directory holding one can
+ * be renamed into the trash, so a purge would delete whatever that filesystem holds. The mount point is field 5 of
+ * each mountinfo line, with space, tab, newline and backslash escaped as octal.
+ */
+export function mountsWithin(mountinfo: string, dir: string): string[] {
+  const prefix = `${dir}/`;
+  return mountinfo
+    .split("\n")
+    .map((line) => line.split(" ")[4])
+    .filter((point): point is string => point !== undefined)
+    .map((point) =>
+      point.replace(/\\([0-7]{3})/g, (_, octal: string) => String.fromCharCode(Number.parseInt(octal, 8))),
+    )
+    .filter((point) => point.startsWith(prefix));
+}
+
 async function purgeUnlocked(paths: Paths, olderThanDays: number, now: number): Promise<Purged> {
   const { purgeHook } = loadConfig(paths);
   const purged: string[] = [];
@@ -517,6 +544,14 @@ async function purgeUnlocked(paths: Paths, olderThanDays: number, now: number): 
   const freeBefore = await freeBytes(paths.home);
   let bytes = 0;
   const known = new Map(transactions(paths).map((tx) => [tx.id, tx]));
+  // An unreadable mount table is a failed lookup, so it keeps every transaction instead of reading as "no mounts".
+  let mountinfo: string | undefined;
+  let mountError = "";
+  try {
+    mountinfo = readFileSync(paths.mountinfo, "utf8");
+  } catch (error) {
+    mountError = `the mount table could not be read: ${error instanceof Error ? error.message : String(error)}`;
+  }
   // Every directory in the trash is a transaction, but one whose manifest went missing cannot be found by
   // `transactions`. An interrupted purge leaves exactly that, so past the window it is still trash: delete it.
   let ids: string[] = [];
@@ -528,6 +563,17 @@ async function purgeUnlocked(paths: Paths, olderThanDays: number, now: number): 
     // Clamped, because a file timestamp can land a fraction of a millisecond after the clock read and 0 means everything.
     const age = Math.max(0, now - statSync(dir).mtimeMs);
     if (age < olderThanDays * 86_400_000) continue;
+    if (mountinfo === undefined) {
+      failed.push(id);
+      errors[id] = mountError;
+      continue;
+    }
+    const mounts = mountsWithin(mountinfo, realpathSync(dir));
+    if (mounts.length) {
+      failed.push(id);
+      errors[id] = `a filesystem is mounted inside it, unmount it first: ${mounts.join(", ")}`;
+      continue;
+    }
     const tx = known.get(id);
     if (tx && purgeHook && !(await runPurgeHook(expandHome(paths.home)(purgeHook), tx.entries))) {
       failed.push(id);

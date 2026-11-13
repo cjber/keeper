@@ -4,7 +4,7 @@ import { lstat, readdir } from "node:fs/promises";
 import { availableParallelism, loadavg } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { alive, type Hold, liveHolds, readLedger } from "./ledger";
-import { ageDays, expandHome, holders, type Paths, run, sizes } from "./system";
+import { ageDays, expandHome, holders, type Paths, run, sizes, timedOut } from "./system";
 import { type Category, categories, count, type Finding, type Risk, type Scan, schemaVersion } from "./types";
 import { coveredDays, readUsage, type UsageLedger } from "./usage";
 
@@ -214,6 +214,14 @@ export interface Context {
   pullRequests?: (repo: string, branch?: string) => Promise<PullRequest[]>;
   /** Milliseconds before the first retry of a failed pull request lookup. Tests shorten it. */
   retryPause?: number;
+  /** Milliseconds one `gh` pull request lookup may take. Falls back to `pullRequestTimeoutMs`. Tests shorten it. */
+  pullRequestTimeout?: number;
+  /**
+   * Finding ids a plan names. When set, only these agent, build and worktree findings are measured and checked for
+   * unwritable directories, because planning or applying a few ids must not walk every other tree in their category.
+   * The rest keep 0 bytes, so a scan made this way is never stored as a complete one.
+   */
+  sizeOnly?: ReadonlySet<string>;
   /** Hears a problem that left a category incomplete without failing it. `scan` sets it per category. */
   warn?: (message: string) => void;
   cores?: number;
@@ -279,6 +287,11 @@ export function findingId(category: Category, target: string, state: string): { 
   return { id: digest(category, target), state: digest(category, target, state) };
 }
 
+/** Whether a scan measures this finding: every one, unless a plan named the few it is about. */
+function measured(context: Context, id: string): boolean {
+  return !context.sizeOnly || context.sizeOnly.has(id);
+}
+
 function entries(path: string): string[] {
   try {
     return readdirSync(path).map((name) => join(path, name));
@@ -339,14 +352,24 @@ const noGitHub = [/no git remotes found/, /none of the git remotes/, /not a git 
 const noGh = [127, 4];
 
 /**
+ * How long one `gh pr list` may take. A full page of 1000 pull requests is ten API requests, which finish in seconds,
+ * so a minute only ever ends a gh that is not going to answer, such as one blocked on a keyring that never replies.
+ */
+const pullRequestTimeoutMs = 60_000;
+
+/** A lookup that used up its whole wait. Not retried: it already waited longer than every retry pause together. */
+class LookupTimeout extends Error {}
+
+/**
  * A repo gh cannot serve has no pull requests, which leaves its worktrees behind the age window and approval. Any other
  * failure throws: a timeout or rate limit on a busy machine says nothing about whether a branch was merged.
  */
-async function listPullRequests(repo: string, branch?: string): Promise<PullRequest[]> {
+async function listPullRequests(repo: string, branch?: string, timeout = pullRequestTimeoutMs): Promise<PullRequest[]> {
   const fields = "number,state,headRefName,headRefOid,mergeCommit";
   const filter = branch ? ["--head", branch] : [];
   const command = ["gh", "pr", "list", "--state", "all", "--limit", String(pullRequestLimit), ...filter];
-  const result = await run([...command, "--json", fields], repo);
+  const result = await run([...command, "--json", fields], repo, timeout);
+  if (result.code === timedOut) throw new LookupTimeout(result.stderr);
   if (noGh.includes(result.code) || noGitHub.some((pattern) => pattern.test(result.stderr))) return [];
   if (result.code !== 0) throw new Error(result.stderr.split("\n")[0] || `gh exited ${result.code}`);
   return JSON.parse(result.stdout) as PullRequest[];
@@ -358,7 +381,7 @@ async function retried<T>(attempt: () => Promise<T>, pause: number, attempts = 3
     try {
       return await attempt();
     } catch (error) {
-      if (tries >= attempts) throw error;
+      if (tries >= attempts || error instanceof LookupTimeout) throw error;
       await Bun.sleep(pause * tries);
     }
   }
@@ -509,7 +532,9 @@ function headAge(gitDir: string, now: number): number {
 async function scanWorktrees(context: Context): Promise<Finding[]> {
   const dirs = context.paths.worktrees.flatMap(worktreeDirs);
   const leftovers = context.paths.worktrees.flatMap(leftoverDirs);
-  const fetch = context.pullRequests ?? listPullRequests;
+  const fetch =
+    context.pullRequests ??
+    ((repo: string, branch?: string) => listPullRequests(repo, branch, context.pullRequestTimeout));
   const failed = new Set<string>();
   // One warning per repo, because one failed lookup leaves every worktree of that repo unproven.
   const list = (commonDir: string, path: string, branch?: string) =>
@@ -537,7 +562,9 @@ async function scanWorktrees(context: Context): Promise<Finding[]> {
     await Promise.all(dirs.map((dir) => unlessGone(dir, () => inspectWorktree(dir, context, lookup)))),
   );
   const bytes = await sizes(
-    checkouts.filter((finding) => !finding.blockers.length).flatMap((finding) => finding.paths),
+    checkouts
+      .filter((finding) => !finding.blockers.length && measured(context, finding.id))
+      .flatMap((finding) => finding.paths),
   );
   return [
     ...checkouts.map((finding) => ({ ...finding, bytes: bytes.get(finding.paths[0] as string) ?? 0 })),
@@ -703,7 +730,7 @@ async function scanAgent(context: Context): Promise<Finding[]> {
   // Agent output inside its idle window is never planned, so only the rest are walked unless the caller wants every
   // size. The same walk catches a directory keeper cannot write, which a move to the trash could not remove.
   const walked = judged
-    .filter((finding) => context.sizeBlocked || !finding.blockers.length)
+    .filter((finding) => (context.sizeBlocked || !finding.blockers.length) && measured(context, finding.id))
     .flatMap((finding) => finding.paths);
   const [bytes, unwritable] = await Promise.all([sizes(walked), unwritableDirs(walked)]);
   const held = (path: string) => unwritable.some((dir) => dir === path || dir.startsWith(`${path}/`));
@@ -1074,7 +1101,12 @@ async function scanBuild(context: Context): Promise<Finding[]> {
     ],
   }));
   const bytes = await sizes(
-    judged.filter((entry) => context.sizeBlocked || !entry.blockers.length).map((entry) => entry.path),
+    judged
+      .filter(
+        (entry) =>
+          (context.sizeBlocked || !entry.blockers.length) && measured(context, findingId("build", entry.path, "").id),
+      )
+      .map((entry) => entry.path),
   );
   return judged.map(({ path, recent, blockers }) => ({
     ...findingId("build", path, `${bytes.get(path) ?? 0}\0${recent}`),

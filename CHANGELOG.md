@@ -7,6 +7,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+- **`purge` removes trash that holds a read-only directory.** A trashed tree keeps its permissions, and nothing can be
+  deleted from a directory without write permission, so one such directory failed the whole purge and left every later
+  transaction in the trash. `purge` now gives the directories you own their permissions back and removes them. A
+  transaction that still cannot be removed is listed in `failed` with its reason in `errors`, the rest are purged, and
+  the command exits 5.
+- **A `gh` that never answers no longer hangs the worktree scan.** Each pull request lookup gets one minute. After
+  that the scan finishes with a warning naming the repository, and its worktrees stay behind the age window, as with
+  any other failed lookup.
+- **`keeper plan ID...` and `keeper apply` measure only the findings the plan names.** Planning or applying a few
+  agent, build or worktree findings used to walk every other eligible tree in the same category first, which could
+  take minutes on a machine with a lot of claimed scratch.
+
 ## [0.4.4] - 2026-11-12
 
 - **A stale tree keeper cannot fully remove is blocked instead of half moved.** A move to the trash that has to cross a

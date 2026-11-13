@@ -16,12 +16,19 @@ const maxChildren = 12;
 let children = 0;
 const waiting: (() => void)[] = [];
 
-export async function run(argv: string[], cwd?: string): Promise<Result> {
+/** The exit code `timeout` uses, for a command `run` stopped because it outlived its wait. */
+export const timedOut = 124;
+
+/**
+ * With `timeoutMs`, a command still running after that long is killed and reported as `timedOut`, so a child that
+ * never returns cannot hold its slot, and the scan behind it, forever.
+ */
+export async function run(argv: string[], cwd?: string, timeoutMs?: number): Promise<Result> {
   // A finishing child hands its slot straight to the next waiter, so the count never overshoots.
   if (children >= maxChildren) await new Promise<void>((resolve) => waiting.push(resolve));
   else children++;
   try {
-    return await spawn(argv, cwd);
+    return await spawn(argv, cwd, timeoutMs);
   } finally {
     const next = waiting.shift();
     if (next) next();
@@ -39,15 +46,27 @@ export async function waitFor(argv: string[], ms: number): Promise<boolean> {
   return Promise.race([child.exited.then(() => true), Bun.sleep(ms).then(() => false)]);
 }
 
-async function spawn(argv: string[], cwd?: string): Promise<Result> {
+async function spawn(argv: string[], cwd?: string, timeoutMs?: number): Promise<Result> {
   try {
     const child = Bun.spawn(argv, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-    const [stdout, stderr, code] = await Promise.all([
+    const finished = Promise.all([
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),
       child.exited,
-    ]);
-    return { code, stdout: stdout.trim(), stderr: stderr.trim() };
+    ]).then(([stdout, stderr, code]) => ({ code, stdout: stdout.trim(), stderr: stderr.trim() }));
+    if (timeoutMs === undefined) return await finished;
+    let expire = () => {};
+    const expired = new Promise<undefined>((resolve) => {
+      expire = () => resolve(undefined);
+    });
+    const timer = setTimeout(() => expire(), timeoutMs);
+    const result = await Promise.race([finished, expired]);
+    clearTimeout(timer);
+    if (result) return result;
+    // Not awaited past the kill: a grandchild can keep the pipes open, and the output of a killed command is no answer.
+    child.kill("SIGKILL");
+    finished.catch(() => {});
+    return { code: timedOut, stdout: "", stderr: `${argv[0]} did not finish within ${timeoutMs / 1000} s` };
   } catch (error) {
     return { code: 127, stdout: "", stderr: String(error) };
   }

@@ -29,7 +29,7 @@ import {
   tmpPatterns,
   worktreeDirs,
 } from "./scanners";
-import { defaultPaths, holders, niceness, run, waitFor } from "./system";
+import { defaultPaths, holders, niceness, run, timedOut, waitFor } from "./system";
 import { units } from "./timer";
 import { eligible, type Finding } from "./types";
 
@@ -405,6 +405,79 @@ test("purge removes trash whose transaction manifest went missing, once it is pa
   expect(existsSync(orphan)).toBe(true);
   expect((await purge(ctx.paths, 14)).purged).toEqual(["2a4be12e"]);
   expect(existsSync(orphan)).toBe(false);
+});
+
+test("purge removes a transaction that holds a read-only directory, and the ones after it", async () => {
+  const locked = join(ctx.paths.trash, "1a2b3c4d");
+  mkdirSync(join(locked, "0/tree/sealed"), { recursive: true });
+  writeFileSync(join(locked, "0/tree/sealed/file"), "x");
+  chmodSync(join(locked, "0/tree/sealed"), 0o500);
+  const later = join(ctx.paths.trash, "9f8e7d6c");
+  mkdirSync(join(later, "0/tree"), { recursive: true });
+  const result = await purge(ctx.paths, 0, Date.now() + 1000);
+  expect(result).toMatchObject({ failed: [], errors: {} });
+  expect(result.purged.sort()).toEqual(["1a2b3c4d", "9f8e7d6c"]);
+  expect(existsSync(locked)).toBe(false);
+  expect(existsSync(later)).toBe(false);
+});
+
+test("run stops a command that outlives its wait and reports it as timed out", async () => {
+  const started = Date.now();
+  const result = await run(["sleep", "30"], undefined, 100);
+  expect(result.code).toBe(timedOut);
+  expect(result.stderr).toContain("did not finish");
+  expect(Date.now() - started).toBeLessThan(5000);
+});
+
+test("a gh that never returns is asked once, then leaves its repo's worktrees blocked with a warning", async () => {
+  const path = await worktree("hung");
+  age(path);
+  age(join(home, "hung-main/.git/worktrees/hung/logs/HEAD"));
+  const bin = join(home, "bin");
+  mkdirSync(bin);
+  writeFileSync(join(bin, "gh"), `#!/bin/sh\necho call >> ${home}/gh-calls\nexec sleep 30\n`);
+  chmodSync(join(bin, "gh"), 0o755);
+  // Bun resolves a command against the PATH it started with, so the scan runs in a process started with the fake first.
+  const script = `import { scan } from ${JSON.stringify(join(import.meta.dir, "scanners.ts"))};
+    const report = await scan(JSON.parse(process.env.KEEPER_TEST_CONTEXT), ["worktree"]);
+    console.log(JSON.stringify(report));`;
+  const started = Date.now();
+  const child = Bun.spawn([process.execPath, "-e", script], {
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      KEEPER_TEST_CONTEXT: JSON.stringify({ ...ctx, pullRequestTimeout: 200, retryPause: 1 }),
+    },
+    stdout: "pipe",
+    stderr: "inherit",
+  });
+  const report = JSON.parse(await new Response(child.stdout).text()) as Awaited<ReturnType<typeof scan>>;
+  expect(Date.now() - started).toBeLessThan(10_000);
+  expect(readFileSync(join(home, "gh-calls"), "utf8").trim().split("\n")).toHaveLength(1);
+  expect(report.warnings).toHaveLength(1);
+  expect(report.warnings[0]).toContain("did not finish");
+  expect(report.findings[0]?.blockers.join()).toContain("could not be listed");
+});
+
+test("a scan for named ids measures only them, and is never reused as a complete scan", async () => {
+  const config = { ...ctx.config, agentRoots: ["~/batch", "~/other"] };
+  for (const name of ["batch", "other"]) {
+    mkdirSync(join(home, name));
+    writeFileSync(join(home, name, "file"), "x".repeat(4096));
+    age(join(home, name));
+  }
+  const all = await scan({ ...ctx, config }, ["agent"]);
+  const wanted = all.findings.find((finding) => finding.paths[0] === join(home, "batch")) as Finding;
+  expect(all.findings.every((finding) => finding.bytes > 0)).toBe(true);
+  const named = { ...ctx, config, sizeOnly: new Set([wanted.id]) };
+  const report = await cachedScan(named, { reuse: false, only: ["agent"] });
+  const bytes = Object.fromEntries(report.findings.map((finding) => [finding.title, finding.bytes]));
+  expect(bytes).toEqual({ "~/batch": wanted.bytes, "~/other": 0 });
+  // The unmeasured row must not be served later as if the whole category had been sized.
+  expect((await cachedScan({ ...ctx, config }, { only: ["agent"] })).cached).toEqual([]);
+  // The plan's state still matches, so applying it takes the named finding.
+  const outcome = await applyPlan(createPlan(ctx.paths, [wanted], 7), { ...ctx, config });
+  expect(outcome).toMatchObject({ applied: [wanted.id], stale: [], bytes: wanted.bytes });
 });
 
 test("waitFor returns on time from a command that ignores SIGTERM, as a stuck sync does", async () => {

@@ -344,6 +344,57 @@ export function worktreeDirs(root: string): string[] {
     );
 }
 
+/** The main checkout of every repo keeper can see, whether listed directly or known through one of its worktrees. */
+export async function primaryCheckouts(context: Context): Promise<string[]> {
+  const expand = expandHome(context.paths.home);
+  const listed = context.config.repoRoots.flatMap((root) => worktreeDirs(expand(root)));
+  const owners = await Promise.all(
+    context.paths.worktrees.flatMap(worktreeDirs).map(async (path) => {
+      const common = await run([
+        "git",
+        "--no-optional-locks",
+        "-C",
+        path,
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+      ]);
+      return common.stdout.endsWith("/.git") ? [common.stdout.slice(0, -"/.git".length)] : [];
+    }),
+  );
+  return [...new Set([...listed, ...owners.flat()])];
+}
+
+/**
+ * Every linked checkout git names for a repo, its main checkout left out. Agents put worktrees inside the repo, such as
+ * <repo>/.claude/worktrees, where walking the worktree roots never reaches them, so git is the only complete list.
+ */
+async function gitWorktrees(repo: string): Promise<{ paths: string[]; error?: string }> {
+  const listed = await run(["git", "--no-optional-locks", "-C", repo, "worktree", "list", "--porcelain", "-z"]);
+  if (listed.code !== 0)
+    return { paths: [], error: listed.stderr.split("\n")[0] || `git worktree list exited ${listed.code}` };
+  return {
+    paths: listed.stdout
+      .split("\0")
+      .filter((line) => line.startsWith("worktree "))
+      .map((line) => line.slice("worktree ".length))
+      .slice(1),
+  };
+}
+
+/** The worktrees keeper can see: the worktree roots, plus every checkout the git of a known repo names. */
+async function knownWorktrees(context: Context): Promise<string[]> {
+  const roots = context.paths.worktrees.flatMap(worktreeDirs);
+  const repos = await primaryCheckouts(context);
+  const listed = await Promise.all(repos.map(gitWorktrees));
+  const failed = repos.flatMap((repo, at) => {
+    const error = listed[at]?.error;
+    return error ? [`${repo} (${error})`] : [];
+  });
+  if (failed.length) context.warn?.(`worktrees could not be listed for ${failed.join(", ")}`);
+  return [...new Set([...roots, ...listed.flatMap((entry) => entry.paths)])];
+}
+
 /** The newest pull requests in one call. A busy repository has more, so a branch missing here is looked up by name. */
 const pullRequestLimit = 1000;
 
@@ -505,7 +556,7 @@ async function inspectWorktree(path: string, context: Context, lookup: PullReque
     category: "worktree",
     risk: proof ? "low" : "medium",
     action: "trash",
-    title: `${relativeToRoot(path, context.paths.worktrees)} (${branch || "unknown branch"})`,
+    title: `${worktreeName(path, context)} (${branch || "unknown branch"})`,
     paths: [path],
     packages: [],
     bytes: 0,
@@ -523,6 +574,12 @@ function relativeToRoot(path: string, roots: readonly string[]): string {
   return root ? path.slice(root.length + 1) : path;
 }
 
+/** A worktree's name inside its worktree root, or its home-relative path when it sits beside its own repo instead. */
+function worktreeName(path: string, context: Context): string {
+  const relative = relativeToRoot(path, context.paths.worktrees);
+  return relative === path ? path.replace(`${context.paths.home}/`, "~/") : relative;
+}
+
 function headAge(gitDir: string, now: number): number {
   try {
     return ageDays(join(gitDir, "logs/HEAD"), now);
@@ -532,7 +589,7 @@ function headAge(gitDir: string, now: number): number {
 }
 
 async function scanWorktrees(context: Context): Promise<Finding[]> {
-  const dirs = context.paths.worktrees.flatMap(worktreeDirs);
+  const dirs = await knownWorktrees(context);
   const leftovers = context.paths.worktrees.flatMap(leftoverDirs);
   const fetch =
     context.pullRequests ??
@@ -1067,8 +1124,10 @@ async function hasRecentFile(path: string, days: number): Promise<boolean> {
 async function scanBuild(context: Context): Promise<Finding[]> {
   const expand = expandHome(context.paths.home);
   const repos = [
-    ...context.paths.worktrees.flatMap(worktreeDirs),
-    ...context.config.repoRoots.flatMap((root) => worktreeDirs(expand(root))),
+    ...new Set([
+      ...(await knownWorktrees(context)),
+      ...context.config.repoRoots.flatMap((root) => worktreeDirs(expand(root))),
+    ]),
   ];
   const candidates = repos.flatMap((repo) => {
     const top = entries(repo).filter((path) => buildDirs.test(path));

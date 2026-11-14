@@ -116,6 +116,22 @@ test("a pushed, clean, idle worktree is the only eligible one", async () => {
   expect(by(dirty)?.bytes).toBe(0);
 });
 
+test("a worktree inside a repo's own .claude/worktrees is judged like any other", async () => {
+  const known = await worktree("known");
+  const main = join(home, "known-main");
+  const path = join(main, ".claude/worktrees/wf_1");
+  await git(main, "worktree", "add", "-q", "-b", "worktree-wf_1", path);
+  age(path);
+  age(join(main, ".git/worktrees/wf_1/logs/HEAD"));
+  const report = await scan(ctx, ["worktree"]);
+  const by = (target: string) => report.findings.filter((finding) => finding.paths[0] === target);
+  // The repo is known through the worktree under ~/.worktrees, and git names the one beside it.
+  expect(by(known)).toHaveLength(1);
+  expect(by(path)[0]?.blockers).toEqual([]);
+  expect(by(path)[0]?.bytes).toBeGreaterThan(0);
+  expect(by(path)[0]?.title).toBe("~/known-main/.claude/worktrees/wf_1 (worktree-wf_1)");
+});
+
 test("a commit only on this machine blocks the worktree", async () => {
   const path = await worktree("ahead");
   await git(path, "commit", "-qm", "local", "--allow-empty");

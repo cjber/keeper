@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import packageJson from "../package.json";
 import { cachedScan, categoriesOf, forget, maxAge } from "./cache";
-import { freshen, primaryCheckouts } from "./freshen";
+import { freshen } from "./freshen";
 import { readEvents, readSamples, sample } from "./history";
 import {
   actor,
@@ -28,7 +28,7 @@ import {
   transactions,
   undo,
 } from "./ops";
-import { defaultAppStaleDays, defaultStaleDays } from "./scanners";
+import { defaultAppStaleDays, defaultStaleDays, primaryCheckouts } from "./scanners";
 import { defaultPaths, expandHome, run } from "./system";
 import { installCron, installSystemd, lastServiceResult, removeSchedule, scheduleStatus } from "./timer";
 import {

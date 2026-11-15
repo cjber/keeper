@@ -1266,6 +1266,41 @@ test("purge keeps a transaction with a filesystem mounted inside it", async () =
   expect(await purge(ctx.paths, 0)).toMatchObject({ purged: [transaction], failed: [] });
 });
 
+test("purge keeps a filesystem mounted on the transaction root", async () => {
+  const batch = join(home, "batch");
+  mkdirSync(batch);
+  writeFileSync(join(batch, "out"), "data");
+  age(batch);
+  const { findings } = await scan(ctx, ["agent"]);
+  const { transaction } = await applyPlan(createPlan(ctx.paths, findings, 7), ctx);
+  const dir = realpathSync(join(ctx.paths.trash, transaction as string));
+  ctx.paths.mountinfo = join(home, "mountinfo");
+  writeFileSync(ctx.paths.mountinfo, `90 22 0:50 / ${dir} rw - ext4 /dev/sdb1 rw\n`);
+  expect(await purge(ctx.paths, 0)).toMatchObject({ purged: [], failed: [transaction] });
+  expect(existsSync(dir)).toBe(true);
+});
+
+test("purge checks mount changes made by its awaited hook", async () => {
+  const path = await worktree("mount-hooked");
+  age(path);
+  age(join(home, "mount-hooked-main/.git/worktrees/mount-hooked/logs/HEAD"));
+  const { findings } = await scan(ctx, ["worktree"]);
+  const { transaction } = await applyPlan(createPlan(ctx.paths, findings, 7), ctx);
+  const dir = realpathSync(join(ctx.paths.trash, transaction as string));
+  ctx.paths.mountinfo = join(home, "mountinfo");
+  writeFileSync(ctx.paths.mountinfo, "22 1 0:21 / / rw - btrfs /dev/root rw\n");
+  const hook = join(home, "mount-hook.sh");
+  writeFileSync(
+    hook,
+    `#!/bin/sh\nprintf '%s\\n' '90 22 0:50 / ${dir} rw - ext4 /dev/sdb1 rw' > '${ctx.paths.mountinfo}'\n`,
+  );
+  chmodSync(hook, 0o755);
+  mkdirSync(join(home, ".config/keeper"), { recursive: true });
+  writeFileSync(ctx.paths.config, `purgeHook = "${hook}"\n`);
+  expect(await purge(ctx.paths, 0)).toMatchObject({ purged: [], failed: [transaction] });
+  expect(existsSync(dir)).toBe(true);
+});
+
 test("an unreadable mount table keeps every transaction", async () => {
   const batch = join(home, "batch");
   mkdirSync(batch);

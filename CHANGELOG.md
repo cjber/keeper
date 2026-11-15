@@ -11,6 +11,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   the trash, and a recursive delete does not stop at the mount, so purging it would have deleted what that filesystem
   holds. `purge` now reads the kernel's mount table first and keeps any transaction with a mount below it, listing it in
   `failed` with the mount points in `errors`. An unreadable mount table keeps every transaction.
+- **Worktrees inside a repository, such as `<repo>/.claude/worktrees`, are scanned.** The worktree scan used to list
+  only the directories under the worktree roots, so a worktree an agent created beside its own repository was never
+  offered. Each known repository's `git worktree list` is now read too, and those checkouts are judged like any other.
 
 ## [0.5.0] - 2026-11-13
 

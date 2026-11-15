@@ -6,17 +6,30 @@
 #   tui text                  print the current frame as plain text
 #   tui resize COLS ROWS      change the terminal size
 #   tui stop                  close the wizard
-t="tmux -L keeper-patrol"
+troot=${KEEPER_PATROL_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/keeper/patrol}
+case "$troot" in
+  /*) ;;
+  *) echo "KEEPER_PATROL_ROOT must be an absolute path" >&2; exit 2 ;;
+esac
+if [ "$troot" = / ] || [ "$troot" = "$HOME" ]; then
+  echo "KEEPER_PATROL_ROOT cannot be / or HOME" >&2
+  exit 2
+fi
+if [ -L "$troot" ] || [ -L "$troot/.keeper-patrol-root" ] || [ -L "$troot/.keeper-patrol-root" ] || [ "$(cat "$troot/.keeper-patrol-root" 2>/dev/null || true)" != keeper-patrol-root ]; then
+  echo "KEEPER_PATROL_ROOT is not a marked sandbox; run setup first" >&2
+  exit 2
+fi
+t_socket="$troot/tmux.sock"
 here=$(cd "$(dirname "$0")" && pwd)
 case "$1" in
   start)
-    $t kill-server 2>/dev/null
-    $t new-session -d -s w -x "${2:-100}" -y "${3:-30}" "$here/keeper; sleep 600"
-    sleep 1.5 && $t capture-pane -p -e -t w ;;
-  keys) shift; $t send-keys -t w "$@"; sleep 0.6; $t capture-pane -p -e -t w ;;
-  show) $t capture-pane -p -e -t w ;;
-  text) $t capture-pane -p -t w ;;
-  resize) $t resize-window -t w -x "$2" -y "$3"; sleep 0.5; $t capture-pane -p -e -t w ;;
-  stop) $t kill-server 2>/dev/null; echo stopped ;;
+    tmux -S "$t_socket" kill-server 2>/dev/null
+    tmux -S "$t_socket" new-session -d -s w -x "${2:-100}" -y "${3:-30}" "$here/keeper; sleep 600"
+    sleep 1.5 && tmux -S "$t_socket" capture-pane -p -e -t w ;;
+  keys) shift; tmux -S "$t_socket" send-keys -t w "$@"; sleep 0.6; tmux -S "$t_socket" capture-pane -p -e -t w ;;
+  show) tmux -S "$t_socket" capture-pane -p -e -t w ;;
+  text) tmux -S "$t_socket" capture-pane -p -t w ;;
+  resize) tmux -S "$t_socket" resize-window -t w -x "$2" -y "$3"; sleep 0.5; tmux -S "$t_socket" capture-pane -p -e -t w ;;
+  stop) tmux -S "$t_socket" kill-server 2>/dev/null; echo stopped ;;
   *) sed -n '2,9p' "$0"; exit 2 ;;
 esac

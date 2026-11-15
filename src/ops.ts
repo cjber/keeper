@@ -506,16 +506,16 @@ async function runPurgeHook(hook: string, entries: readonly TrashEntry[]): Promi
  * then, because a purge is usually many gigabytes that need no repair.
  */
 async function removeTrash(paths: Paths, dir: string): Promise<void> {
-  const remove = () => {
+  const checkMounts = () => {
     // Read immediately before each removal, including the retry after an awaited permission repair.
     // A failed mount-table lookup throws too, keeping the transaction.
     const mounts = mountsWithin(readFileSync(paths.mountinfo, "utf8"), realpathSync(dir));
     if (mounts.length)
       throw new Error(`a filesystem is mounted at or inside it, unmount it first: ${mounts.join(", ")}`);
-    rmSync(dir, { recursive: true, force: true });
   };
+  checkMounts();
   try {
-    remove();
+    rmSync(dir, { recursive: true, force: true });
     return;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
@@ -524,7 +524,8 @@ async function removeTrash(paths: Paths, dir: string): Promise<void> {
   // `-exec ... ;` runs on a directory before find descends into it, so a tree find could not read opens up as it goes.
   const locked = ["-type", "d", "-user", String(process.getuid?.()), "!", "-perm", "-u=rwx"];
   await run(["find", dir, "-xdev", ...locked, "-exec", "chmod", "u+rwx", "{}", ";"]);
-  remove();
+  checkMounts();
+  rmSync(dir, { recursive: true, force: true });
 }
 
 /**

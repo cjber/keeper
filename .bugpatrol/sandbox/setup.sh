@@ -3,18 +3,50 @@
 # caches and leftovers. Everything keeper could change lives under it, and stubs stand in for the
 # system commands its actions call, so a patrol can apply, undo and purge without touching the machine.
 set -eu
-root=/tmp/keeper-patrol
+root=${KEEPER_PATROL_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/keeper/patrol}
+case "$root" in
+  /*) ;;
+  *) echo "KEEPER_PATROL_ROOT must be an absolute path" >&2; exit 2 ;;
+esac
+if [ "$root" = / ] || [ "$root" = "$HOME" ]; then
+  echo "KEEPER_PATROL_ROOT cannot be / or HOME" >&2
+  exit 2
+fi
+marker="$root/.keeper-patrol-root"
+if [ -L "$root" ] || [ -L "$root/.keeper-patrol-root" ]; then
+  echo "KEEPER_PATROL_ROOT cannot be a symlink" >&2
+  exit 2
+fi
+if [ -e "$root" ]; then
+  if [ ! -d "$root" ] || { [ -e "$marker" ] && [ "$(cat "$marker")" != keeper-patrol-root ]; } || {
+    [ ! -e "$marker" ] && [ "$(find "$root" -mindepth 1 -print -quit)" ];
+  }; then
+    echo "KEEPER_PATROL_ROOT exists without its safety marker; choose an empty directory" >&2
+    exit 2
+  fi
+else
+  mkdir -p "$root"
+fi
+printf '%s\n' keeper-patrol-root > "$marker"
 home=$root/home
 
-tmux -L keeper-patrol kill-server 2>/dev/null || true
-rm -rf "$root"
+tmux -S "$root/tmux.sock" kill-server 2>/dev/null || true
+command rm -rf -- "$root"
 mkdir -p "$home/.worktrees" "$root/bin" "$root/remote"
+printf '%s\n' keeper-patrol-root > "$root/.keeper-patrol-root"
 
 # Stubs: each logs its call and succeeds, so actions report success without changing the machine.
-for tool in sudo renice docker uv pnpm npm systemctl crontab notify-send paccache pacman expac paru gh; do
+for tool in sudo renice docker uv pnpm npm systemctl crontab notify-send paccache pacman expac paru; do
   printf '#!/bin/sh\necho "%s $*" >> %s/stub-calls.log\n' "$tool" "$root" > "$root/bin/$tool"
   chmod +x "$root/bin/$tool"
 done
+
+# A successful GitHub list has a JSON array; an empty stdout would make every fixture fail closed.
+cat > "$root/bin/gh" <<'SH'
+#!/bin/sh
+printf '[]\n'
+SH
+chmod +x "$root/bin/gh"
 
 export HOME="$home" GIT_CONFIG_NOSYSTEM=1
 git config --global user.email patrol@example.test

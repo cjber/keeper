@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "id": "screen-wizard-history",
+  "description": "Free space history with marks for applies, purges and undo.",
+  "platform": "cli",
+  "requires": [
+    "screen-wizard-space"
+  ],
+  "steps": [
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui keys g",
+      "at": "terminal||e3b0c44298fc"
+    }
+  ],
+  "screenId": "wizard-history",
+  "createdAt": "2026-11-02T11:58:21.449Z",
+  "updatedAt": "2026-11-02T11:58:21.449Z"
+}

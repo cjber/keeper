@@ -1,6 +1,18 @@
 #!/bin/sh
 # keeper against the sandbox home, with stubbed system commands. The only way the patrol runs keeper.
-root=/tmp/keeper-patrol
+root=${KEEPER_PATROL_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/keeper/patrol}
+case "$root" in
+  /*) ;;
+  *) echo "KEEPER_PATROL_ROOT must be an absolute path" >&2; exit 2 ;;
+esac
+if [ "$root" = / ] || [ "$root" = "$HOME" ]; then
+  echo "KEEPER_PATROL_ROOT cannot be / or HOME" >&2
+  exit 2
+fi
+if [ -L "$root" ] || [ -L "$root/.keeper-patrol-root" ] || [ -L "$root/.keeper-patrol-root" ] || [ "$(cat "$root/.keeper-patrol-root" 2>/dev/null || true)" != keeper-patrol-root ]; then
+  echo "KEEPER_PATROL_ROOT is not a marked sandbox; run setup first" >&2
+  exit 2
+fi
 here=$(cd "$(dirname "$0")/../.." && pwd)
 export HOME=$root/home XDG_STATE_HOME=$root/home/.local/state XDG_CONFIG_HOME=$root/home/.config
 export PATH="$root/bin:$PATH"

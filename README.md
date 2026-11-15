@@ -112,7 +112,7 @@ a blocked row per group that counts what is waiting and why. Holds, claims and k
 
 | Category | Finds | Risk |
 | --- | --- | --- |
-| `worktree` | Clean, pushed worktrees and stray directories in a worktree root | low with proof, otherwise medium |
+| `worktree` | Clean, pushed worktrees, including ones inside a repo such as `.claude/worktrees`, and stray directories in a worktree root | low with proof, otherwise medium |
 | `aur` | Clones of uninstalled packages, and build output in the others | low |
 | `pacman-cache` | Old package versions, keeping the newest | low |
 | `orphans` | Dependencies nothing requires | medium |
@@ -244,7 +244,7 @@ error:
 ```toml
 # Directories of git checkouts whose ignored build output may be cleaned.
 repoRoots = ["~/code"]
-# Directories that hold worktrees. Default: ~/.worktrees
+# Directories that hold worktrees. Default: ~/.worktrees. Worktrees git lists for a known repo are scanned too.
 worktreeRoots = ["~/.worktrees"]
 # AUR helper clones. Default: the paru and yay caches
 aurClones = ["~/.cache/paru/clone"]

@@ -7,6 +7,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+- **Worktrees inside a repository, such as `<repo>/.claude/worktrees`, are scanned.** The worktree scan used to list
+  only the directories under the worktree roots, so a worktree an agent created beside its own repository was never
+  offered. Each known repository's `git worktree list` is now read too, and those checkouts are judged like any other.
+
 ## [0.5.0] - 2026-11-13
 
 - **`purge` removes trash that holds a read-only directory.** A trashed tree keeps its permissions, and nothing can be

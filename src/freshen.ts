@@ -1,19 +1,5 @@
-import { type Context, worktreeDirs } from "./scanners";
-import { expandHome, run } from "./system";
+import { run } from "./system";
 import { count } from "./types";
-
-/** The main checkout of every repo keeper can see, whether listed directly or known through one of its worktrees. */
-export async function primaryCheckouts(context: Context): Promise<string[]> {
-  const expand = expandHome(context.paths.home);
-  const listed = context.config.repoRoots.flatMap((root) => worktreeDirs(expand(root)));
-  const owners = await Promise.all(
-    context.paths.worktrees.flatMap(worktreeDirs).map(async (path) => {
-      const common = await run(["git", "-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"]);
-      return common.stdout.endsWith("/.git") ? [common.stdout.slice(0, -"/.git".length)] : [];
-    }),
-  );
-  return [...new Set([...listed, ...owners.flat()])];
-}
 
 /**
  * Returns a checkout to its default branch and fast-forwards it. It never resets, rebases or stashes, and leaves

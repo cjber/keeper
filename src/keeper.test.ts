@@ -1251,10 +1251,14 @@ test("purging one trashed worktree preserves another transaction's undo registra
   const secondApplied = await applyPlan(createPlan(ctx.paths, [secondFinding as Finding], 7), live);
   expect(firstApplied.transaction).toBeString();
   expect(secondApplied.transaction).toBeString();
+  // The registration is only expired after the worktrees have been trashed. This is the state in which a broad
+  // prune from the first purge would delete the second transaction's registration too.
+  age(join(home, "same-repo-main/.git/worktrees/same-repo-second/gitdir"));
 
   await purge(ctx.paths, 0, Date.now(), [firstApplied.transaction as string]);
   expect(existsSync(join(home, "same-repo-main/.git/worktrees/same-repo-second"))).toBe(true);
   expect((await undo(ctx.paths, secondApplied.transaction as string)).restored).toEqual([second]);
+  expect((await git(second, "rev-parse", "--show-toplevel")).trim()).toBe(second);
 });
 
 test("purge reports measured free space separately from uncompressed size", async () => {

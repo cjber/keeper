@@ -57,6 +57,44 @@
           "lastSeenAt": "2026-11-02T10:29:24.119Z"
         }
       ]
+    },
+    {
+      "name": "Wizard free space history",
+      "description": "Free space history with marks for applies, purges and undo.",
+      "platform": "cli",
+      "firstSeenAt": "2026-11-02T11:58:21.449Z",
+      "id": "wizard-history",
+      "location": "terminal",
+      "screenKey": "terminal|",
+      "routineId": "screen-wizard-history",
+      "links": [],
+      "visits": 1,
+      "lastSeenAt": "2026-11-02T11:58:21.449Z"
+    },
+    {
+      "name": "Wizard space view",
+      "description": "Graph view (g) showing disk ready vs waiting by category and a Why it waits table of blocker reasons.",
+      "platform": "cli",
+      "firstSeenAt": "2026-11-02T11:58:07.130Z",
+      "id": "wizard-space",
+      "location": "terminal",
+      "screenKey": "terminal|",
+      "routineId": "screen-wizard-space",
+      "links": [
+        "wizard-history"
+      ],
+      "visits": 1,
+      "lastSeenAt": "2026-11-02T11:58:21.450Z",
+      "transitions": [
+        {
+          "to": "wizard-history",
+          "kind": "other",
+          "via": "run",
+          "steps": 2,
+          "count": 1,
+          "lastSeenAt": "2026-11-02T11:58:21.450Z"
+        }
+      ]
     }
   ],
   "updatedAt": "2026-11-02T10:29:24.119Z"

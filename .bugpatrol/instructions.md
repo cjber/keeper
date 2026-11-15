@@ -5,9 +5,9 @@ agents leave behind (stale git worktrees, build output, package caches, AUR clon
 safe, and moves it to an undoable trash. Agents use the subcommands, which print JSON when piped. People use the
 terminal wizard, which opens when `keeper` runs with no arguments in a terminal.
 
-Every command here runs against a sandbox home at /tmp/keeper-patrol/home, which `app.setup` rebuilds for each
+Every command here runs against a sandbox home at `$KEEPER_PATROL_ROOT/home`, which `app.setup` rebuilds for each
 session. Stubs stand in for sudo, docker, systemctl, crontab, renice and the package managers, and log their calls to
-/tmp/keeper-patrol/stub-calls.log. The `load` category lists the real machine's busy processes; renicing them only
+`$KEEPER_PATROL_ROOT/stub-calls.log`. The `load` category lists the real machine's busy processes; renicing them only
 calls the stub.
 
 ## Sign in
@@ -62,4 +62,5 @@ For the agent CLI, a message that leaves an agent unsure of its next step is a b
 
 - Never run `keeper` directly, `bun src/index.tsx`, or any command outside the sandbox wrappers: the real keeper
   acts on this machine's files.
-- Never change files outside /tmp/keeper-patrol.
+- Never change files outside the selected `KEEPER_PATROL_ROOT`.
+Independent sandbox roots are isolated. Set `KEEPER_PATROL_ROOT` to a unique absolute directory for each concurrent run; it defaults to `$XDG_CACHE_HOME/keeper/patrol`. The setup resets only that named, marked directory and its `tmux.sock`, and rejects `/`, `$HOME`, symlinks, and unmarked nonempty roots.

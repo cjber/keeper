@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "id": "screen-wizard-space",
+  "description": "Graph view (g) showing disk ready vs waiting by category and a Why it waits table of blocker reasons.",
+  "platform": "cli",
+  "requires": [
+    "enter-app"
+  ],
+  "steps": [
+    {
+      "kind": "run",
+      "command": ".bugpatrol/sandbox/tui keys g",
+      "at": "terminal||e3b0c44298fc"
+    }
+  ],
+  "screenId": "wizard-space",
+  "createdAt": "2026-11-02T11:58:07.129Z",
+  "updatedAt": "2026-11-02T11:58:07.129Z"
+}

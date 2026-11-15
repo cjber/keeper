@@ -1240,11 +1240,7 @@ test("purging one trashed worktree preserves another transaction's undo registra
   for (const name of ["same-repo", "same-repo-second"])
     age(join(home, `same-repo-main/.git/worktrees/${name}/logs/HEAD`));
   const prs = async (repo: string, branch?: string) =>
-    pull(
-      "MERGED",
-      await git(repo, "rev-parse", "HEAD"),
-      branch ?? (repo.endsWith("second") ? "b-same-repo-second" : "b-same-repo"),
-    )();
+    branch ? [await pull("MERGED", await git(repo, "rev-parse", "HEAD"), branch)()] : [];
   const live = { ...ctx, pullRequests: prs };
   const findings = (await scan(live, ["worktree"])).findings;
   const firstFinding = findings.find((finding) => finding.paths[0] === first);

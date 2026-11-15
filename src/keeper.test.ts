@@ -414,6 +414,25 @@ test("purge keeps young trash and removes old trash", async () => {
   expect(existsSync(join(ctx.paths.trash, transaction as string))).toBe(false);
 });
 
+test("targeted purge removes only selected young transactions", async () => {
+  for (const id of ["selected", "preserved"]) mkdirSync(join(ctx.paths.trash, id), { recursive: true });
+  const result = await purge(ctx.paths, 14, Date.now(), ["selected"]);
+  expect(result.purged).toEqual(["selected"]);
+  expect(existsSync(join(ctx.paths.trash, "preserved"))).toBe(true);
+});
+
+test("purge rejects mixing transaction IDs with an age window", async () => {
+  expect(await runCli(["purge", "selected", "--older-days", "0"])).toBe(2);
+});
+
+test("targeted purge validates every transaction before deleting any", async () => {
+  mkdirSync(join(ctx.paths.trash, "selected"), { recursive: true });
+  await expect(purge(ctx.paths, 0, Date.now(), ["selected", "../outside"])).rejects.toThrow(
+    "unknown trash transaction",
+  );
+  expect(existsSync(join(ctx.paths.trash, "selected"))).toBe(true);
+});
+
 test("purge removes trash whose transaction manifest went missing, once it is past the window", async () => {
   const orphan = join(ctx.paths.trash, "2a4be12e");
   mkdirSync(join(orphan, "0/left-behind"), { recursive: true });

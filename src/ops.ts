@@ -492,11 +492,15 @@ export function purge(paths: Paths, olderThanDays: number, now = Date.now()): Pr
 }
 
 /** The hook sees the trashed tree, which still holds whatever it needs to read, such as a worktree's .env. */
-async function runPurgeHook(hook: string, entries: readonly TrashEntry[]): Promise<boolean> {
+async function runPurgeHook(hook: string, entries: readonly TrashEntry[]): Promise<string | undefined> {
   for (const entry of entries.filter((item) => item.gitDir)) {
-    if ((await run([hook, entry.trashed, entry.original])).code !== 0) return false;
+    const result = await run([hook, entry.trashed, entry.original]);
+    if (result.code !== 0) {
+      const stderr = result.stderr.replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 500);
+      return `purge hook ${hook} exited ${result.code}${stderr ? `: ${stderr}` : ""}`;
+    }
   }
-  return true;
+  return undefined;
 }
 
 /**
@@ -565,10 +569,13 @@ async function purgeUnlocked(paths: Paths, olderThanDays: number, now: number): 
     const age = Math.max(0, now - statSync(dir).mtimeMs);
     if (age < olderThanDays * 86_400_000) continue;
     const tx = known.get(id);
-    if (tx && purgeHook && !(await runPurgeHook(expandHome(paths.home)(purgeHook), tx.entries))) {
+    if (tx && purgeHook) {
+      const hookError = await runPurgeHook(expandHome(paths.home)(purgeHook), tx.entries);
+      if (hookError) {
       failed.push(id);
-      errors[id] = "the purge hook failed";
+      errors[id] = hookError;
       continue;
+      }
     }
     // One transaction that cannot be removed is kept, and the rest are still purged.
     try {

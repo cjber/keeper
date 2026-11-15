@@ -32,7 +32,7 @@ import {
   worktreeDirs,
 } from "./scanners";
 import { defaultPaths, holders, niceness, run, timedOut, waitFor } from "./system";
-import { units } from "./timer";
+import { scheduleFromResults, units } from "./timer";
 import { eligible, type Finding } from "./types";
 
 let home: string;
@@ -1229,7 +1229,7 @@ test("a failing purge hook keeps the transaction so it can retry", async () => {
   const path = await worktree("hooked");
   const hook = join(home, "hook.sh");
   const seen = join(home, "seen");
-  writeFileSync(hook, `#!/bin/sh\ntest -f "$1/file" && echo "$2" >> ${seen}\nexit "$(cat ${home}/code)"\n`);
+  writeFileSync(hook, `#!/bin/sh\ntest -f "$1/file" && echo "$2" >> ${seen}\necho "hook failed: $1" >&2\nexit "$(cat ${home}/code)"\n`);
   chmodSync(hook, 0o755);
   writeFileSync(join(home, "code"), "1");
   mkdirSync(join(home, ".config/keeper"), { recursive: true });
@@ -1238,7 +1238,9 @@ test("a failing purge hook keeps the transaction so it can retry", async () => {
   age(join(home, "hooked-main/.git/worktrees/hooked/logs/HEAD"));
   const { findings } = await scan(ctx, ["worktree"]);
   const { transaction } = await applyPlan(createPlan(ctx.paths, findings, 7), ctx);
-  expect(await purge(ctx.paths, 0)).toMatchObject({ purged: [], failed: [transaction] });
+  const failed = await purge(ctx.paths, 0);
+  expect(failed).toMatchObject({ purged: [], failed: [transaction] });
+  expect(failed.errors[transaction as string]).toContain(`purge hook ${hook} exited 1: hook failed:`);
   writeFileSync(join(home, "code"), "0");
   expect(await purge(ctx.paths, 0)).toMatchObject({ purged: [transaction], failed: [] });
   expect(readFileSync(seen, "utf8").trim().split("\n")).toEqual([path, path]);
@@ -1465,6 +1467,9 @@ test("health names each reason the nightly runs cannot be trusted, and nothing w
   const now = Date.parse("2026-11-10T12:00:00Z");
   const run = { at: "2026-11-10T00:30:00Z", summary: "ok" };
   expect(health("systemd", run, "success", now)).toEqual([]);
+  expect(health("unavailable: Failed to connect to bus", run, undefined, now)).toEqual([
+    "unavailable: Failed to connect to bus",
+  ]);
   expect(health("none", run, undefined, now)).toEqual(["no schedule, so nothing runs nightly"]);
   expect(health("systemd", undefined, undefined, now)).toEqual(["no nightly run recorded yet"]);
   expect(health("systemd", { ...run, at: "2026-11-08T00:30:00Z" }, "success", now)).toEqual([
@@ -1475,6 +1480,12 @@ test("health names each reason the nightly runs cannot be trusted, and nothing w
     "the last nightly run could not apply or purge everything",
     "the last nightly scan warned: docker: down",
   ]);
+});
+
+test("schedule status preserves cron fallback when systemd is unavailable", () => {
+  const systemd = { code: 1, stdout: "", stderr: "Failed to connect to bus" };
+  expect(scheduleFromResults(systemd, { stdout: "17 3 * * * keeper auto # keeper" })).toBe("cron");
+  expect(scheduleFromResults(systemd, { stdout: "" })).toBe("unavailable: Failed to connect to bus");
 });
 
 test("a plan counts a worktree's own build output once, inside the worktree", () => {

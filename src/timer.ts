@@ -114,10 +114,19 @@ export async function lastServiceResult(): Promise<string | undefined> {
     : undefined;
 }
 
+export function scheduleFromResults(systemd: { code: number; stdout: string; stderr: string }, cron: { stdout: string }): string {
+  if (systemd.stdout === "enabled") return "systemd";
+  if (cron.stdout.includes(cronMark)) return "cron";
+  // A missing user bus is different from an installed schedule being absent. Keep the
+  // command's diagnostic so status cannot claim that nothing will run.
+  if (systemd.code !== 0 && systemd.stderr) return `unavailable: ${systemd.stderr}`;
+  return "none";
+}
+
 export async function scheduleStatus(): Promise<string> {
   const systemd = await run(["systemctl", "--user", "is-enabled", timer]);
-  if (systemd.stdout === "enabled") return "systemd";
-  return (await run(["crontab", "-l"])).stdout.includes(cronMark) ? "cron" : "none";
+  const cron = await run(["crontab", "-l"]);
+  return scheduleFromResults(systemd, cron);
 }
 
 async function systemctl(...args: string[]): Promise<void> {

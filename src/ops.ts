@@ -496,7 +496,12 @@ async function runPurgeHook(hook: string, entries: readonly TrashEntry[]): Promi
   for (const entry of entries.filter((item) => item.gitDir)) {
     const result = await run([hook, entry.trashed, entry.original]);
     if (result.code !== 0) {
-      const stderr = result.stderr.replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 500);
+      const stderr = Array.from(result.stderr, (character) =>
+        character < " " || character === "\x7f" ? " " : character,
+      )
+        .join("")
+        .trim()
+        .slice(0, 500);
       return `purge hook ${hook} exited ${result.code}${stderr ? `: ${stderr}` : ""}`;
     }
   }
@@ -572,9 +577,9 @@ async function purgeUnlocked(paths: Paths, olderThanDays: number, now: number): 
     if (tx && purgeHook) {
       const hookError = await runPurgeHook(expandHome(paths.home)(purgeHook), tx.entries);
       if (hookError) {
-      failed.push(id);
-      errors[id] = hookError;
-      continue;
+        failed.push(id);
+        errors[id] = hookError;
+        continue;
       }
     }
     // One transaction that cannot be removed is kept, and the rest are still purged.

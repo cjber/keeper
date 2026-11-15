@@ -114,7 +114,10 @@ export async function lastServiceResult(): Promise<string | undefined> {
     : undefined;
 }
 
-export function scheduleFromResults(systemd: { code: number; stdout: string; stderr: string }, cron: { stdout: string }): string {
+export function scheduleFromResults(
+  systemd: { code: number; stdout: string; stderr: string },
+  cron: { stdout: string },
+): string {
   if (systemd.stdout === "enabled") return "systemd";
   if (cron.stdout.includes(cronMark)) return "cron";
   // A missing user bus is different from an installed schedule being absent. Keep the

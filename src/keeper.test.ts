@@ -1229,7 +1229,10 @@ test("a failing purge hook keeps the transaction so it can retry", async () => {
   const path = await worktree("hooked");
   const hook = join(home, "hook.sh");
   const seen = join(home, "seen");
-  writeFileSync(hook, `#!/bin/sh\ntest -f "$1/file" && echo "$2" >> ${seen}\necho "hook failed: $1" >&2\nexit "$(cat ${home}/code)"\n`);
+  writeFileSync(
+    hook,
+    `#!/bin/sh\ntest -f "$1/file" && echo "$2" >> ${seen}\necho "hook failed: $1" >&2\nexit "$(cat ${home}/code)"\n`,
+  );
   chmodSync(hook, 0o755);
   writeFileSync(join(home, "code"), "1");
   mkdirSync(join(home, ".config/keeper"), { recursive: true });

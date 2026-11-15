@@ -89,6 +89,8 @@ export interface Paths {
   tmp: string;
   config: string;
   units: string;
+  /** The kernel's mount table, read before a purge so it never deletes a filesystem mounted inside the trash. */
+  mountinfo: string;
 }
 
 export function defaultPaths(home = homedir(), env: Record<string, string | undefined> = process.env): Paths {
@@ -101,6 +103,7 @@ export function defaultPaths(home = homedir(), env: Record<string, string | unde
     tmp: resolve(env.TMPDIR || "/tmp"),
     config: join(env.XDG_CONFIG_HOME ?? join(home, ".config"), "keeper/config.toml"),
     units: join(env.XDG_CONFIG_HOME ?? join(home, ".config"), "systemd/user"),
+    mountinfo: "/proc/self/mountinfo",
   };
 }
 

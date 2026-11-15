@@ -1,5 +1,15 @@
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { forget, forgetUnder } from "./cache";
 import { audit, withLock } from "./ledger";
@@ -495,9 +505,17 @@ async function runPurgeHook(hook: string, entries: readonly TrashEntry[]): Promi
  * refusal every directory the user owns gets its permissions back and the removal runs once more. The walk happens only
  * then, because a purge is usually many gigabytes that need no repair.
  */
-async function removeTrash(dir: string): Promise<void> {
-  try {
+async function removeTrash(paths: Paths, dir: string): Promise<void> {
+  const remove = () => {
+    // Read immediately before each removal, including the retry after an awaited permission repair.
+    // A failed mount-table lookup throws too, keeping the transaction.
+    const mounts = mountsWithin(readFileSync(paths.mountinfo, "utf8"), realpathSync(dir));
+    if (mounts.length)
+      throw new Error(`a filesystem is mounted at or inside it, unmount it first: ${mounts.join(", ")}`);
     rmSync(dir, { recursive: true, force: true });
+  };
+  try {
+    remove();
     return;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
@@ -506,7 +524,24 @@ async function removeTrash(dir: string): Promise<void> {
   // `-exec ... ;` runs on a directory before find descends into it, so a tree find could not read opens up as it goes.
   const locked = ["-type", "d", "-user", String(process.getuid?.()), "!", "-perm", "-u=rwx"];
   await run(["find", dir, "-xdev", ...locked, "-exec", "chmod", "u+rwx", "{}", ";"]);
-  rmSync(dir, { recursive: true, force: true });
+  remove();
+}
+
+/**
+ * Mount points at or below `dir`. A recursive remove does not stop at a mount point, and a directory holding one can
+ * be renamed into the trash, so a purge would delete whatever that filesystem holds. The mount point is field 5 of
+ * each mountinfo line, with space, tab, newline and backslash escaped as octal.
+ */
+export function mountsWithin(mountinfo: string, dir: string): string[] {
+  const prefix = `${dir}/`;
+  return mountinfo
+    .split("\n")
+    .map((line) => line.split(" ")[4])
+    .filter((point): point is string => point !== undefined)
+    .map((point) =>
+      point.replace(/\\([0-7]{3})/g, (_, octal: string) => String.fromCharCode(Number.parseInt(octal, 8))),
+    )
+    .filter((point) => point === dir || point.startsWith(prefix));
 }
 
 async function purgeUnlocked(paths: Paths, olderThanDays: number, now: number): Promise<Purged> {
@@ -534,9 +569,9 @@ async function purgeUnlocked(paths: Paths, olderThanDays: number, now: number): 
       errors[id] = "the purge hook failed";
       continue;
     }
-    // One transaction that cannot be removed is reported and kept, and the rest are still purged.
+    // One transaction that cannot be removed is kept, and the rest are still purged.
     try {
-      await removeTrash(dir);
+      await removeTrash(paths, dir);
     } catch (error) {
       failed.push(id);
       errors[id] = error instanceof Error ? error.message : String(error);

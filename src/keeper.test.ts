@@ -1232,6 +1232,35 @@ test("purge deletes a worktree's branch only if it has not moved, and undo works
   expect(await git(movedMain, "branch", "--list", "b-moved")).toContain("b-moved");
 });
 
+test("purging one trashed worktree preserves another transaction's undo registration", async () => {
+  const first = await worktree("same-repo");
+  const second = join(home, ".worktrees/same-repo-second");
+  await git(join(home, "same-repo-main"), "worktree", "add", "-q", "-b", "b-same-repo-second", second);
+  for (const path of [first, second]) age(path);
+  for (const name of ["same-repo", "same-repo-second"])
+    age(join(home, `same-repo-main/.git/worktrees/${name}/logs/HEAD`));
+  const prs = async (repo: string, branch?: string) =>
+    pull(
+      "MERGED",
+      await git(repo, "rev-parse", "HEAD"),
+      branch ?? (repo.endsWith("second") ? "b-same-repo-second" : "b-same-repo"),
+    )();
+  const live = { ...ctx, pullRequests: prs };
+  const findings = (await scan(live, ["worktree"])).findings;
+  const firstFinding = findings.find((finding) => finding.paths[0] === first);
+  const secondFinding = findings.find((finding) => finding.paths[0] === second);
+  expect(firstFinding).toBeDefined();
+  expect(secondFinding).toBeDefined();
+  const firstApplied = await applyPlan(createPlan(ctx.paths, [firstFinding as Finding], 7), live);
+  const secondApplied = await applyPlan(createPlan(ctx.paths, [secondFinding as Finding], 7), live);
+  expect(firstApplied.transaction).toBeString();
+  expect(secondApplied.transaction).toBeString();
+
+  await purge(ctx.paths, 0, Date.now(), [firstApplied.transaction as string]);
+  expect(existsSync(join(home, "same-repo-main/.git/worktrees/same-repo-second"))).toBe(true);
+  expect((await undo(ctx.paths, secondApplied.transaction as string)).restored).toEqual([second]);
+});
+
 test("purge reports measured free space separately from uncompressed size", async () => {
   const batch = join(home, "batch");
   mkdirSync(batch);

@@ -600,7 +600,13 @@ async function purgeUnlocked(
       continue;
     }
     for (const gitDir of new Set(tx.entries.flatMap((entry) => (entry.gitDir ? [entry.gitDir] : [])))) {
-      await run(["git", "--git-dir", gitDir, "worktree", "prune"]);
+      // `worktree prune` is repository-wide. Defer it while another recoverable transaction still references the
+      // repository, or it can remove that transaction's admin registration and make its undo unusable.
+      const referencedByRecoverable = [...known.values()].some(
+        (other) =>
+          other.id !== id && !purged.includes(other.id) && other.entries.some((entry) => entry.gitDir === gitDir),
+      );
+      if (!referencedByRecoverable) await run(["git", "--git-dir", gitDir, "worktree", "prune"]);
     }
     for (const { gitDir, branch, head } of tx.entries) {
       // Passing the old value makes this a no-op on a branch that moved after the worktree was trashed.

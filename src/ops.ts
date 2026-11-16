@@ -483,9 +483,14 @@ export interface Purged {
   errors: Record<string, string>;
 }
 
-export function purge(paths: Paths, olderThanDays: number, now = Date.now()): Promise<Purged> {
+export function purge(
+  paths: Paths,
+  olderThanDays: number,
+  now = Date.now(),
+  selected?: readonly string[],
+): Promise<Purged> {
   return withLock(paths, async () => {
-    const result = await purgeUnlocked(paths, olderThanDays, now);
+    const result = await purgeUnlocked(paths, olderThanDays, now, selected);
     if (result.purged.length) audit(paths, "purge", result);
     return result;
   });
@@ -545,7 +550,12 @@ export function mountsWithin(mountinfo: string, dir: string): string[] {
     .filter((point) => point === dir || point.startsWith(prefix));
 }
 
-async function purgeUnlocked(paths: Paths, olderThanDays: number, now: number): Promise<Purged> {
+async function purgeUnlocked(
+  paths: Paths,
+  olderThanDays: number,
+  now: number,
+  selected?: readonly string[],
+): Promise<Purged> {
   const { purgeHook } = loadConfig(paths);
   const purged: string[] = [];
   const failed: string[] = [];
@@ -559,11 +569,17 @@ async function purgeUnlocked(paths: Paths, olderThanDays: number, now: number): 
   try {
     ids = readdirSync(paths.trash);
   } catch {}
+  if (selected) {
+    for (const id of selected) {
+      if (!ids.includes(id)) throw new Error(`unknown trash transaction: ${id}`);
+    }
+    ids = [...new Set(selected)];
+  }
   for (const id of ids) {
     const dir = join(paths.trash, id);
     // Clamped, because a file timestamp can land a fraction of a millisecond after the clock read and 0 means everything.
     const age = Math.max(0, now - statSync(dir).mtimeMs);
-    if (age < olderThanDays * 86_400_000) continue;
+    if (!selected && age < olderThanDays * 86_400_000) continue;
     const tx = known.get(id);
     if (tx && purgeHook && !(await runPurgeHook(expandHome(paths.home)(purgeHook), tx.entries))) {
       failed.push(id);
@@ -584,7 +600,13 @@ async function purgeUnlocked(paths: Paths, olderThanDays: number, now: number): 
       continue;
     }
     for (const gitDir of new Set(tx.entries.flatMap((entry) => (entry.gitDir ? [entry.gitDir] : [])))) {
-      await run(["git", "--git-dir", gitDir, "worktree", "prune"]);
+      // `worktree prune` is repository-wide. Defer it while another recoverable transaction still references the
+      // repository, or it can remove that transaction's admin registration and make its undo unusable.
+      const referencedByRecoverable = [...known.values()].some(
+        (other) =>
+          other.id !== id && !purged.includes(other.id) && other.entries.some((entry) => entry.gitDir === gitDir),
+      );
+      if (!referencedByRecoverable) await run(["git", "--git-dir", gitDir, "worktree", "prune"]);
     }
     for (const { gitDir, branch, head } of tx.entries) {
       // Passing the old value makes this a no-op on a branch that moved after the worktree was trashed.

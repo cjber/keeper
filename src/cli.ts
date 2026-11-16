@@ -60,7 +60,7 @@ const help = `keeper keeps an Arch machine clean. Output is JSON when stdout is 
                                  save a plan of eligible findings; apps and personal files need their id
   keeper apply PLAN --yes        rescan, then apply what is unchanged
   keeper undo TX                 restore a transaction from trash
-  keeper purge [--older-days N]  delete trash for good (default ${trashDays})
+  keeper purge [TX...] [--older-days N]  delete trash for good (default ${trashDays})
   keeper hold PATH --reason R [--days N]
                                  protect a path you will return to (1 day at most; --days N shortens it)
   keeper claim PATH              declare your own scratch as disposable once stale
@@ -375,7 +375,7 @@ async function dispatch(
       const outcome = await applyPlan(plan, context(plan.staleDays, plan.appStaleDays));
       const partial = outcome.failed.length > 0 || (outcome.stale.length > 0 && outcome.applied.length > 0);
       const next = outcome.transaction
-        ? `keeper undo ${outcome.transaction} to restore, or keeper purge --older-days 0 to free the space`
+        ? `keeper undo ${outcome.transaction} to restore, or keeper purge ${outcome.transaction} to free the space`
         : "keeper scan";
       const moved = outcome.bytes > 0 ? `, ${size(outcome.bytes)} moved` : "";
       const lowered = outcome.reniced > 0 ? `, ${count(outcome.reniced, "process", "processes")} deprioritised` : "";
@@ -408,7 +408,9 @@ async function dispatch(
       return { value: result, text: `restored ${result.restored.length} paths${reniced}${reinstall}${stuck}` };
     }
     case "purge": {
-      const result = await purge(paths, flags.olderDays);
+      if (rest.length && flags.given.includes("--older-days"))
+        throw new UsageError("transaction IDs cannot be combined with --older-days");
+      const result = await purge(paths, flags.olderDays, Date.now(), rest.length ? rest : undefined);
       const kept = result.failed.map((id) => `\nkept ${id}: ${result.errors[id]}`).join("");
       return {
         value: result,

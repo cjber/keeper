@@ -414,6 +414,25 @@ test("purge keeps young trash and removes old trash", async () => {
   expect(existsSync(join(ctx.paths.trash, transaction as string))).toBe(false);
 });
 
+test("targeted purge removes only selected young transactions", async () => {
+  for (const id of ["selected", "preserved"]) mkdirSync(join(ctx.paths.trash, id), { recursive: true });
+  const result = await purge(ctx.paths, 14, Date.now(), ["selected"]);
+  expect(result.purged).toEqual(["selected"]);
+  expect(existsSync(join(ctx.paths.trash, "preserved"))).toBe(true);
+});
+
+test("purge rejects mixing transaction IDs with an age window", async () => {
+  expect(await runCli(["purge", "selected", "--older-days", "0"])).toBe(2);
+});
+
+test("targeted purge validates every transaction before deleting any", async () => {
+  mkdirSync(join(ctx.paths.trash, "selected"), { recursive: true });
+  await expect(purge(ctx.paths, 0, Date.now(), ["selected", "../outside"])).rejects.toThrow(
+    "unknown trash transaction",
+  );
+  expect(existsSync(join(ctx.paths.trash, "selected"))).toBe(true);
+});
+
 test("purge removes trash whose transaction manifest went missing, once it is past the window", async () => {
   const orphan = join(ctx.paths.trash, "2a4be12e");
   mkdirSync(join(orphan, "0/left-behind"), { recursive: true });
@@ -1211,6 +1230,35 @@ test("purge deletes a worktree's branch only if it has not moved, and undo works
   await purge(ctx.paths, 0);
   expect(await git(join(home, "gone-main"), "branch", "--list", "b-gone")).toBe("");
   expect(await git(movedMain, "branch", "--list", "b-moved")).toContain("b-moved");
+});
+
+test("purging one trashed worktree preserves another transaction's undo registration", async () => {
+  const first = await worktree("same-repo");
+  const second = join(home, ".worktrees/same-repo-second");
+  await git(join(home, "same-repo-main"), "worktree", "add", "-q", "-b", "b-same-repo-second", second);
+  for (const path of [first, second]) age(path);
+  for (const name of ["same-repo", "same-repo-second"])
+    age(join(home, `same-repo-main/.git/worktrees/${name}/logs/HEAD`));
+  const prs = async (repo: string, branch?: string) =>
+    branch ? await pull("MERGED", await git(repo, "rev-parse", "HEAD"), branch)() : [];
+  const live = { ...ctx, pullRequests: prs };
+  const findings = (await scan(live, ["worktree"])).findings;
+  const firstFinding = findings.find((finding) => finding.paths[0] === first);
+  const secondFinding = findings.find((finding) => finding.paths[0] === second);
+  expect(firstFinding).toBeDefined();
+  expect(secondFinding).toBeDefined();
+  const firstApplied = await applyPlan(createPlan(ctx.paths, [firstFinding as Finding], 7), live);
+  const secondApplied = await applyPlan(createPlan(ctx.paths, [secondFinding as Finding], 7), live);
+  expect(firstApplied.transaction).toBeString();
+  expect(secondApplied.transaction).toBeString();
+  // The registration is only expired after the worktrees have been trashed. This is the state in which a broad
+  // prune from the first purge would delete the second transaction's registration too.
+  age(join(home, "same-repo-main/.git/worktrees/same-repo-second/gitdir"));
+
+  await purge(ctx.paths, 0, Date.now(), [firstApplied.transaction as string]);
+  expect(existsSync(join(home, "same-repo-main/.git/worktrees/same-repo-second"))).toBe(true);
+  expect((await undo(ctx.paths, secondApplied.transaction as string)).restored).toEqual([second]);
+  expect((await git(second, "rev-parse", "--show-toplevel")).trim()).toBe(second);
 });
 
 test("purge reports measured free space separately from uncompressed size", async () => {

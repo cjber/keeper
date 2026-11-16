@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-16
+
 - **`keeper purge TX...` deletes only the named trash transactions.** It validates the full selection before deleting anything, keeps the existing purge hooks and mount checks, and leaves other recent trash recoverable.
 - **`purge` never deletes a filesystem mounted inside the trash.** A directory holding a mount point can be moved into
   the trash, and a recursive delete does not stop at the mount, so purging it would have deleted what that filesystem

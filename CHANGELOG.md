@@ -7,8 +7,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
-- **`keeper purge TX...` deletes only the named trash transactions.** It validates the full selection before deleting anything, keeps the existing purge hooks and mount checks, and leaves other recent trash recoverable.
+## [0.6.0] - 2026-11-16
 
+- **`keeper purge TX...` deletes only the named trash transactions.** It validates the full selection before deleting anything, keeps the existing purge hooks and mount checks, and leaves other recent trash recoverable.
 - **`purge` never deletes a filesystem mounted inside the trash.** A directory holding a mount point can be moved into
   the trash, and a recursive delete does not stop at the mount, so purging it would have deleted what that filesystem
   holds. `purge` now reads the kernel's mount table first and keeps any transaction with a mount below it, listing it in
@@ -16,6 +17,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - **Worktrees inside a repository, such as `<repo>/.claude/worktrees`, are scanned.** The worktree scan used to list
   only the directories under the worktree roots, so a worktree an agent created beside its own repository was never
   offered. Each known repository's `git worktree list` is now read too, and those checkouts are judged like any other.
+- **`keeper status` reports a schedule it cannot read.** When the systemd user bus is unavailable and no cron entry is
+  installed, status names the systemd error instead of saying nothing is scheduled. A keeper cron entry is still found
+  when systemd cannot answer.
+- **A failed purge hook says why.** The transaction's `errors` entry now names the hook, its exit code and the start
+  of what it wrote to stderr, instead of only saying that the hook failed.
+- **Claims made from a Codex session record that session.** The audit log names `codex:<session>` rather than the
+  short-lived parent process. `KEEPER_ACTOR` still takes precedence, and other shells still record the parent PID.
 
 ## [0.5.0] - 2026-11-13
 

@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { cachedScan, categoriesOf, lastKnown } from "./cache";
 import { claimRefusal, health, runCli, schema, scratchRoots } from "./cli";
 import { freshen } from "./freshen";
-import { BusyError, type Ledger, readLedger, updateLedger, withLock, writeLedger } from "./ledger";
+import { actor, BusyError, type Ledger, readLedger, updateLedger, withLock, writeLedger } from "./ledger";
 import { applyPlan, bulkPlan, context, createPlan, loadConfig, pickById, purge, undo } from "./ops";
 import {
   type Context,
@@ -219,6 +219,34 @@ test("a claimed path becomes a finding once stale", async () => {
   age(scratch);
   writeLedger(ctx.paths, { holds: [], claims: [{ path: scratch, actor: "a", at: "now" }] });
   expect((await scan(ctx, ["agent"])).findings.map((finding) => finding.paths[0])).toContain(scratch);
+});
+
+test("claims identify a persistent agent session before falling back to the command parent", () => {
+  const previous = {
+    keeper: process.env.KEEPER_ACTOR,
+    thread: process.env.CODEX_THREAD_ID,
+    codex: process.env.CODEX_SESSION_ID,
+  };
+  try {
+    delete process.env.KEEPER_ACTOR;
+    process.env.CODEX_THREAD_ID = "codex-thread";
+    process.env.CODEX_SESSION_ID = "codex-session";
+    expect(actor()).toBe("codex:codex-thread");
+    delete process.env.CODEX_THREAD_ID;
+    expect(actor()).toBe("codex:codex-session");
+    process.env.KEEPER_ACTOR = "explicit-agent";
+    expect(actor()).toBe("explicit-agent");
+    delete process.env.KEEPER_ACTOR;
+    delete process.env.CODEX_SESSION_ID;
+    expect(actor()).toMatch(/^pid:\d+$/);
+  } finally {
+    if (previous.keeper === undefined) delete process.env.KEEPER_ACTOR;
+    else process.env.KEEPER_ACTOR = previous.keeper;
+    if (previous.thread === undefined) delete process.env.CODEX_THREAD_ID;
+    else process.env.CODEX_THREAD_ID = previous.thread;
+    if (previous.codex === undefined) delete process.env.CODEX_SESSION_ID;
+    else process.env.CODEX_SESSION_ID = previous.codex;
+  }
 });
 
 test("claimed output holding a directory keeper cannot write is blocked rather than offered and half moved", async () => {

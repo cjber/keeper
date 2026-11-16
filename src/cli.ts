@@ -268,6 +268,7 @@ const overdueHours = 36;
 
 /** What stops the nightly runs from being trusted. Empty means every check passed. */
 export function health(schedule: string, last: AutoRun | undefined, result: string | undefined, now: number): string[] {
+  if (schedule.startsWith("unavailable: ")) return [schedule];
   if (schedule === "none") return ["no schedule, so nothing runs nightly"];
   const problems: string[] = [];
   if (result && result !== "success") problems.push(`the last nightly run ended in ${result}`);

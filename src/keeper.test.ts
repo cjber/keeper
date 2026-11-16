@@ -32,6 +32,7 @@ import {
   worktreeDirs,
 } from "./scanners";
 import { defaultPaths, holders, niceness, run, timedOut, waitFor } from "./system";
+import { actor } from "./ledger";
 import { units } from "./timer";
 import { eligible, type Finding } from "./types";
 
@@ -219,6 +220,28 @@ test("a claimed path becomes a finding once stale", async () => {
   age(scratch);
   writeLedger(ctx.paths, { holds: [], claims: [{ path: scratch, actor: "a", at: "now" }] });
   expect((await scan(ctx, ["agent"])).findings.map((finding) => finding.paths[0])).toContain(scratch);
+});
+
+test("claims identify a persistent agent session before falling back to the command parent", () => {
+  const previous = {
+    keeper: process.env.KEEPER_ACTOR,
+    kiln: process.env.KILN_SESSION_ID,
+    codex: process.env.CODEX_SESSION_ID,
+  };
+  delete process.env.KEEPER_ACTOR;
+  process.env.KILN_SESSION_ID = "kiln-session";
+  process.env.CODEX_SESSION_ID = "codex-session";
+  expect(actor()).toBe("kiln-session");
+  delete process.env.KILN_SESSION_ID;
+  expect(actor()).toBe("codex-session");
+  process.env.KEEPER_ACTOR = "explicit-agent";
+  expect(actor()).toBe("explicit-agent");
+  if (previous.keeper === undefined) delete process.env.KEEPER_ACTOR;
+  else process.env.KEEPER_ACTOR = previous.keeper;
+  if (previous.kiln === undefined) delete process.env.KILN_SESSION_ID;
+  else process.env.KILN_SESSION_ID = previous.kiln;
+  if (previous.codex === undefined) delete process.env.CODEX_SESSION_ID;
+  else process.env.CODEX_SESSION_ID = previous.codex;
 });
 
 test("claimed output holding a directory keeper cannot write is blocked rather than offered and half moved", async () => {

@@ -39,7 +39,7 @@ export interface Ledger {
 export class BusyError extends Error {}
 
 export function actor(): string {
-  return process.env.KEEPER_ACTOR ?? `pid:${process.ppid}`;
+  return process.env.KEEPER_ACTOR ?? process.env.KILN_SESSION_ID ?? process.env.CODEX_SESSION_ID ?? `pid:${process.ppid}`;
 }
 
 function ledgerPath(paths: Paths): string {

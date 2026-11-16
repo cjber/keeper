@@ -214,7 +214,7 @@ actually sampled to judge every unseen app against it. With no samples at all, a
 | `keeper undo TX` | Restores a transaction from trash |
 | `keeper purge` | Deletes trash over 14 days old for good |
 | `keeper hold PATH --reason R` | Protects a path for 1 day at most; `--days N` shortens it |
-| `keeper claim PATH` | Declares your own scratch disposable once stale. A git clone is claimable only under `~/.cache/agent-scratch` or an agent root |
+| `keeper claim PATH` | Declares your own scratch disposable once stale. A git clone is claimable only under `~/.cache/agent-scratch` or an agent root. Claims record the stable agent session when one is available, but they are not leases: use `keeper hold PATH --reason R` while active work must be protected |
 | `keeper release PATH` | Drops a hold or claim |
 | `keeper log` | Shows recent mutations and who made them |
 | `keeper history` | Free space readings and the events that changed it, over 30 days or `--days N` |

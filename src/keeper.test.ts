@@ -228,20 +228,23 @@ test("claims identify a persistent agent session before falling back to the comm
     kiln: process.env.KILN_SESSION_ID,
     codex: process.env.CODEX_SESSION_ID,
   };
-  delete process.env.KEEPER_ACTOR;
-  process.env.KILN_SESSION_ID = "kiln-session";
-  process.env.CODEX_SESSION_ID = "codex-session";
-  expect(actor()).toBe("kiln-session");
-  delete process.env.KILN_SESSION_ID;
-  expect(actor()).toBe("codex-session");
-  process.env.KEEPER_ACTOR = "explicit-agent";
-  expect(actor()).toBe("explicit-agent");
-  if (previous.keeper === undefined) delete process.env.KEEPER_ACTOR;
-  else process.env.KEEPER_ACTOR = previous.keeper;
-  if (previous.kiln === undefined) delete process.env.KILN_SESSION_ID;
-  else process.env.KILN_SESSION_ID = previous.kiln;
-  if (previous.codex === undefined) delete process.env.CODEX_SESSION_ID;
-  else process.env.CODEX_SESSION_ID = previous.codex;
+  try {
+    delete process.env.KEEPER_ACTOR;
+    process.env.KILN_SESSION_ID = "kiln-session";
+    process.env.CODEX_SESSION_ID = "codex-session";
+    expect(actor()).toBe("kiln-session");
+    delete process.env.KILN_SESSION_ID;
+    expect(actor()).toBe("codex-session");
+    process.env.KEEPER_ACTOR = "explicit-agent";
+    expect(actor()).toBe("explicit-agent");
+  } finally {
+    if (previous.keeper === undefined) delete process.env.KEEPER_ACTOR;
+    else process.env.KEEPER_ACTOR = previous.keeper;
+    if (previous.kiln === undefined) delete process.env.KILN_SESSION_ID;
+    else process.env.KILN_SESSION_ID = previous.kiln;
+    if (previous.codex === undefined) delete process.env.CODEX_SESSION_ID;
+    else process.env.CODEX_SESSION_ID = previous.codex;
+  }
 });
 
 test("claimed output holding a directory keeper cannot write is blocked rather than offered and half moved", async () => {

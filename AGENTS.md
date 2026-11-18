@@ -4,20 +4,12 @@ Finds disposable data on an Arch machine and removes it through a reviewable pla
 
 ## Commands
 
-```sh
-bun install --frozen-lockfile
-bun run gate
-bunx biome ci .
-bunx tsc --noEmit
-bun test
-bun scripts/changelog.ts --check
-bun install --frozen-lockfile --os linux --cpu "*" --libc "*" && bun scripts/build.ts
-bun scripts/smoke-binary.ts dist/keeper-linux-x64
-```
-
-`bun run gate` runs the first group in one command. Building needs the second install, because a compiled binary embeds
-every platform's native package. CI also runs actionlint, zizmor, gitleaks and the binary package install on Arch.
-Every version needs a `CHANGELOG.md` entry. `python3 scripts/wordmark.py` regenerates `assets/` from Liberation Sans.
+- `bun install --frozen-lockfile`, then `bun run gate`: biome, tsc, tests and the changelog check.
+- `bun run gate:changed`: the same, linting only files changed against `origin/main` and running the tests they reach.
+- Build: `bun install --frozen-lockfile --os linux --cpu "*" --libc "*" && bun scripts/build.ts`, because a compiled
+  binary embeds every platform's native package. Then `bun scripts/smoke-binary.ts dist/keeper-linux-x64`.
+- Every version needs a `CHANGELOG.md` entry. `python3 scripts/wordmark.py` regenerates `assets/`.
+- CI also runs actionlint, zizmor, gitleaks and the binary package install on Arch.
 
 ## Layout
 
@@ -50,4 +42,4 @@ Every version needs a `CHANGELOG.md` entry. `python3 scripts/wordmark.py` regene
 
 ## Standards
 
-- `repo-standards`: the RS-* requirements every cjber repo meets (repo, Actions and security settings, rulesets, CI hardening, community files), a skill in cjber/skills whose `audit.py` checks this repo
+- `repo-standards`: the RS-* requirements every cjber and agent-labs-dev repo meets; its `audit.py` checks this repo.

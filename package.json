@@ -12,7 +12,7 @@
     "start": "bun run src/index.tsx",
     "test": "bun test",
     "gate": "biome ci . && tsc --noEmit && bun test && bun scripts/changelog.ts --check",
-    "gate:changed": "biome ci --no-errors-on-unmatched $(git diff --name-only --diff-filter=d $(git merge-base origin/main HEAD)) && tsc --noEmit && bun test --changed=$(git merge-base origin/main HEAD) && bun scripts/changelog.ts --check",
+    "gate:changed": "{ git diff -z --name-only --diff-filter=d \"$(git merge-base origin/main HEAD)\"; git ls-files -z --others --exclude-standard; } | xargs -0 -r biome ci --no-errors-on-unmatched && tsc --noEmit && bun test --changed=$(git merge-base origin/main HEAD) && bun scripts/changelog.ts --check",
     "site:deploy": "rm -rf dist/site && mkdir -p dist/site && cp site/index.html assets/wordmark.svg assets/wordmark-dark.svg assets/logo.svg assets/icon.png dist/site && wrangler pages deploy dist/site --project-name keeper --branch main"
   },
   "dependencies": {

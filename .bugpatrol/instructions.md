@@ -2,7 +2,7 @@
 
 keeper is a disk cleanup CLI for Arch Linux, built for coding agents first and people second. It finds what
 agents leave behind (stale git worktrees, build output, package caches, AUR clones and more), proves each item is
-safe, and moves it to an undoable trash. Agents use the subcommands, which print JSON when piped. People use the
+safe, and deletes it for good. Agents use the subcommands, which print JSON when piped. People use the
 terminal wizard, which opens when `keeper` runs with no arguments in a terminal.
 
 Every command here runs against a sandbox home at `$KEEPER_PATROL_ROOT/home`, which `app.setup` rebuilds for each
@@ -34,12 +34,13 @@ Run keeper only through the sandbox wrappers, from the project root:
    with Enter, show blocked rows with b, read the explanation under the list, and quit with q. Close and reopen it:
    the second open reuses recent categories and says so, and r rescans everything.
 2. **Graphs:** press g for disk by category and why it waits, then g for free space over time. The sandbox seeds a
-   week of readings with nightly runs, an apply and a purge, so the chart has events to mark. g again returns to the list.
-3. **Agent CLI:** `scan` (and `scan --cached`), `plan`, `apply`, `undo`, `purge`, `hold`, `claim`, `release`, `status`,
+   week of readings with nightly runs, an apply, so the chart has events to mark. g again returns to the list.
+3. **Agent CLI:** `scan` (and `scan --cached`), `plan`, `apply`, `hold`, `claim`, `release`, `status`,
    `log`, `history`, `sample` and `schema`.
    Check that piped output is valid JSON, that errors share one shape with a code, a message and a next step, and
    that the exit codes match `keeper schema`.
-4. **Undo:** apply a plan, then `keeper undo <transaction>` restores every path.
+4. **Apply:** apply a plan, then check every planned path is gone and the `deleted` list in the output and `keeper log`
+   names each path with its size.
 
 ## What to check, UX first
 

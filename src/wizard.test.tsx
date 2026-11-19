@@ -13,7 +13,7 @@ const finding = (id: string, risk: Finding["risk"], blockers: string[] = []): Fi
   state: id,
   category: "aur",
   risk,
-  action: "trash",
+  action: "delete",
   title: `item ${id}`,
   paths: [`/tmp/${id}`],
   packages: [],
@@ -212,7 +212,7 @@ test("g cycles to space, then free space over time, keeping the key line in plac
   frame = captureCharFrame();
   expect(frame).toContain("keeper · free space · 110.0G of 500.0G, up 10.0G in 3 hours");
   expect(frame).toContain("▲");
-  expect(frame).toContain("moved 5.0G to trash");
+  expect(frame).toContain("removed 5.0G");
   expect(frame).toContain("g back to the list");
   expect(keyRow(frame)).toBe(listKeys);
   renderer.destroy();

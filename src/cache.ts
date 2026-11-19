@@ -91,7 +91,7 @@ export function forget(paths: Paths, changed: readonly Category[] = categories):
 }
 
 /**
- * Drops stored findings that sit inside paths an apply just moved, whatever their category: a trashed worktree takes
+ * Drops stored findings that sit inside paths an apply just deleted, whatever their category: a deleted worktree takes
  * its build output with it, and that build category may still be fresh enough to be reused.
  */
 export function forgetUnder(paths: Paths, moved: readonly string[]): void {

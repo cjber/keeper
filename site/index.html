@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>keeper</title>
-<meta name="description" content="keeper keeps an Arch machine clean, with your agent doing the deciding. It proves work is finished before removing it, and everything goes to a trash you can undo.">
+<meta name="description" content="keeper keeps an Arch machine clean, with your agent doing the deciding. It proves work is finished before removing it, then deletes it so the space is free at once.">
 <link rel="canonical" href="https://keeper.cjber.dev/">
 <meta property="og:title" content="keeper">
 <meta property="og:description" content="Keeps an Arch machine clean, with your agent doing the deciding.">
@@ -96,7 +96,7 @@ footer { margin-top: 72px; color: var(--muted); font-size: 13px; text-align: cen
     <img src="wordmark.svg" alt="keeper" width="320" height="125">
   </picture>
   <p class="tagline">Keeps an Arch machine clean, with your agent doing the deciding.</p>
-  <p class="lede">Coding agents leave worktrees, build output, caches and transcripts behind. keeper finds what is safe to remove, proves it, and moves it to a trash you can undo.</p>
+  <p class="lede">Coding agents leave worktrees, build output, caches and transcripts behind. keeper finds what is safe to remove, proves it, and deletes it so the space is free at once.</p>
   <nav class="links">
     <a href="https://github.com/cjber/keeper">GitHub</a>
     <a href="https://github.com/cjber/keeper/blob/main/skills/keeper/SKILL.md">Skill</a>
@@ -121,7 +121,7 @@ footer { margin-top: 72px; color: var(--muted); font-size: 13px; text-align: cen
   <li><strong>It proves before it removes.</strong><span>A worktree counts as finished only when a merged pull request holds every commit it has, or landed every file its commits changed after a rebase, or when every commit is on the default branch. Anything else waits for approval.</span></li>
   <li><strong>Agents are the primary user.</strong><span>Every command returns JSON when piped, and each exit code names the next step. The wizard is a thin layer over the same calls.</span></li>
   <li><strong>Agents can protect their work.</strong><span><code>keeper hold</code> outranks every scanner until it expires, so a session can mark a worktree it will return to.</span></li>
-  <li><strong>Nothing is final until purge.</strong><span>Paths move to a trash, and <code>keeper undo</code> restores them. Local branches are deleted only at purge, and only if they have not moved.</span></li>
+  <li><strong>Deleted means free.</strong><span><code>keeper apply</code> deletes at once, with nothing to restore. The safety is in what a plan may include, and a last check before each deletion that no running process works in the path. The log records every deleted path and its size.</span></li>
   <li><strong>It renices instead of killing.</strong><span>When the machine is overloaded, keeper names the commands holding the CPU and can lower their priority, so the work survives.</span></li>
   <li><strong>Apps are judged from real use.</strong><span><code>keeper sample</code> records which executables are running, folded to their package. Only packages with a <code>.desktop</code> launcher count as apps, and atime is never used.</span></li>
 </ul>
@@ -131,21 +131,17 @@ footer { margin-top: 72px; color: var(--muted); font-size: 13px; text-align: cen
   <li><code>scan</code><span>Read-only. Every finding, with the blockers that keep it.</span></li>
   <li><code>agent review</code><span>Optional. Your agent reads PRs and history, then adds holds on unfinished work.</span></li>
   <li><code>plan</code><span>Saves the eligible findings you chose. Apps and personal files need their id, and medium risk needs <code>--max-risk medium</code>.</span></li>
-  <li><code>apply</code><span>Rescans, then applies the plan. <code>keeper apply PLAN --yes</code> skips anything that changed since the plan.</span></li>
-  <li><code>undo</code><span>Restores a transaction from the trash.</span></li>
-  <li><code>purge</code><span>Deletes trash over 14 days old for good and reports the measured space freed.</span></li>
+  <li><code>apply</code><span>Rescans, then applies the plan. <code>keeper apply PLAN --yes</code> skips anything that changed since the plan and deletes the rest for good.</span></li>
 </ol>
 <p>To run it yourself, <code>keeper</code> opens a terminal wizard over the same calls. Findings are grouped by category with a count and size. A category with many rows starts folded: <code>h</code> and <code>l</code> fold or expand it, <code>pgup</code> and <code>pgdn</code> page through a long list, and <code>space</code> on a category header selects the eligible findings in the whole section. <code>b</code> shows blocked findings, <code>g</code> switches between the list, space by category and free space history, and <code>r</code> rescans everything. <code>keeper timer install</code> then cleans up low-risk items every night.</p>
 
 <h2>Commands</h2>
 <ul class="points">
   <li><strong><code>keeper</code></strong><span>Opens the wizard in a terminal.</span></li>
-  <li><strong><code>keeper status</code></strong><span>Free space, schedule, last run, whether the nightly runs are healthy, holds, trash and missing tools.</span></li>
+  <li><strong><code>keeper status</code></strong><span>Free space, schedule, last run, whether the nightly runs are healthy, holds and missing tools.</span></li>
   <li><strong><code>keeper scan</code></strong><span>Lists findings and their blockers. <code>--cached</code> reuses recently scanned categories.</span></li>
   <li><strong><code>keeper plan</code></strong><span>Saves a plan of eligible findings. Apps and personal files need their id. Add <code>--max-risk medium</code> once medium risk is approved.</span></li>
-  <li><strong><code>keeper apply PLAN --yes</code></strong><span>Rescans, then applies what is unchanged.</span></li>
-  <li><strong><code>keeper undo TX</code></strong><span>Restores a transaction from trash.</span></li>
-  <li><strong><code>keeper purge</code></strong><span>Deletes trash over 14 days old for good.</span></li>
+  <li><strong><code>keeper apply PLAN --yes</code></strong><span>Rescans, then applies what is unchanged. Removals are deleted for good.</span></li>
   <li><strong><code>keeper hold PATH --reason R</code></strong><span>Protects a path for 1 day at most; <code>--days N</code> shortens it.</span></li>
   <li><strong><code>keeper claim PATH</code></strong><span>Declares your own scratch disposable once stale.</span></li>
   <li><strong><code>keeper release PATH</code></strong><span>Drops a hold or claim.</span></li>
@@ -153,7 +149,7 @@ footer { margin-top: 72px; color: var(--muted); font-size: 13px; text-align: cen
   <li><strong><code>keeper history</code></strong><span>Free space readings and the events that changed it, over 30 days or <code>--days N</code>.</span></li>
   <li><strong><code>keeper sample</code></strong><span>Records free space and which executables are running, as the hourly timer does.</span></li>
   <li><strong><code>keeper schema</code></strong><span>Describes the CLI as JSON.</span></li>
-  <li><strong><code>keeper auto</code></strong><span>Applies low-risk findings, purges old trash and notifies.</span></li>
+  <li><strong><code>keeper auto</code></strong><span>Applies low-risk findings and notifies.</span></li>
   <li><strong><code>keeper timer install</code></strong><span>Schedules <code>keeper auto</code> daily and <code>keeper sample</code> hourly with systemd, or <code>--cron</code>.</span></li>
   <li><strong><code>keeper timer remove</code></strong><span>Removes the schedule.</span></li>
 </ul>
@@ -189,7 +185,7 @@ footer { margin-top: 72px; color: var(--muted); font-size: 13px; text-align: cen
 <p>Apps, large files, downloads, screenshots and duplicates are personal or application data, so they are only planned when you name their id. <code>keeper plan</code> with no ids never takes them, even with <code>--max-risk medium</code>.</p>
 <p><code>large</code> and <code>duplicates</code> skip application trees: anything under a Wine prefix, a Steam, Lutris, Heroic or GOG library, a <code>~/Games</code> style library, flatpak data or a VM store, and any directory holding an install marker such as a <code>.exe</code>, <code>.toc</code> or <code>.pak</code>. A duplicate is offered only when the copy keeper keeps is in a different top-level folder of your own documents: <code>Documents</code>, <code>Pictures</code>, <code>Music</code>, <code>Videos</code>, <code>Downloads</code> or <code>Desktop</code>.</p>
 <p>These block a worktree whatever its age: uncommitted files, commits on no remote, a running process inside it, an open pull request, a rebase, merge, bisect or cherry-pick in progress, and any hold.</p>
-<p>Sizes in scans and plans are uncompressed. Trash sits on the same disk, so nothing is freed until <code>keeper purge</code>, which reports the measured change in free space as <code>freed</code>.</p>
+<p>Sizes in scans and plans are uncompressed, so a compressing filesystem such as btrfs frees less than they show.</p>
 
 <footer>MIT licensed. <a href="https://github.com/cjber/keeper">GitHub</a> and <a href="https://cjber.dev">cjber.dev</a><br>Made by Cillian Berragan</footer>
 </main>

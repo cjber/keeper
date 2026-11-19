@@ -128,8 +128,8 @@ export interface Config {
   warnFreeGb: number;
   /** A file under $HOME this large, stale, and not in a repo or dotdir, is offered by the `large` category. */
   largeBytes: number;
-  /** Run before a worktree is deleted for good, with its trashed path then its original path. */
-  purgeHook: string;
+  /** Run with a worktree's path right before keeper deletes it. A non-zero exit keeps the worktree. */
+  deleteHook: string;
   /** Have `keeper auto` return primary checkouts to their default branch and fast-forward them. */
   freshen: boolean;
   /** Wizard colours. Empty keeps the terminal's own: reverse video for the cursor, dim for blocked rows. */
@@ -175,7 +175,7 @@ export const defaultConfig: Config = {
   logs: [],
   warnFreeGb: 20,
   largeBytes: defaultLargeBytes,
-  purgeHook: "",
+  deleteHook: "",
   freshen: false,
   theme: defaultTheme,
 };
@@ -323,7 +323,7 @@ function touchedAgo(days: number, window: number): string {
 }
 
 const inUse = "in use by a running process, offered once it exits";
-const treeUnwritable = "holds a directory keeper cannot write, so it cannot move whole";
+const treeUnwritable = "holds a directory keeper cannot write, so it cannot delete it whole";
 
 const found = <T>(items: (T | undefined)[]): T[] => items.filter((item): item is T => item !== undefined);
 
@@ -555,7 +555,7 @@ async function inspectWorktree(path: string, context: Context, lookup: PullReque
     ...findingId("worktree", path, `${head}\0${status.stdout}\0${proof}\0${open?.number ?? ""}`),
     category: "worktree",
     risk: proof ? "low" : "medium",
-    action: "trash",
+    action: "delete",
     title: `${worktreeName(path, context)} (${branch || "unknown branch"})`,
     paths: [path],
     packages: [],
@@ -652,7 +652,7 @@ async function inspectLeftover(path: string, context: Context): Promise<Finding>
     ...findingId("worktree", path, `leftover\0${bytes}`),
     category: "worktree",
     risk: "medium",
-    action: "trash",
+    action: "delete",
     title: `${relativeToRoot(path, context.paths.worktrees)} (no checkout)`,
     paths: [path],
     packages: [],
@@ -685,7 +685,7 @@ async function scanAur(context: Context): Promise<Finding[]> {
     ...findingId("aur", path, String(bytes.get(path))),
     category: "aur",
     risk: "low",
-    action: "trash",
+    action: "delete",
     title,
     paths: [path],
     packages: [],
@@ -750,9 +750,8 @@ async function scanOrphans(): Promise<Finding[]> {
 }
 
 /**
- * Directories inside these roots that keeper cannot write. A move to the trash that has to cross a filesystem copies
- * the tree before removing the source, and a directory without write permission stops that removal partway, leaving
- * half a finding moved and the run partial, so a tree that holds one is not offered.
+ * Directories inside these roots that keeper cannot write. A directory without write permission stops a removal
+ * partway, leaving half a finding deleted and the run partial, so a tree that holds one is not offered.
  */
 async function unwritableDirs(roots: readonly string[]): Promise<string[]> {
   if (roots.length === 0) return [];
@@ -777,7 +776,7 @@ async function scanAgent(context: Context): Promise<Finding[]> {
       ...findingId("agent", path, `${statSync(path).mtimeMs}`),
       category: "agent",
       risk: "low",
-      action: "trash",
+      action: "delete",
       title: path.replace(`${context.paths.home}/`, "~/"),
       paths: [path],
       packages: [],
@@ -788,7 +787,7 @@ async function scanAgent(context: Context): Promise<Finding[]> {
   };
   const judged = found(await Promise.all(roots.map((path) => unlessGone(path, () => inspect(path)))));
   // Agent output inside its idle window is never planned, so only the rest are walked unless the caller wants every
-  // size. The same walk catches a directory keeper cannot write, which a move to the trash could not remove.
+  // size. The same walk catches a directory keeper cannot write, which a removal could not finish.
   const walked = judged
     .filter((finding) => (context.sizeBlocked || !finding.blockers.length) && measured(context, finding.id))
     .flatMap((finding) => finding.paths);
@@ -963,7 +962,7 @@ function tmpFinding(title: string, members: readonly TmpEntry[], blockers: strin
     ...findingId("tmp", `${title}\0${blockers.length ? "waiting" : "ready"}`, state),
     category: "tmp",
     risk: "low",
-    action: "trash",
+    action: "delete",
     title: members.length > 1 ? `${title} (${count(members.length, "entry", "entries")})` : title,
     paths: members.map((entry) => entry.path),
     packages: [],
@@ -997,7 +996,7 @@ async function scanTmp(context: Context): Promise<Finding[]> {
     ...ledger.claims.map((claim) => claim.path),
     ...holds,
     context.paths.state,
-    context.paths.trash,
+    context.paths.oldTrash,
     ...context.paths.worktrees,
     ...context.paths.aurClones,
   ];
@@ -1033,7 +1032,7 @@ async function scanTmp(context: Context): Promise<Finding[]> {
     ...(listening.has(entry.path) ? [tmpSocket] : []),
     ...(alive(lockPid(entry.path)) ? [tmpLockAlive] : []),
     ...(mixed.has(entry.path)
-      ? ["holds files another user owns, or a directory keeper cannot write or read, so it cannot move whole"]
+      ? ["holds files another user owns, or a directory keeper cannot write or read, so it cannot delete it whole"]
       : []),
     ...(references.sessions.has(basename(entry.path)) && entry.path.startsWith(`${claude}/`)
       ? ["its Claude Code session is still running, offered once it exits"]
@@ -1174,7 +1173,7 @@ async function scanBuild(context: Context): Promise<Finding[]> {
     ...findingId("build", path, `${bytes.get(path) ?? 0}\0${recent}`),
     category: "build",
     risk: "low",
-    action: "trash",
+    action: "delete",
     title: path.replace(`${context.paths.home}/`, "~/"),
     paths: [path],
     packages: [],
@@ -1216,7 +1215,7 @@ async function scanTranscripts(context: Context): Promise<Finding[]> {
       ...findingId("transcripts", "transcripts", files.map(([, path]) => path).join("\0")),
       category: "transcripts",
       risk: "low",
-      action: "trash",
+      action: "delete",
       title: `${count(files.length, "agent transcript")} over ${count(transcriptDays, "day")} old`,
       paths: files.map(([, path]) => path),
       packages: [],
@@ -1827,7 +1826,7 @@ async function scanDownloads(context: Context): Promise<Finding[]> {
         ...findingId("downloads", path, `${stat.size}\0${Math.round(stat.mtimeMs)}`),
         category: "downloads",
         risk,
-        action: "trash",
+        action: "delete",
         title: path.replace(`${context.paths.home}/`, "~/"),
         paths: [path],
         packages: [],
@@ -1862,7 +1861,7 @@ async function scanScreenshots(context: Context): Promise<Finding[]> {
           ...findingId("screenshots", path, `${stat.size}\0${Math.round(stat.mtimeMs)}`),
           category: "screenshots",
           risk: "medium",
-          action: "trash",
+          action: "delete",
           title: path.replace(`${context.paths.home}/`, "~/"),
           paths: [path],
           packages: [],
@@ -1921,7 +1920,7 @@ async function scanLarge(context: Context): Promise<Finding[]> {
         ...findingId("large", path, `${bytes}\0${Math.round(Number(mtime) * 1000)}`),
         category: "large",
         risk: "medium",
-        action: "trash",
+        action: "delete",
         title: path.replace(`${context.paths.home}/`, "~/"),
         paths: [path],
         packages: [],
@@ -2035,7 +2034,7 @@ async function scanDuplicates(context: Context): Promise<Finding[]> {
         ...findingId("duplicates", copy.path, `${copy.bytes}\0${copy.mtime}`),
         category: "duplicates",
         risk: "medium",
-        action: "trash",
+        action: "delete",
         title: copy.path.replace(`${context.paths.home}/`, "~/"),
         paths: [copy.path],
         packages: [],
@@ -2506,7 +2505,7 @@ function abandonedFindings(context: Context, processes: readonly ProcessInfo[]):
 }
 
 /**
- * Reports where memory is stalled. `report`, never `trash`: keeper cannot decide whose working set to drop, and the cap
+ * Reports where memory is stalled. `report`, never `delete`: keeper cannot decide whose working set to drop, and the cap
  * that is thrashing was usually set on purpose. High `bytes` here is memory held, not space a cleanup would free.
  */
 async function scanMemory(context: Context): Promise<Finding[]> {

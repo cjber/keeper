@@ -7,6 +7,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   truncateSync,
@@ -19,7 +20,7 @@ import { cachedScan, categoriesOf, lastKnown } from "./cache";
 import { claimRefusal, health, runCli, schema, scratchRoots } from "./cli";
 import { freshen } from "./freshen";
 import { actor, BusyError, type Ledger, readLedger, updateLedger, withLock, writeLedger } from "./ledger";
-import { applyPlan, bulkPlan, context, createPlan, loadConfig, pickById, purge, undo } from "./ops";
+import { applyPlan, bulkPlan, context, createPlan, emptyOldTrash, loadConfig, pickById, readPlan } from "./ops";
 import {
   type Context,
   defaultConfig,
@@ -31,7 +32,7 @@ import {
   tmpPatterns,
   worktreeDirs,
 } from "./scanners";
-import { defaultPaths, holders, niceness, run, timedOut, waitFor } from "./system";
+import { defaultPaths, holders, liveFiles, niceness, run, timedOut, waitFor } from "./system";
 import { scheduleFromResults, units } from "./timer";
 import { eligible, type Finding } from "./types";
 
@@ -154,7 +155,7 @@ test("build output is found in a dirty worktree only when ignored", async () => 
   expect(report.findings.map((finding) => finding.paths[0])).toEqual([join(path, "target")]);
 });
 
-test("apply moves to trash, undo restores, and a changed finding is refused as stale", async () => {
+test("apply deletes at once, logs what it deleted, and a changed finding is refused as stale", async () => {
   const batch = join(home, "batch");
   mkdirSync(batch);
   writeFileSync(join(batch, "out"), "data");
@@ -164,13 +165,41 @@ test("apply moves to trash, undo restores, and a changed finding is refused as s
   const applied = await applyPlan(plan, ctx);
   expect(applied.applied).toHaveLength(1);
   expect(existsSync(batch)).toBe(false);
-  await undo(ctx.paths, applied.transaction as string);
-  expect(readFileSync(join(batch, "out"), "utf8")).toBe("data");
+  expect(existsSync(ctx.paths.oldTrash)).toBe(false);
+  const bytes = findings[0]?.bytes as number;
+  expect(bytes).toBeGreaterThan(0);
+  expect(applied.deleted).toEqual([{ id: findings[0]?.id as string, paths: [batch], bytes }]);
+  const logged = readFileSync(join(ctx.paths.state, "audit.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  expect(logged.at(-1)).toMatchObject({ event: "apply", deleted: [{ paths: [batch], bytes }] });
 
+  mkdirSync(batch);
   writeFileSync(join(batch, "new"), "fresh");
   const stale = await applyPlan(plan, ctx);
   expect(stale.stale).toHaveLength(1);
-  expect(existsSync(join(batch, "out"))).toBe(true);
+  expect(existsSync(join(batch, "new"))).toBe(true);
+});
+
+test("apply refuses a path a process started working in after the scan", async () => {
+  const batch = join(home, "batch");
+  mkdirSync(batch);
+  age(batch);
+  const { findings } = await scan(ctx, ["agent"]);
+  expect(findings.filter(eligible)).toHaveLength(1);
+  const child = Bun.spawn(["sleep", "30"], { cwd: batch, stdout: "ignore", stderr: "ignore" });
+  try {
+    for (let i = 0; i < 40 && !holders(batch, liveFiles()); i++) await Bun.sleep(25);
+    const applied = await applyPlan(createPlan(ctx.paths, findings, 7), ctx);
+    expect(applied.applied).toEqual([]);
+    expect(applied.failed[0]?.error).toContain(`a running process works in or holds a file in ${batch}`);
+    expect(applied.deleted).toEqual([]);
+    expect(existsSync(batch)).toBe(true);
+  } finally {
+    child.kill();
+    await child.exited;
+  }
 });
 
 test("apply still enforces the plan's window on findings it rescans", async () => {
@@ -260,7 +289,7 @@ test("claimed output holding a directory keeper cannot write is blocked rather t
   const { findings } = await scan(ctx, ["agent"]);
   chmodSync(locked, 0o700);
   const finding = findings.find((item) => item.paths[0] === scratch);
-  expect(finding?.blockers).toContain("holds a directory keeper cannot write, so it cannot move whole");
+  expect(finding?.blockers).toContain("holds a directory keeper cannot write, so it cannot delete it whole");
   expect(findings.filter(eligible)).toEqual([]);
 });
 
@@ -287,7 +316,7 @@ test("temp names group by the pattern their random part leaves", () => {
   });
 });
 
-test("stale temp entries are one row that apply moves to trash and undo restores, leaving fresh, open and held ones", async () => {
+test("stale temp entries are one row that apply deletes, leaving fresh, open and held ones", async () => {
   const tmp = ctx.paths.tmp;
   const leaked = ["leak-a1B2c3", "leak-Zz9yy8", "leak-qwerty"].map((name) => join(tmp, name)).sort();
   for (const dir of leaked) {
@@ -331,8 +360,8 @@ test("stale temp entries are one row that apply moves to trash and undo restores
   chmodSync(join(locked, "sub"), 0o755);
   expect(applied.applied).toHaveLength(1);
   expect(leaked.filter((dir) => existsSync(dir))).toEqual([]);
-  await undo(ctx.paths, applied.transaction as string);
-  expect(leaked.map((dir) => readFileSync(join(dir, "f"), "utf8"))).toEqual(["x", "x", "x"]);
+  expect(applied.deleted.flatMap((entry) => entry.paths)).toEqual(leaked);
+  expect([open, fresh, held, locked, writing].every((dir) => existsSync(dir))).toBe(true);
 });
 
 test("a stale temp tree holding a readable directory keeper cannot write is blocked, not offered", async () => {
@@ -387,7 +416,7 @@ test("claims refuse home, its parents and repositories outside a scratch root", 
   expect(claimRefusal(join(home, ".cache/agent-scratch"), home, roots)).toBeUndefined();
 });
 
-test("a git clone under a scratch root is claimable, and cleaned as claimed scratch through trash", async () => {
+test("a git clone under a scratch root is claimable, and deleted as claimed scratch", async () => {
   const roots = scratchRoots(home, ["~/batch"]);
   expect(roots).toEqual([join(home, ".cache/agent-scratch"), join(home, "batch")]);
   const clone = join(home, ".cache/agent-scratch/clone");
@@ -402,12 +431,11 @@ test("a git clone under a scratch root is claimable, and cleaned as claimed scra
   writeLedger(ctx.paths, { holds: [], claims: [{ path: clone, actor: "a", at: "now" }] });
   const { findings } = await scan(claimed, ["agent"]);
   expect(findings).toHaveLength(1);
-  expect(findings[0]).toMatchObject({ category: "agent", risk: "low", action: "trash", paths: [clone] });
+  expect(findings[0]).toMatchObject({ category: "agent", risk: "low", action: "delete", paths: [clone] });
   const applied = await applyPlan(createPlan(ctx.paths, findings, 7), claimed);
+  expect(applied.applied).toHaveLength(1);
   expect(existsSync(clone)).toBe(false);
-  await undo(ctx.paths, applied.transaction as string);
-  expect(readFileSync(join(clone, "file"), "utf8")).toBe("work");
-  expect(existsSync(join(clone, ".git/HEAD"))).toBe(true);
+  expect(existsSync(batchClone)).toBe(true);
 });
 
 test("a live lock makes a second mutation fail as busy, and a dead lock is taken over", async () => {
@@ -431,59 +459,72 @@ test("a hold waits for the lock, so it cannot land in the middle of an apply", a
   expect(readLedger(ctx.paths).holds).toEqual([hold]);
 });
 
-test("purge keeps young trash and removes old trash", async () => {
-  const batch = join(home, "batch");
-  mkdirSync(batch);
-  age(batch);
-  const { findings } = await scan(ctx, ["agent"]);
-  const { transaction } = await applyPlan(createPlan(ctx.paths, findings, 7), ctx);
-  expect((await purge(ctx.paths, 14)).purged).toEqual([]);
-  expect((await purge(ctx.paths, 0, Date.now() + 1000)).purged).toEqual([transaction as string]);
-  expect(existsSync(join(ctx.paths.trash, transaction as string))).toBe(false);
-});
+/** A trash directory as an older keeper left it: one directory per transaction, each holding its manifest. */
+function oldTransaction(id: string, entries: object[] = []): string {
+  const dir = join(ctx.paths.oldTrash, id);
+  mkdirSync(join(dir, "0"), { recursive: true });
+  writeFileSync(join(dir, "transaction.json"), JSON.stringify({ id, entries }));
+  return dir;
+}
 
-test("targeted purge removes only selected young transactions", async () => {
-  for (const id of ["selected", "preserved"]) mkdirSync(join(ctx.paths.trash, id), { recursive: true });
-  const result = await purge(ctx.paths, 14, Date.now(), ["selected"]);
-  expect(result.purged).toEqual(["selected"]);
-  expect(existsSync(join(ctx.paths.trash, "preserved"))).toBe(true);
-});
-
-test("purge rejects mixing transaction IDs with an age window", async () => {
-  expect(await runCli(["purge", "selected", "--older-days", "0"])).toBe(2);
-});
-
-test("targeted purge validates every transaction before deleting any", async () => {
-  mkdirSync(join(ctx.paths.trash, "selected"), { recursive: true });
-  await expect(purge(ctx.paths, 0, Date.now(), ["selected", "../outside"])).rejects.toThrow(
-    "unknown trash transaction",
-  );
-  expect(existsSync(join(ctx.paths.trash, "selected"))).toBe(true);
-});
-
-test("purge removes trash whose transaction manifest went missing, once it is past the window", async () => {
-  const orphan = join(ctx.paths.trash, "2a4be12e");
-  mkdirSync(join(orphan, "0/left-behind"), { recursive: true });
-  writeFileSync(join(orphan, "0/left-behind/file"), "x");
-  age(orphan);
-  expect((await purge(ctx.paths, 60)).purged).toEqual([]);
-  expect(existsSync(orphan)).toBe(true);
-  expect((await purge(ctx.paths, 14)).purged).toEqual(["2a4be12e"]);
-  expect(existsSync(orphan)).toBe(false);
-});
-
-test("purge removes a transaction that holds a read-only directory, and the ones after it", async () => {
-  const locked = join(ctx.paths.trash, "1a2b3c4d");
+test("the next apply deletes an older keeper's trash, after measuring it, read-only directories and all", async () => {
+  const locked = oldTransaction("1a2b3c4d");
   mkdirSync(join(locked, "0/tree/sealed"), { recursive: true });
-  writeFileSync(join(locked, "0/tree/sealed/file"), "x");
+  writeFileSync(join(locked, "0/tree/sealed/file"), "x".repeat(10_000));
   chmodSync(join(locked, "0/tree/sealed"), 0o500);
-  const later = join(ctx.paths.trash, "9f8e7d6c");
-  mkdirSync(join(later, "0/tree"), { recursive: true });
-  const result = await purge(ctx.paths, 0, Date.now() + 1000);
-  expect(result).toMatchObject({ failed: [], errors: {} });
-  expect(result.purged.sort()).toEqual(["1a2b3c4d", "9f8e7d6c"]);
-  expect(existsSync(locked)).toBe(false);
-  expect(existsSync(later)).toBe(false);
+  // A directory whose manifest went missing is still trash.
+  mkdirSync(join(ctx.paths.oldTrash, "9f8e7d6c/0/tree"), { recursive: true });
+  const applied = await applyPlan(createPlan(ctx.paths, [], 7), ctx);
+  expect(applied.oldTrash).toMatchObject({ transactions: 2, errors: {} });
+  expect(applied.oldTrash?.bytes).toBeGreaterThanOrEqual(10_000);
+  expect(existsSync(ctx.paths.oldTrash)).toBe(false);
+  // Once it is gone there is nothing left to report.
+  expect((await applyPlan(createPlan(ctx.paths, [], 7), ctx)).oldTrash).toBeUndefined();
+});
+
+test("old trash with a filesystem mounted inside it is kept, and the rest is deleted", async () => {
+  const mounted = oldTransaction("1a2b3c4d");
+  mkdirSync(join(mounted, "0/data dir"), { recursive: true });
+  writeFileSync(join(mounted, "0/data dir/file"), "data");
+  const other = oldTransaction("9f8e7d6c");
+  ctx.paths.mountinfo = join(home, "mountinfo");
+  const escaped = realpathSync(join(mounted, "0/data dir")).replaceAll(" ", "\\040");
+  writeFileSync(
+    ctx.paths.mountinfo,
+    `22 1 0:21 / / rw - btrfs /dev/root rw\n90 22 0:50 / ${escaped} rw - ext4 /dev/sdb1 rw\n`,
+  );
+  const result = await emptyOldTrash(ctx.paths);
+  expect(Object.keys(result?.errors ?? {})).toEqual(["1a2b3c4d"]);
+  expect(existsSync(join(mounted, "0/data dir/file"))).toBe(true);
+  expect(existsSync(other)).toBe(false);
+  writeFileSync(ctx.paths.mountinfo, "22 1 0:21 / / rw - btrfs /dev/root rw\n");
+  expect(await emptyOldTrash(ctx.paths)).toMatchObject({ transactions: 1, errors: {} });
+  expect(existsSync(ctx.paths.oldTrash)).toBe(false);
+});
+
+test("deleting an old trashed worktree drops its branch only if it has not moved", async () => {
+  const gone = await worktree("gone");
+  const moved = await worktree("moved");
+  const entry = async (path: string, name: string) => ({
+    original: path,
+    trashed: join(ctx.paths.oldTrash, name, "0", name),
+    bytes: 1,
+    gitDir: join(home, `${name}-main/.git`),
+    branch: `b-${name}`,
+    head: await git(path, "rev-parse", "HEAD"),
+  });
+  const entries = [await entry(gone, "gone"), await entry(moved, "moved")];
+  for (const [index, item] of entries.entries()) {
+    oldTransaction(["gone", "moved"][index] as string, [item]);
+    renameSync(item.original, item.trashed);
+  }
+  const movedMain = join(home, "moved-main");
+  await git(movedMain, "commit", "-qm", "later", "--allow-empty");
+  await git(movedMain, "update-ref", "refs/heads/b-moved", "HEAD");
+  expect(await emptyOldTrash(ctx.paths)).toMatchObject({ transactions: 2, errors: {} });
+  expect(await git(join(home, "gone-main"), "branch", "--list", "b-gone")).toBe("");
+  expect(await git(movedMain, "branch", "--list", "b-moved")).toContain("b-moved");
+  expect(existsSync(join(home, "gone-main/.git/worktrees/gone"))).toBe(false);
 });
 
 test("run stops a command that outlives its wait and reports it as timed out", async () => {
@@ -832,7 +873,7 @@ test("applying an abandoned-memory stop ends the process", async () => {
   expect(await Promise.race([child.exited.then(() => "exited"), Bun.sleep(2000).then(() => "running")])).toBe("exited");
 });
 
-test("applying a load plan lowers the priority and undo puts it back", async () => {
+test("applying a load plan lowers the priority", async () => {
   const child = Bun.spawn(["sleep", "30"], { stdout: "ignore", stderr: "ignore" });
   try {
     const hot: Context = {
@@ -849,11 +890,6 @@ test("applying a load plan lowers the priority and undo puts it back", async () 
     const applied = await applyPlan(createPlan(ctx.paths, findings, 7), hot);
     expect(applied.reniced).toBe(1);
     expect(niceness(child.pid)).toBe(19);
-
-    const restored = await undo(ctx.paths, applied.transaction as string);
-    // Raising a nice value back needs root, so the honest contract is that it is either restored or reported.
-    expect(restored.reniced + restored.stuck.length).toBe(1);
-    expect(niceness(child.pid)).toBe(restored.reniced ? start : 19);
   } finally {
     child.kill();
   }
@@ -914,7 +950,7 @@ const autogroupOf = (pid: number) => {
   }
 };
 
-test.skipIf(!autogroupOf(process.pid))("applying a load plan lowers the autogroup and undo puts it back", async () => {
+test.skipIf(!autogroupOf(process.pid))("applying a load plan lowers the autogroup", async () => {
   // setsid gives the child a session, and so an autogroup, of its own.
   const child = Bun.spawn(["setsid", "sleep", "30"], { stdout: "ignore", stderr: "ignore" });
   try {
@@ -928,9 +964,8 @@ test.skipIf(!autogroupOf(process.pid))("applying a load plan lowers the autogrou
     };
     const { findings } = await scan(hot, ["load"]);
     const applied = await applyPlan(createPlan(ctx.paths, findings, 7), hot);
+    expect(applied.reniced).toBeGreaterThan(0);
     expect(autogroupOf(child.pid)?.nice).toBe(19);
-    await undo(ctx.paths, applied.transaction as string);
-    expect(autogroupOf(child.pid)?.nice).toBe(0);
   } finally {
     child.kill();
   }
@@ -961,11 +996,10 @@ test("with autogroup off, renice also lowers the session parent so new children 
   expect(asked.findings.find((finding) => finding.pids?.includes(110))?.parent).toBeUndefined();
 });
 
-test("applying a load plan lowers the session parent and undo reports it", async () => {
+test("applying a load plan lowers the session parent", async () => {
   const parent = Bun.spawn(["sleep", "30"], { stdout: "ignore", stderr: "ignore" });
   const child = Bun.spawn(["sleep", "30"], { stdout: "ignore", stderr: "ignore" });
   try {
-    const start = niceness(parent.pid) as number;
     const hot: Context = {
       ...ctx,
       processes: [
@@ -981,9 +1015,6 @@ test("applying a load plan lowers the session parent and undo reports it", async
     const applied = await applyPlan(createPlan(ctx.paths, findings, 7), hot);
     expect(niceness(parent.pid)).toBe(19);
     expect(applied.reniced).toBe(2);
-    const restored = await undo(ctx.paths, applied.transaction as string);
-    expect(restored.reniced + restored.stuck.length).toBe(2);
-    expect(niceness(parent.pid)).toBe(restored.stuck.some((entry) => entry.pid === parent.pid) ? 19 : start);
   } finally {
     parent.kill();
     child.kill();
@@ -1180,7 +1211,7 @@ test("planning by id skips an unknown or blocked id and keeps the rest", () => {
     packages: [],
     bytes: 1,
     risk: "low",
-    action: "trash",
+    action: "delete",
     reason: "",
     blockers,
   });
@@ -1240,157 +1271,102 @@ test("a stray directory is a finding, unless a checkout sits inside it", async (
   expect(by("repo/cb")?.blockers).toContain("contains a checkout");
 });
 
-test("purge deletes a worktree's branch only if it has not moved, and undo works until then", async () => {
+test("applying a worktree deletes it with its git metadata and branch", async () => {
   const path = await worktree("gone");
-  await worktree("moved");
-  const merged = async (repo: string, branch: string) => pull("MERGED", await git(repo, "rev-parse", "HEAD"), branch)();
-  const prs = async (repo: string) => (repo.endsWith("gone") ? merged(repo, "b-gone") : merged(repo, "b-moved"));
+  const prs = async (repo: string) => pull("MERGED", await git(repo, "rev-parse", "HEAD"), "b-gone")();
   const live = { ...ctx, pullRequests: prs };
   const { findings } = await scan(live, ["worktree"]);
-  await applyPlan(createPlan(ctx.paths, findings, 7), live);
+  const applied = await applyPlan(createPlan(ctx.paths, findings, 7), live);
+  expect(applied.deleted.map((entry) => entry.paths)).toEqual([[path]]);
   expect(existsSync(path)).toBe(false);
-  expect(await git(join(home, "gone-main"), "branch", "--list", "b-gone")).toContain("b-gone");
-
-  const movedMain = join(home, "moved-main");
-  await git(movedMain, "commit", "-qm", "later", "--allow-empty");
-  await git(movedMain, "update-ref", "refs/heads/b-moved", "HEAD");
-
-  await purge(ctx.paths, 0);
+  expect(existsSync(join(home, "gone-main/.git/worktrees/gone"))).toBe(false);
   expect(await git(join(home, "gone-main"), "branch", "--list", "b-gone")).toBe("");
-  expect(await git(movedMain, "branch", "--list", "b-moved")).toContain("b-moved");
 });
 
-test("purging one trashed worktree preserves another transaction's undo registration", async () => {
-  const first = await worktree("same-repo");
-  const second = join(home, ".worktrees/same-repo-second");
-  await git(join(home, "same-repo-main"), "worktree", "add", "-q", "-b", "b-same-repo-second", second);
-  for (const path of [first, second]) age(path);
-  for (const name of ["same-repo", "same-repo-second"])
-    age(join(home, `same-repo-main/.git/worktrees/${name}/logs/HEAD`));
-  const prs = async (repo: string, branch?: string) =>
-    branch ? await pull("MERGED", await git(repo, "rev-parse", "HEAD"), branch)() : [];
-  const live = { ...ctx, pullRequests: prs };
-  const findings = (await scan(live, ["worktree"])).findings;
-  const firstFinding = findings.find((finding) => finding.paths[0] === first);
-  const secondFinding = findings.find((finding) => finding.paths[0] === second);
-  expect(firstFinding).toBeDefined();
-  expect(secondFinding).toBeDefined();
-  const firstApplied = await applyPlan(createPlan(ctx.paths, [firstFinding as Finding], 7), live);
-  const secondApplied = await applyPlan(createPlan(ctx.paths, [secondFinding as Finding], 7), live);
-  expect(firstApplied.transaction).toBeString();
-  expect(secondApplied.transaction).toBeString();
-  // The registration is only expired after the worktrees have been trashed. This is the state in which a broad
-  // prune from the first purge would delete the second transaction's registration too.
-  age(join(home, "same-repo-main/.git/worktrees/same-repo-second/gitdir"));
-
-  await purge(ctx.paths, 0, Date.now(), [firstApplied.transaction as string]);
-  expect(existsSync(join(home, "same-repo-main/.git/worktrees/same-repo-second"))).toBe(true);
-  expect((await undo(ctx.paths, secondApplied.transaction as string)).restored).toEqual([second]);
-  expect((await git(second, "rev-parse", "--show-toplevel")).trim()).toBe(second);
-});
-
-test("purge reports measured free space separately from uncompressed size", async () => {
-  const batch = join(home, "batch");
-  mkdirSync(batch);
-  writeFileSync(join(batch, "out"), "data");
-  age(batch);
-  const { findings } = await scan(ctx, ["agent"]);
-  await applyPlan(createPlan(ctx.paths, findings, 7), ctx);
-  const result = await purge(ctx.paths, 0);
-  expect(result.bytes).toBeGreaterThan(0);
-  expect(result.freed).toBeGreaterThanOrEqual(0);
-});
-
-test("a failing purge hook keeps the transaction so it can retry", async () => {
+test("a failing delete hook keeps the worktree, and a passing one sees it before it goes", async () => {
   const path = await worktree("hooked");
   const hook = join(home, "hook.sh");
   const seen = join(home, "seen");
   writeFileSync(
     hook,
-    `#!/bin/sh\ntest -f "$1/file" && echo "$2" >> ${seen}\necho "hook failed: $1" >&2\nexit "$(cat ${home}/code)"\n`,
+    `#!/bin/sh\ntest -f "$1/file" && echo "$1" >> ${seen}\necho "hook failed: $1" >&2\nexit "$(cat ${home}/code)"\n`,
   );
   chmodSync(hook, 0o755);
   writeFileSync(join(home, "code"), "1");
   mkdirSync(join(home, ".config/keeper"), { recursive: true });
-  writeFileSync(ctx.paths.config, `purgeHook = "${hook}"\n`);
+  writeFileSync(ctx.paths.config, `deleteHook = "${hook}"\n`);
+  const hooked = { ...ctx, config: loadConfig(ctx.paths) };
   age(path);
   age(join(home, "hooked-main/.git/worktrees/hooked/logs/HEAD"));
-  const { findings } = await scan(ctx, ["worktree"]);
-  const { transaction } = await applyPlan(createPlan(ctx.paths, findings, 7), ctx);
-  const failed = await purge(ctx.paths, 0);
-  expect(failed).toMatchObject({ purged: [], failed: [transaction] });
-  expect(failed.errors[transaction as string]).toContain(`purge hook ${hook} exited 1: hook failed:`);
+  const { findings } = await scan(hooked, ["worktree"]);
+  const failed = await applyPlan(createPlan(ctx.paths, findings, 7), hooked);
+  expect(failed.applied).toEqual([]);
+  expect(failed.failed[0]?.error).toContain(`delete hook ${hook} exited 1: hook failed:`);
+  expect(existsSync(join(path, "file"))).toBe(true);
   writeFileSync(join(home, "code"), "0");
-  expect(await purge(ctx.paths, 0)).toMatchObject({ purged: [transaction], failed: [] });
+  expect((await applyPlan(createPlan(ctx.paths, findings, 7), hooked)).applied).toHaveLength(1);
+  expect(existsSync(path)).toBe(false);
   expect(readFileSync(seen, "utf8").trim().split("\n")).toEqual([path, path]);
 });
 
-test("purge keeps a transaction with a filesystem mounted inside it", async () => {
+test("apply keeps a path with a filesystem mounted inside it", async () => {
   const batch = join(home, "batch");
   mkdirSync(join(batch, "data dir"), { recursive: true });
   writeFileSync(join(batch, "data dir/file"), "data");
   age(batch);
   const { findings } = await scan(ctx, ["agent"]);
-  const { transaction } = await applyPlan(createPlan(ctx.paths, findings, 7), ctx);
-  const [trashed] = readdirSync(join(ctx.paths.trash, transaction as string), { recursive: true })
-    .map((entry) => join(ctx.paths.trash, transaction as string, String(entry)))
-    .filter((entry) => entry.endsWith("data dir"));
   const mountinfo = join(home, "mountinfo");
   ctx.paths.mountinfo = mountinfo;
-  const escaped = realpathSync(trashed as string).replaceAll(" ", "\\040");
+  const escaped = realpathSync(join(batch, "data dir")).replaceAll(" ", "\\040");
   writeFileSync(mountinfo, `22 1 0:21 / / rw - btrfs /dev/root rw\n90 22 0:50 / ${escaped} rw - ext4 /dev/sdb1 rw\n`);
-  const kept = await purge(ctx.paths, 0);
-  expect(kept).toMatchObject({ purged: [], failed: [transaction] });
-  expect(kept.errors[transaction as string]).toContain(realpathSync(trashed as string));
-  expect(existsSync(join(trashed as string, "file"))).toBe(true);
+  const kept = await applyPlan(createPlan(ctx.paths, findings, 7), ctx);
+  expect(kept.applied).toEqual([]);
+  expect(kept.failed[0]?.error).toContain(realpathSync(join(batch, "data dir")));
+  expect(existsSync(join(batch, "data dir/file"))).toBe(true);
   writeFileSync(mountinfo, "22 1 0:21 / / rw - btrfs /dev/root rw\n");
-  expect(await purge(ctx.paths, 0)).toMatchObject({ purged: [transaction], failed: [] });
+  expect((await applyPlan(createPlan(ctx.paths, findings, 7), ctx)).applied).toHaveLength(1);
+  expect(existsSync(batch)).toBe(false);
 });
 
-test("purge keeps a filesystem mounted on the transaction root", async () => {
+test("apply keeps a path that is itself a mount point", async () => {
   const batch = join(home, "batch");
   mkdirSync(batch);
   writeFileSync(join(batch, "out"), "data");
   age(batch);
   const { findings } = await scan(ctx, ["agent"]);
-  const { transaction } = await applyPlan(createPlan(ctx.paths, findings, 7), ctx);
-  const dir = realpathSync(join(ctx.paths.trash, transaction as string));
   ctx.paths.mountinfo = join(home, "mountinfo");
-  writeFileSync(ctx.paths.mountinfo, `90 22 0:50 / ${dir} rw - ext4 /dev/sdb1 rw\n`);
-  expect(await purge(ctx.paths, 0)).toMatchObject({ purged: [], failed: [transaction] });
-  expect(existsSync(dir)).toBe(true);
+  writeFileSync(ctx.paths.mountinfo, `90 22 0:50 / ${realpathSync(batch)} rw - ext4 /dev/sdb1 rw\n`);
+  expect((await applyPlan(createPlan(ctx.paths, findings, 7), ctx)).failed).toHaveLength(1);
+  expect(existsSync(join(batch, "out"))).toBe(true);
 });
 
-test("purge checks mount changes made by its awaited hook", async () => {
+test("apply checks mount changes made by its awaited delete hook", async () => {
   const path = await worktree("mount-hooked");
   age(path);
   age(join(home, "mount-hooked-main/.git/worktrees/mount-hooked/logs/HEAD"));
-  const { findings } = await scan(ctx, ["worktree"]);
-  const { transaction } = await applyPlan(createPlan(ctx.paths, findings, 7), ctx);
-  const dir = realpathSync(join(ctx.paths.trash, transaction as string));
   ctx.paths.mountinfo = join(home, "mountinfo");
   writeFileSync(ctx.paths.mountinfo, "22 1 0:21 / / rw - btrfs /dev/root rw\n");
   const hook = join(home, "mount-hook.sh");
   writeFileSync(
     hook,
-    `#!/bin/sh\nprintf '%s\\n' '90 22 0:50 / ${dir} rw - ext4 /dev/sdb1 rw' > '${ctx.paths.mountinfo}'\n`,
+    `#!/bin/sh\nprintf '%s\\n' '90 22 0:50 / ${realpathSync(path)} rw - ext4 /dev/sdb1 rw' > '${ctx.paths.mountinfo}'\n`,
   );
   chmodSync(hook, 0o755);
-  mkdirSync(join(home, ".config/keeper"), { recursive: true });
-  writeFileSync(ctx.paths.config, `purgeHook = "${hook}"\n`);
-  expect(await purge(ctx.paths, 0)).toMatchObject({ purged: [], failed: [transaction] });
-  expect(existsSync(dir)).toBe(true);
+  const hooked = { ...ctx, config: { ...ctx.config, deleteHook: hook } };
+  const { findings } = await scan(hooked, ["worktree"]);
+  expect((await applyPlan(createPlan(ctx.paths, findings, 7), hooked)).failed).toHaveLength(1);
+  expect(existsSync(join(path, "file"))).toBe(true);
 });
 
-test("an unreadable mount table keeps every transaction", async () => {
+test("an unreadable mount table keeps every directory", async () => {
   const batch = join(home, "batch");
   mkdirSync(batch);
   writeFileSync(join(batch, "out"), "data");
   age(batch);
   const { findings } = await scan(ctx, ["agent"]);
-  const { transaction } = await applyPlan(createPlan(ctx.paths, findings, 7), ctx);
   ctx.paths.mountinfo = join(home, "missing-mountinfo");
-  expect(await purge(ctx.paths, 0)).toMatchObject({ purged: [], failed: [transaction] });
+  expect((await applyPlan(createPlan(ctx.paths, findings, 7), ctx)).failed).toHaveLength(1);
+  expect(existsSync(join(batch, "out"))).toBe(true);
 });
 
 test("a recent file deep in build output blocks it, though everything near the top is old", async () => {
@@ -1416,24 +1392,21 @@ test("an oversized log keeps its tail and its inode", async () => {
   expect(statSync(log).ino).toBe(inode);
 });
 
-test("undo refuses to overwrite a path that exists again, then finishes once it is clear", async () => {
-  const batch = join(home, "batch");
-  mkdirSync(batch);
-  age(batch);
-  const { findings } = await scan(ctx, ["agent"]);
-  const { transaction } = await applyPlan(createPlan(ctx.paths, findings, 7), ctx);
-  mkdirSync(batch);
-  await expect(undo(ctx.paths, transaction as string)).rejects.toThrow("exist again");
-  rmSync(batch, { recursive: true });
-  expect((await undo(ctx.paths, transaction as string)).restored).toEqual([batch]);
-});
-
 test("a theme sets only the colours it names, and a misspelt one is an error", () => {
   mkdirSync(join(home, ".config/keeper"), { recursive: true });
   writeFileSync(ctx.paths.config, '[theme]\ncursor = "#333333"\n');
   expect(loadConfig(ctx.paths).theme).toMatchObject({ cursor: "#333333", accent: "cyan", blocked: "" });
   writeFileSync(ctx.paths.config, '[theme]\ncursour = "#333333"\n');
   expect(() => loadConfig(ctx.paths)).toThrow("theme.cursour");
+});
+
+test("an older config's purgeHook still names the delete hook, and a plan from another version is refused", () => {
+  mkdirSync(join(home, ".config/keeper"), { recursive: true });
+  writeFileSync(ctx.paths.config, 'purgeHook = "/bin/true"\n');
+  expect(loadConfig(ctx.paths).deleteHook).toBe("/bin/true");
+  mkdirSync(join(ctx.paths.state, "plans"), { recursive: true });
+  writeFileSync(join(ctx.paths.state, "plans", "old.json"), JSON.stringify({ id: "old", schemaVersion: 7 }));
+  expect(() => readPlan(ctx.paths, "old")).toThrow("another keeper version");
 });
 
 test("a misspelt config key is an error, and configured roots replace the defaults", () => {
@@ -1556,7 +1529,7 @@ test("health names each reason the nightly runs cannot be trusted, and nothing w
   ]);
   expect(health("systemd", { ...run, incomplete: true, warnings: ["docker: down"] }, "exit-code", now)).toEqual([
     "the last nightly run ended in exit-code",
-    "the last nightly run could not apply or purge everything",
+    "the last nightly run could not apply everything",
     "the last nightly scan warned: docker: down",
   ]);
 });
@@ -1577,7 +1550,7 @@ test("a plan counts a worktree's own build output once, inside the worktree", ()
     packages: [],
     bytes,
     risk: "low",
-    action: "trash",
+    action: "delete",
     reason: "",
     blockers: [],
   });
@@ -1599,7 +1572,7 @@ test("a bulk plan never takes apps or personal files, whatever the risk ceiling"
     packages: [],
     bytes: 1,
     risk,
-    action: category === "apps" ? "remove-packages" : "trash",
+    action: category === "apps" ? "remove-packages" : "delete",
     reason: "",
     blockers: [],
     ...(category === "apps" || category === "large" || category === "duplicates" ? { explicit: true as const } : {}),

@@ -1,7 +1,7 @@
 {
   "version": 1,
   "id": "screen-wizard-after-apply",
-  "description": "Wizard list after Enter applies a selection, with a message naming the undo transaction.",
+  "description": "Wizard list after Enter applies a selection, with a message naming the space removed.",
   "platform": "cli",
   "requires": [
     "enter-app"

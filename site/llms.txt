@@ -1,6 +1,6 @@
 # keeper
 
-> keeper keeps an Arch machine clean, with your agent doing the deciding. It finds what is safe to remove on a machine where coding agents leave worktrees, build output, caches and transcripts, proves it, and moves it to a trash you can undo.
+> keeper keeps an Arch machine clean, with your agent doing the deciding. It finds what is safe to remove on a machine where coding agents leave worktrees, build output, caches and transcripts, proves it, and deletes it so the space is free at once.
 
 Install: `paru -S keeper-bin`, `paru -S keeper`, or `npm i -g @cillianb/keeper`. Run once without installing: `npx @cillianb/keeper scan`.
 

@@ -20,16 +20,15 @@ import {
   bulkPlan,
   context,
   createPlan,
+  emptyOldTrash,
   freeBytes,
   loadConfig,
+  type OldTrash,
   pickById,
-  purge,
   readPlan,
-  transactions,
-  undo,
 } from "./ops";
 import { defaultAppStaleDays, defaultStaleDays, primaryCheckouts } from "./scanners";
-import { defaultPaths, expandHome, run } from "./system";
+import { defaultPaths, expandHome, run, waitFor } from "./system";
 import { installCron, installSystemd, lastServiceResult, removeSchedule, scheduleStatus } from "./timer";
 import {
   bulkEligible,
@@ -47,7 +46,6 @@ import { recordUsage } from "./usage";
 /** Each code past 2 tells the caller one thing to do next. */
 export const exit = { ok: 0, error: 1, usage: 2, needsConfirmation: 3, stalePlan: 4, partial: 5, busy: 6 } as const;
 
-const trashDays = 14;
 /** Each adds evidence or an action, and keeper works without it. */
 const optionalTools = ["gh", "paccache", "expac", "notify-send", "uv"];
 
@@ -58,24 +56,23 @@ const help = `keeper keeps an Arch machine clean. Output is JSON when stdout is 
                                  list findings; --cached reuses categories scanned recently, never load or memory
   keeper plan [ID...] [--category C] [--max-risk low|medium] [--stale-days N] [--app-stale-days N]
                                  save a plan of eligible findings; apps and personal files need their id
-  keeper apply PLAN --yes        rescan, then apply what is unchanged
-  keeper undo TX                 restore a transaction from trash
-  keeper purge [TX...] [--older-days N]  delete trash for good (default ${trashDays})
+  keeper apply PLAN --yes        rescan, then apply what is unchanged; removals are deleted at once, for good
   keeper hold PATH --reason R [--days N]
                                  protect a path you will return to (1 day at most; --days N shortens it)
   keeper claim PATH              declare your own scratch as disposable once stale
   keeper release PATH            drop your hold or claim on a path
-  keeper status                  trash, holds, schedule, last run and what needs attention
+  keeper status                  holds, schedule, last run and what needs attention
   keeper log                     recent mutations and who made them
   keeper history [--days N]      free space readings and the events that changed it (default 30 days)
   keeper sample                  record free space now, as the hourly timer does
   keeper schema                  machine-readable description of this CLI
-  keeper auto                    apply low-risk findings, purge old trash, notify
+  keeper auto                    apply low-risk findings, notify
   keeper --version               print the version
   keeper timer install [--cron]  schedule keeper auto daily and keeper sample hourly
   keeper timer remove            remove the schedule
 
-Sizes are uncompressed, so btrfs with compression frees less than they show. Space returns at purge, which reports what it freed.
+Sizes are uncompressed, so btrfs with compression frees less than they show. apply deletes for good, with nothing to
+restore, so the safety lives in what a plan may include: blockers, holds and proof.
 Worktrees are low risk only with proof: a merged PR with the same commit or the same changed files, or every commit on the default branch.
 Exit codes: 0 ok, 1 error, 2 usage, 3 needs --yes, 4 plan is entirely stale, 5 partly done: some ids skipped or some items not applied, so scan again, 6 another run holds the lock, so retry.
 Set KEEPER_ACTOR to name yourself in holds, claims and the log.
@@ -95,7 +92,6 @@ interface Flags {
   cached: boolean;
   category?: Category[];
   maxRisk: Risk;
-  olderDays: number;
   staleDays: number;
   appStaleDays: number;
   days?: number;
@@ -121,7 +117,6 @@ function parse(args: readonly string[]): Flags {
     cron: false,
     cached: false,
     maxRisk: "low",
-    olderDays: trashDays,
     staleDays: defaultStaleDays,
     appStaleDays: defaultAppStaleDays,
   };
@@ -157,11 +152,7 @@ function parse(args: readonly string[]): Flags {
       flags.days = Number(value());
       if (!Number.isFinite(flags.days) || flags.days <= 0) throw new UsageError("--days must be positive");
     } else if (arg === "--reason") flags.reason = value();
-    else if (arg === "--older-days") {
-      flags.olderDays = Number(value());
-      if (!Number.isFinite(flags.olderDays) || flags.olderDays < 0)
-        throw new UsageError("--older-days must be a number of days, 0 or more");
-    } else if (arg.startsWith("-")) throw new UsageError(`unknown option ${arg}`);
+    else if (arg.startsWith("-")) throw new UsageError(`unknown option ${arg}`);
     else flags.positional.push(arg);
   }
   return flags;
@@ -172,12 +163,10 @@ const options: Record<string, readonly string[]> = {
   scan: ["--category", "--stale-days", "--app-stale-days", "--cached"],
   plan: ["--category", "--max-risk", "--stale-days", "--app-stale-days"],
   apply: ["--yes"],
-  purge: ["--older-days"],
   hold: ["--reason", "--days"],
   history: ["--days"],
-  auto: ["--older-days"],
+  auto: [],
   timer: ["--cron"],
-  undo: [],
   claim: [],
   release: [],
   status: [],
@@ -238,13 +227,15 @@ export function schema() {
       "id, category, risk, action, title, paths, packages, bytes, reason, blockers, explicit; worktrees add gitDir, branch and head; load findings add cpu and pids; memory stop findings add memory (RAM plus swap bytes), cpu and pids; tmp findings add inodes",
     explicit:
       "true means a person has to name the finding's id in `keeper plan`. A plan with no ids never takes it, whatever --max-risk says",
-    bytes: "uncompressed size, so a compressing filesystem frees less. Only purge's freed field is measured",
+    bytes: "uncompressed size, so a compressing filesystem frees less",
+    apply:
+      "deletes for good, with no trash or undo. deleted lists each finding's removed paths and bytes, and the log keeps it",
     eligible: "blockers is empty and action is not report",
     scan: "schemaVersion, scannedAt, categoryScannedAt (when each category was scanned), cached (categories reused), live (categories --cached could not reuse, because they describe this moment), findings, warnings",
     environment: { KEEPER_ACTOR: "name recorded in holds, claims and the log" },
     cacheMinutes: maxAge,
     history:
-      "samples are {at, free, size} in bytes, at most one per 10 minutes, kept 90 days; events are apply, purge, undo and auto from the log",
+      "samples are {at, free, size} in bytes, at most one per 10 minutes, kept 90 days; events are apply and auto from the log, plus purge and undo from older versions",
     help,
   };
 }
@@ -275,12 +266,19 @@ export function health(schedule: string, last: AutoRun | undefined, result: stri
   if (!last) return [...problems, "no nightly run recorded yet"];
   const hours = (now - Date.parse(last.at)) / 3_600_000;
   if (hours > overdueHours) problems.push(`the last nightly run was ${Math.floor(hours)} hours ago`);
-  if (last.incomplete) problems.push("the last nightly run could not apply or purge everything");
+  if (last.incomplete) problems.push("the last nightly run could not apply everything");
   if (last.warnings?.length) problems.push(`the last nightly scan warned: ${last.warnings.join("; ")}`);
   return problems;
 }
 
-async function auto(flags: Flags): Promise<{ value: { summary: string } & Record<string, unknown>; code: number }> {
+/** The one-time report on the trash an older keeper left, which apply deletes. */
+function oldTrashText(oldTrash: OldTrash | undefined): string {
+  if (!oldTrash) return "";
+  const kept = Object.entries(oldTrash.errors).map(([id, error]) => `\nkept old trash ${id}: ${error}`);
+  return `\ndeleted the trash an older keeper left: ${size(oldTrash.bytes)} in ${count(oldTrash.transactions, "transaction")}${kept.join("")}`;
+}
+
+async function auto(): Promise<{ value: { summary: string } & Record<string, unknown>; code: number }> {
   const ctx = context();
   // Freshen first, so the scan judges worktrees against the default branch as it is now.
   const repos = ctx.config.freshen ? await primaryCheckouts(ctx) : [];
@@ -291,18 +289,23 @@ async function auto(flags: Flags): Promise<{ value: { summary: string } & Record
   const outcome = ready.length
     ? await applyPlan(createPlan(paths, ready, ctx.staleDays, ctx.appStaleDays), ctx)
     : undefined;
-  const purged = await purge(paths, flags.olderDays);
+  // applyPlan deletes the trash an older keeper left, so with nothing to apply auto does it here.
+  const oldTrash = outcome ? outcome.oldTrash : await emptyOldTrash(paths);
   const waiting = report.findings.filter((finding) => eligible(finding) && finding.risk !== "low");
+  // Copy-on-write filesystems release space when the transaction commits, so a reading after a deletion needs a sync.
+  // A busy disk can take far longer to flush, so past two seconds the reading may still miss some of it.
+  if (outcome?.deleted.length || oldTrash) await waitFor(["sync", "--file-system", paths.home], 2000);
   const free = await freeBytes(paths.home);
   const waitingBytes = waiting.reduce((sum, finding) => sum + finding.bytes, 0);
-  const summary = `Moved ${size(outcome?.bytes ?? 0)} to trash, purge freed ${size(purged.freed)}, ${size(free)} free. ${size(waitingBytes)} waits for approval. Sizes before purge are uncompressed.`;
+  const old = oldTrash ? ` Deleted the old trash, ${size(oldTrash.bytes)}.` : "";
+  const summary = `Removed ${size(outcome?.bytes ?? 0)}, ${size(free)} free. ${size(waitingBytes)} waits for approval. Sizes are uncompressed.${old}`;
   const low = free < ctx.config.warnFreeGb * 1024 ** 3;
   const warnings = report.warnings;
   if (waitingBytes > 10 * 1024 ** 3 || low || warnings.length) {
     const said = warnings.length ? `${summary} Scan warnings: ${warnings.join("; ")}` : summary;
     await run(["notify-send", ...(low || warnings.length ? ["-u", "critical"] : []), "keeper", said]);
   }
-  const incomplete = (outcome?.failed.length ?? 0) > 0 || purged.failed.length > 0;
+  const incomplete = (outcome?.failed.length ?? 0) > 0 || Object.keys(oldTrash?.errors ?? {}).length > 0;
   audit(paths, "auto", { summary, incomplete, warnings });
   return {
     value: {
@@ -310,7 +313,7 @@ async function auto(flags: Flags): Promise<{ value: { summary: string } & Record
       summary,
       free,
       outcome,
-      purged,
+      oldTrash,
       waiting: waiting.length,
       freshened: freshened.filter((note) => note !== undefined),
       warnings,
@@ -374,49 +377,21 @@ async function dispatch(
         };
       }
       const outcome = await applyPlan(plan, context(plan.staleDays, plan.appStaleDays));
-      const partial = outcome.failed.length > 0 || (outcome.stale.length > 0 && outcome.applied.length > 0);
-      const next = outcome.transaction
-        ? `keeper undo ${outcome.transaction} to restore, or keeper purge ${outcome.transaction} to free the space`
-        : "keeper scan";
-      const moved = outcome.bytes > 0 ? `, ${size(outcome.bytes)} moved` : "";
+      const partial =
+        outcome.failed.length > 0 ||
+        Object.keys(outcome.oldTrash?.errors ?? {}).length > 0 ||
+        (outcome.stale.length > 0 && outcome.applied.length > 0);
+      const removed = outcome.bytes > 0 ? `, ${size(outcome.bytes)} removed` : "";
       const lowered = outcome.reniced > 0 ? `, ${count(outcome.reniced, "process", "processes")} deprioritised` : "";
       const ended = outcome.stopped > 0 ? `, ${count(outcome.stopped, "process", "processes")} stopped` : "";
       return {
-        value: { ...outcome, next: partial ? "keeper scan" : next },
-        text: `applied ${outcome.applied.length}, stale ${outcome.stale.length}, failed ${outcome.failed.length}${moved}${lowered}${ended}. undo: ${outcome.transaction ?? "none"}`,
+        value: { ...outcome, next: partial || outcome.applied.length === 0 ? "keeper scan" : "done" },
+        text: `applied ${outcome.applied.length}, stale ${outcome.stale.length}, failed ${outcome.failed.length}${removed}${lowered}${ended}${outcome.failed.map(({ id, error }) => `\nfailed ${id}: ${error}`).join("")}${oldTrashText(outcome.oldTrash)}`,
         code: partial
           ? exit.partial
           : outcome.applied.length === 0 && outcome.stale.length > 0
             ? exit.stalePlan
             : exit.ok,
-      };
-    }
-    case "undo": {
-      const [id] = rest;
-      if (!id) throw new UsageError("usage: keeper undo TX");
-      const result = await undo(paths, id);
-      const reinstall = result.removedPackages.length
-        ? `\nreinstall with: sudo pacman -S --asdeps ${result.removedPackages.join(" ")}`
-        : "";
-      const reniced = result.reniced
-        ? `, ${count(result.reniced, "process", "processes")} back at their old priority`
-        : "";
-      const stuck = result.stuck.length
-        ? `\n${result.stuck.length} still at low priority, which needs root to raise: ${result.stuck
-            .map((entry) => `${entry.pid} back to ${entry.nice}`)
-            .join(", ")}`
-        : "";
-      return { value: result, text: `restored ${result.restored.length} paths${reniced}${reinstall}${stuck}` };
-    }
-    case "purge": {
-      if (rest.length && flags.given.includes("--older-days"))
-        throw new UsageError("transaction IDs cannot be combined with --older-days");
-      const result = await purge(paths, flags.olderDays, Date.now(), rest.length ? rest : undefined);
-      const kept = result.failed.map((id) => `\nkept ${id}: ${result.errors[id]}`).join("");
-      return {
-        value: result,
-        text: `purged ${count(result.purged.length, "transaction")}: ${size(result.freed)} freed on disk, ${size(result.bytes)} uncompressed${kept}`,
-        code: result.failed.length ? exit.partial : undefined,
       };
     }
     case "hold": {
@@ -508,7 +483,6 @@ async function dispatch(
     case "schema":
       return { value: schema(), text: JSON.stringify(schema(), null, 2) };
     case "status": {
-      const trash = transactions(paths);
       const lastRun = readAudit(paths, 500)
         .filter((entry): entry is AutoRun => (entry as { event?: string }).event === "auto")
         .at(-1);
@@ -524,7 +498,6 @@ async function dispatch(
         problems,
         lastRun,
         holds,
-        trash: trash.map((tx) => ({ id: tx.id, appliedAt: tx.appliedAt, paths: tx.entries.length })),
         lastSample: readSamples(paths, 1).at(-1)?.at,
         missingTools: optionalTools.filter((tool) => !Bun.which(tool)),
         next: schedule === "none" ? "keeper timer install" : problems.length ? "keeper log" : "keeper scan",
@@ -534,11 +507,11 @@ async function dispatch(
       const missing = value.missingTools.length ? `\nmissing: ${value.missingTools.join(", ")}` : "";
       return {
         value,
-        text: `${size(value.free)} free, schedule ${schedule}, ${count(trash.length, "transaction")} in trash, ${count(holds.length, "hold")}${last}${verdict}${missing}\nnext: ${value.next}`,
+        text: `${size(value.free)} free, schedule ${schedule}, ${count(holds.length, "hold")}${last}${verdict}${missing}\nnext: ${value.next}`,
       };
     }
     case "auto": {
-      const result = await auto(flags);
+      const result = await auto();
       return { value: result.value, text: result.value.summary, code: result.code };
     }
     case "timer": {
@@ -558,7 +531,7 @@ async function dispatch(
   }
 }
 
-const sampled = new Set(["scan", "plan", "apply", "undo", "purge", "status", "auto"]);
+const sampled = new Set(["scan", "plan", "apply", "status", "auto"]);
 
 /** Returns undefined only when the wizard should open, which callers must never reach without a terminal. */
 export async function runCli(args: readonly string[]): Promise<number | undefined> {

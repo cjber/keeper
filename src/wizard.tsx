@@ -44,13 +44,16 @@ export const liveActions: Actions = {
     const lowered = outcome.reniced ? `lowered the priority of ${count(outcome.reniced, "process", "processes")}` : "";
     const ended = outcome.stopped ? `stopped ${count(outcome.stopped, "process", "processes")}` : "";
     const done =
-      [outcome.bytes ? `moved ${size(outcome.bytes)} to trash` : "", lowered, ended].filter(Boolean).join(" and ") ||
+      [outcome.bytes ? `removed ${size(outcome.bytes)}` : "", lowered, ended].filter(Boolean).join(" and ") ||
       "applied";
     const stale = findings.filter((finding) => outcome.stale.includes(finding.id)).map((finding) => finding.title);
     return [
-      outcome.transaction
-        ? `${done.charAt(0).toUpperCase()}${done.slice(1)}. Undo with keeper undo ${outcome.transaction}`
+      outcome.applied.length || outcome.deleted.length
+        ? `${done.charAt(0).toUpperCase()}${done.slice(1)}`
         : "Nothing was changed",
+      outcome.oldTrash
+        ? `Deleted the old trash, ${size(outcome.oldTrash.bytes)}${Object.keys(outcome.oldTrash.errors).length ? `, ${count(Object.keys(outcome.oldTrash.errors).length, "transaction")} kept, see keeper log` : ""}`
+        : "",
       stale.length ? `Skipped ${stale.join(", ")}: changed since the scan, r rescans` : "",
       outcome.failed.length ? `${count(outcome.failed.length, "finding")} failed, see keeper log` : "",
     ]
@@ -111,7 +114,7 @@ const stamp = (iso: string | number) => {
 const weekday = (iso: string) => new Date(iso).toLocaleDateString("en-GB", { weekday: "short" });
 const describe = (event: Event) =>
   event.event === "apply"
-    ? `moved ${size(event.bytes ?? 0)} to trash`
+    ? `removed ${size(event.bytes ?? 0)}`
     : event.event === "purge"
       ? `purge freed ${size(event.bytes ?? 0)}`
       : "undo restored a transaction";

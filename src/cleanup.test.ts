@@ -201,7 +201,7 @@ test("large: stale files are offered, while recent, hidden, repo and download fi
   mkdirSync(join(home, "code", "repo", ".git"), { recursive: true });
   const { findings } = await scan(ctx, ["large"]);
   expect(findings.map((finding) => finding.paths[0])).toEqual([stale]);
-  expect(findings[0]).toMatchObject({ risk: "medium", action: "trash", explicit: true });
+  expect(findings[0]).toMatchObject({ risk: "medium", action: "delete", explicit: true });
   expect(findings[0] && bulkEligible(findings[0])).toBe(false);
 });
 

@@ -14,7 +14,7 @@ Finds disposable data on an Arch machine and removes it through a reviewable pla
 ## Layout
 
 - `src/scanners.ts`: read-only findings and their blockers
-- `src/ops.ts`: plans, apply, trash, undo, purge
+- `src/ops.ts`: plans, apply and deletion, and emptying the trash older versions kept
 - `src/ledger.ts`: holds, claims, audit log, lock
 - `src/usage.ts`: last-seen ledger of running executables, folded to packages; written by `keeper sample`, read by `apps`; coverage comes from the hours actually sampled, never from `since`
 - `src/cli.ts`: argument parsing, output, exit codes
@@ -37,7 +37,8 @@ Finds disposable data on an Arch machine and removes it through a reviewable pla
 - A merged PR proves a worktree only when its head is the local commit, or holds it as an ancestor while the checkout has unpushed commits, because branch names get reused. A PR rebased before merging proves it instead when every file the local commits changed is identical in its merge commit. Only that proof outruns the age window: a branch just cut from main is contained in main too.
 - keeper never starts an LLM. The calling agent judges, and a hold is the only verdict it can give, so judgement can add a blocker but never clear one.
 - An agent's hold beats every scanner. Mutations go through `withLock` and write to the audit log.
-- Delete through trash. Only `purge` is final, so branch deletion and `purgeHook` run there.
+- `apply` deletes for good, with no trash. Right before each deletion it re-checks for a live process and a mount
+  inside the path, and runs `deleteHook` for a worktree. Every deleted path and its bytes go to the audit log.
 - Tests pass an empty environment to `defaultPaths`, so `XDG_*` cannot point them at real config.
 
 ## Standards

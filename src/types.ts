@@ -1,4 +1,4 @@
-export const schemaVersion = 7;
+export const schemaVersion = 8;
 
 export const categories = [
   "worktree",
@@ -29,10 +29,10 @@ export type Risk = (typeof risks)[number];
 /**
  * `report` findings carry evidence for a person and can never be planned.
  * `renice` is the only action that changes no data, which is why it is medium risk rather than low: `auto` runs it never.
- * `stop` ends a process nobody can reach: a busy orphan whose terminal is gone, or an idle one holding memory. It cannot be undone, so it is medium risk and planned only by its id.
+ * `stop` ends a process nobody can reach: a busy orphan whose terminal is gone, or an idle one holding memory. It loses whatever the process was doing, so it is medium risk and planned only by its id.
  */
 export type Action =
-  | "trash"
+  | "delete"
   | "paccache"
   | "remove-packages"
   | "uv-prune"
@@ -67,9 +67,9 @@ export interface Finding {
    * them, because a person deciding "medium risk is fine" has not seen which game data or app it would remove.
    */
   explicit?: true;
-  /** Git common dir, so purge can prune the worktree's metadata and undo can still restore it first. */
+  /** Git common dir, so deleting the worktree also prunes its metadata. */
   gitDir?: string;
-  /** Branch and commit of a worktree, so purge deletes the local branch only if it has not moved. */
+  /** Branch and commit of a worktree, so deleting it also deletes the local branch, only if it has not moved. */
   branch?: string;
   head?: string;
   /** Files and directories the paths hold. On a tmpfs with a quota this, not bytes, is often what runs out. */
@@ -114,32 +114,6 @@ export interface Plan {
   appStaleDays?: number;
 }
 
-export interface TrashEntry {
-  original: string;
-  trashed: string;
-  bytes: number;
-  gitDir?: string;
-  branch?: string;
-  head?: string;
-}
-
-export interface Transaction {
-  schemaVersion: number;
-  id: string;
-  appliedAt: string;
-  entries: TrashEntry[];
-  removedPackages: string[];
-  /** Priority changes are the only mutation undo can reverse in place, so the old value is kept. */
-  reniced: Reniced[];
-}
-
-export interface Reniced {
-  pid: number;
-  nice: number;
-  /** The nice was the autogroup's, set through /proc/PID/autogroup, rather than the process's own. */
-  autogroup?: true;
-}
-
 export function eligible(finding: Finding): boolean {
   return finding.action !== "report" && finding.blockers.length === 0;
 }
@@ -155,15 +129,15 @@ export function count(n: number, noun: string, plural = `${noun}s`): string {
 }
 
 /**
- * Drops findings whose every path sits inside another trashed finding, such as a worktree's own build output when
- * the worktree is chosen too. Moving the parent takes them, so counting both would report the space twice.
+ * Drops findings whose every path sits inside another deleted finding, such as a worktree's own build output when
+ * the worktree is chosen too. Deleting the parent takes them, so counting both would report the space twice.
  */
 export function outermost(findings: readonly Finding[]): Finding[] {
   const roots = findings
-    .filter((f) => f.action === "trash")
+    .filter((f) => f.action === "delete")
     .flatMap((f) => f.paths.map((path) => ({ path, id: f.id })));
   const inside = (f: Finding) =>
-    f.action === "trash" &&
+    f.action === "delete" &&
     f.paths.every((path) => roots.some((root) => root.id !== f.id && path.startsWith(`${root.path}/`)));
   return findings.filter((f) => !inside(f));
 }

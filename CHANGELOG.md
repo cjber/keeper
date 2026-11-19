@@ -7,6 +7,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+- **A worktree still on a default-branch commit is offered after 1 idle day instead of 7.** A clean checkout whose
+  commits are all on the default branch holds nothing it lacks, so branches agents cut and never used no longer pile
+  up for a week. A lower `--stale-days` still wins, and a hold, a running process or an open PR still blocks.
+
 ## [0.7.0] - 2026-11-19
 
 - **`keeper apply` deletes at once.** Removals no longer go to a trash that frees nothing until a purge, so the space a

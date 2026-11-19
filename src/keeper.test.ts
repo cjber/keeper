@@ -1224,18 +1224,74 @@ test("planning by id skips an unknown or blocked id and keeps the rest", () => {
 });
 
 test("a reused branch name is not proof, because the commit differs", async () => {
-  await worktree("reused");
+  const path = await worktree("reused");
+  await commitLocally(path);
   const report = await scan({ ...ctx, pullRequests: pull("MERGED", "0".repeat(40), "b-reused") }, ["worktree"]);
   expect(report.findings[0]?.risk).toBe("medium");
   expect(report.findings[0]?.blockers.join()).toContain("touched");
 });
 
-test("an open PR blocks the worktree", async () => {
+async function commitLocally(path: string) {
+  writeFileSync(join(path, "local"), "y");
+  await git(path, "add", "local");
+  await git(path, "commit", "-qm", "local");
+}
+
+function ageHead(name: string) {
+  age(join(home, name, ".git/worktrees", name.replace(/-main$/, ""), "logs/HEAD"));
+}
+
+test("an open PR blocks a worktree with a commit on no remote", async () => {
   const path = await worktree("open");
+  await commitLocally(path);
   age(path);
-  age(join(home, "open-main/.git/worktrees/open/logs/HEAD"));
+  ageHead("open-main");
   const report = await scan({ ...ctx, pullRequests: pull("OPEN", "x", "b-open") }, ["worktree"]);
-  expect(report.findings[0]?.blockers).toEqual(["PR #7 is open, merge or close it"]);
+  expect(report.findings[0]?.blockers).toContain("PR #7 is open, merge or close it");
+  expect(report.findings[0]?.risk).toBe("medium");
+});
+
+test("an open PR does not block a clean worktree whose commits are all on a remote", async () => {
+  const path = await worktree("pushed");
+  age(path);
+  ageHead("pushed-main");
+  const report = await scan({ ...ctx, pullRequests: pull("OPEN", "x", "b-pushed") }, ["worktree"]);
+  expect(report.findings[0]).toMatchObject({ risk: "low", reason: "Every commit is on a remote", blockers: [] });
+});
+
+test("a pushed, clean worktree touched an hour ago waits for the short idle window", async () => {
+  await worktree("recent");
+  const report = await scan({ ...ctx, pullRequests: pull("OPEN", "x", "b-recent") }, ["worktree"]);
+  expect(report.findings[0]?.blockers).toEqual(["touched today, offered after 1 idle day"]);
+});
+
+test("a pushed worktree idle for more than a day needs no week", async () => {
+  const path = await worktree("daily");
+  const twoDays = new Date(Date.now() - 2 * 86_400_000);
+  utimesSync(path, twoDays, twoDays);
+  utimesSync(join(home, "daily-main/.git/worktrees/daily/logs/HEAD"), twoDays, twoDays);
+  const report = await scan({ ...ctx, pullRequests: pull("OPEN", "x", "b-daily") }, ["worktree"]);
+  expect(report.findings[0]).toMatchObject({ risk: "low", blockers: [] });
+});
+
+test("uncommitted files block a pushed worktree with an open PR", async () => {
+  const path = await worktree("dirty-pushed");
+  writeFileSync(join(path, "scratch"), "z");
+  age(path);
+  ageHead("dirty-pushed-main");
+  const report = await scan({ ...ctx, pullRequests: pull("OPEN", "x", "b-dirty-pushed") }, ["worktree"]);
+  expect(report.findings[0]?.risk).toBe("medium");
+  expect(report.findings[0]?.blockers.join()).toContain("uncommitted");
+  expect(report.findings[0]?.blockers.join()).toContain("PR #7 is open");
+});
+
+test("a detached HEAD on a remote commit counts as pushed", async () => {
+  const path = await worktree("detached");
+  await git(path, "checkout", "-q", "--detach");
+  age(path);
+  ageHead("detached-main");
+  const report = await scan({ ...ctx, pullRequests: async () => [] }, ["worktree"]);
+  expect(report.findings[0]).toMatchObject({ risk: "low", blockers: [] });
 });
 
 test("a new branch cut from main keeps the age window, and only an idle one is low risk", async () => {

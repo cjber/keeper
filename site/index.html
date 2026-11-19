@@ -184,7 +184,8 @@ footer { margin-top: 72px; color: var(--muted); font-size: 13px; text-align: cen
 </ul>
 <p>Apps, large files, downloads, screenshots and duplicates are personal or application data, so they are only planned when you name their id. <code>keeper plan</code> with no ids never takes them, even with <code>--max-risk medium</code>.</p>
 <p><code>large</code> and <code>duplicates</code> skip application trees: anything under a Wine prefix, a Steam, Lutris, Heroic or GOG library, a <code>~/Games</code> style library, flatpak data or a VM store, and any directory holding an install marker such as a <code>.exe</code>, <code>.toc</code> or <code>.pak</code>. A duplicate is offered only when the copy keeper keeps is in a different top-level folder of your own documents: <code>Documents</code>, <code>Pictures</code>, <code>Music</code>, <code>Videos</code>, <code>Downloads</code> or <code>Desktop</code>.</p>
-<p>These block a worktree whatever its age: uncommitted files, commits on no remote, a running process inside it, an open pull request, a rebase, merge, bisect or cherry-pick in progress, and any hold.</p>
+<p>These block a worktree whatever its age: uncommitted files, commits on no remote, a running process inside it, an open pull request while it has commits on no remote or uncommitted files, a rebase, merge, bisect or cherry-pick in progress, and any hold.</p>
+<p>A clean worktree whose every commit is on a remote is low risk even while its pull request is open, and is offered after 1 idle day instead of <code>--stale-days</code>.</p>
 <p>Sizes in scans and plans are uncompressed, so a compressing filesystem such as btrfs frees less than they show.</p>
 
 <footer>MIT licensed. <a href="https://github.com/cjber/keeper">GitHub</a> and <a href="https://cjber.dev">cjber.dev</a><br>Made by Cillian Berragan</footer>

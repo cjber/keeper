@@ -73,7 +73,7 @@ const help = `keeper keeps an Arch machine clean. Output is JSON when stdout is 
 
 Sizes are uncompressed, so btrfs with compression frees less than they show. apply deletes for good, with nothing to
 restore, so the safety lives in what a plan may include: blockers, holds and proof.
-Worktrees are low risk only with proof: a merged PR with the same commit or the same changed files, or every commit on the default branch.
+Worktrees are low risk only with proof: a merged PR with the same commit or the same changed files, every commit on the default branch, or a clean tree with every commit on a remote after 1 idle day.
 Exit codes: 0 ok, 1 error, 2 usage, 3 needs --yes, 4 plan is entirely stale, 5 partly done: some ids skipped or some items not applied, so scan again, 6 another run holds the lock, so retry.
 Set KEEPER_ACTOR to name yourself in holds, claims and the log.
 Agents: npx skills add cjber/keeper installs the keeper skill, which says when to hold, plan and apply.

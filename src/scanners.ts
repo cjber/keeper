@@ -9,6 +9,11 @@ import { type Category, categories, count, type Finding, type Risk, type Scan, s
 import { coveredDays, readUsage, type UsageLedger } from "./usage";
 
 export const defaultStaleDays = 7;
+/**
+ * Idle window for a worktree whose work is all on a remote. Nothing is lost by deleting it, since `git worktree add`
+ * recreates it from the branch, so it only needs to outlast a session that is still using it between commits.
+ */
+export const pushedIdleDays = 1;
 /** Apps are used less often than files, so an app is judged unused over a longer window by default. */
 export const defaultAppStaleDays = 90;
 /** Large files are offered at this apparent size or above, unless the config says otherwise. */
@@ -531,7 +536,10 @@ async function inspectWorktree(path: string, context: Context, lookup: PullReque
     blockers.push("its pull requests could not be listed, so neither a merge nor an open PR is known. Scan again");
   const pullRequests = listed ?? [];
   const open = pullRequests.find((pr) => pr.state === "OPEN" && pr.headRefName === branch);
-  if (open) blockers.push(`PR #${open.number} is open, merge or close it`);
+  // Every commit on a remote, with nothing uncommitted: the branch and its PR live on the remote, so nothing is lost.
+  // Detached HEADs count too, because the rev-list covers HEAD itself.
+  const pushed = valid && !status.stdout && ahead.code === 0 && ahead.stdout === "0" && blockers.length === 0;
+  if (open && !pushed) blockers.push(`PR #${open.number} is open, merge or close it`);
   const ownCommits = ahead.code === 0 && Number(ahead.stdout) > 0;
   const merged = await findMerged(pullRequests, branch, head, git, ownCommits);
   const mainlineRef = defaultBranch.stdout;
@@ -548,15 +556,25 @@ async function inspectWorktree(path: string, context: Context, lookup: PullReque
     Boolean(mainlineRef) &&
     branch !== mainline &&
     (await git("merge-base", "--is-ancestor", "HEAD", mainlineRef)).code === 0;
-  const proof = merged ? `Merged in PR #${merged.number}` : contained ? "Every commit is on the default branch" : "";
+  const proof = merged
+    ? `Merged in PR #${merged.number}`
+    : contained
+      ? "Every commit is on the default branch"
+      : pushed
+        ? "Every commit is on a remote"
+        : "";
   // Commits and checkouts move logs/HEAD. The index will not do: any `git status` rewrites it.
   const touched = Math.min(
     ageDays(path, context.now),
     gitDir ? headAge(gitDir, context.now) : Number.POSITIVE_INFINITY,
   );
-  // Only a merge outruns the age window. A branch just cut from main is also contained in it, and is about to be used,
-  // so an unused one waits a shorter window rather than none.
-  const window = contained ? Math.min(context.staleDays, containedDays) : context.staleDays;
+  // Only a merge outruns the age window. Pushed work loses nothing when deleted, and a branch just cut from main is
+  // contained in it and about to be used, so both wait a short window rather than staleDays.
+  const window = pushed
+    ? Math.min(pushedIdleDays, context.staleDays)
+    : contained
+      ? Math.min(context.staleDays, containedDays)
+      : context.staleDays;
   if (!merged && touched < window) blockers.push(touchedAgo(touched, window));
   return {
     ...findingId("worktree", path, `${head}\0${status.stdout}\0${proof}\0${open?.number ?? ""}`),

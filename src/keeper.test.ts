@@ -1249,7 +1249,7 @@ test("a new branch cut from main keeps the age window, and only an idle one is l
   expect(idle).toMatchObject({ risk: "low", blockers: [] });
 });
 
-test("an unused branch cut from main is offered after one idle day, but any pull request keeps the full window", async () => {
+test("a branch still on main is offered after one idle day, not the full window", async () => {
   const path = await worktree("unused");
   await git(join(home, "unused-main"), "remote", "set-head", "origin", "main");
   const today = (await scan(ctx, ["worktree"])).findings[0];
@@ -1259,8 +1259,6 @@ test("an unused branch cut from main is offered after one idle day, but any pull
   utimesSync(join(home, "unused-main/.git/worktrees/unused/logs/HEAD"), twoDaysAgo, twoDaysAgo);
   const idle = (await scan(ctx, ["worktree"])).findings[0];
   expect(idle).toMatchObject({ risk: "low", blockers: [] });
-  const closed = (await scan({ ...ctx, pullRequests: pull("CLOSED", "x", "b-unused") }, ["worktree"])).findings[0];
-  expect(closed?.blockers).toEqual(["touched 2 days ago, offered after 7 idle days"]);
 });
 
 test("a rebase in progress blocks a clean, pushed worktree", async () => {

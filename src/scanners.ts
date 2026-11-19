@@ -18,10 +18,10 @@ const transcriptDays = 14;
 /** Temp entries are disposable by definition and a test suite leaks thousands a day, so a day idle is enough. */
 const tmpStaleDays = 1;
 /**
- * A checkout still on a default-branch commit, with no pull request for its branch, holds nothing the default branch
- * lacks. One idle day gives the agent that just cut it time to start, without letting abandoned ones pile up.
+ * A clean checkout still on a default-branch commit holds nothing the default branch lacks, whatever its pull requests
+ * say. One idle day gives the agent that just cut it time to start, without letting abandoned ones pile up.
  */
-const unusedBranchDays = 1;
+const containedDays = 1;
 const logCapBytes = 50 * 1024 ** 2;
 export const logKeepBytes = 5 * 1024 ** 2;
 const buildDirs = /\/(target|node_modules|\.next|\.turbo|\.venv)$/;
@@ -556,8 +556,7 @@ async function inspectWorktree(path: string, context: Context, lookup: PullReque
   );
   // Only a merge outruns the age window. A branch just cut from main is also contained in it, and is about to be used,
   // so an unused one waits a shorter window rather than none.
-  const unused = contained && listed !== undefined && pullRequests.length === 0;
-  const window = unused ? Math.min(context.staleDays, unusedBranchDays) : context.staleDays;
+  const window = contained ? Math.min(context.staleDays, containedDays) : context.staleDays;
   if (!merged && touched < window) blockers.push(touchedAgo(touched, window));
   return {
     ...findingId("worktree", path, `${head}\0${status.stdout}\0${proof}\0${open?.number ?? ""}`),

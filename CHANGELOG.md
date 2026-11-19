@@ -7,10 +7,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
-- **An unused worktree is offered after 1 idle day instead of 7.** A checkout still on a default-branch commit, with no
-  pull request for its branch, holds nothing the default branch lacks, so abandoned ones no longer pile up for a week.
-  A branch with any pull request, open or closed, keeps the full `--stale-days` window, and a lower `--stale-days` still
-  wins.
+- **A worktree still on a default-branch commit is offered after 1 idle day instead of 7.** A clean checkout whose
+  commits are all on the default branch holds nothing it lacks, so branches agents cut and never used no longer pile
+  up for a week. A lower `--stale-days` still wins, and a hold, a running process or an open PR still blocks.
 
 ## [0.7.0] - 2026-11-19
 

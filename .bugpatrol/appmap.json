@@ -34,7 +34,7 @@
     },
     {
       "name": "Wizard after apply",
-      "description": "Wizard list after Enter applies a selection, with a message naming the undo transaction.",
+      "description": "Wizard list after Enter applies a selection, with a message naming the space removed.",
       "platform": "cli",
       "firstSeenAt": "2026-11-02T10:29:05.734Z",
       "id": "wizard-after-apply",
@@ -60,7 +60,7 @@
     },
     {
       "name": "Wizard free space history",
-      "description": "Free space history with marks for applies, purges and undo.",
+      "description": "Free space history with marks for applies and nightly runs.",
       "platform": "cli",
       "firstSeenAt": "2026-11-02T11:58:21.449Z",
       "id": "wizard-history",

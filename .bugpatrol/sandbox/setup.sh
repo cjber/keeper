@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds a throwaway home for keeper to scan: worktrees in each state keeper judges, build output,
 # caches and leftovers. Everything keeper could change lives under it, and stubs stand in for the
-# system commands its actions call, so a patrol can apply, undo and purge without touching the machine.
+# system commands its actions call, so a patrol can apply without touching the machine.
 set -eu
 root=${KEEPER_PATROL_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/keeper/patrol}
 case "$root" in

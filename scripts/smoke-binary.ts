@@ -39,8 +39,7 @@ try {
   const plan = JSON.parse(keeper("plan", finding.id, "--stale-days", "0"));
   const applied = JSON.parse(keeper("apply", plan.id, "--yes"));
   if (Bun.spawnSync(["test", "-e", batch]).exitCode === 0) throw new Error("apply left the path in place");
-  keeper("undo", applied.transaction);
-  if (Bun.spawnSync(["test", "-f", join(batch, "out")]).exitCode !== 0) throw new Error("undo did not restore it");
+  if (applied.deleted?.[0]?.paths?.[0] !== batch) throw new Error("apply did not report what it deleted");
 
   tmux("new-session", "-d", "-s", "wizard", "-x", "100", "-y", "24", `'${executable}'`);
   const deadline = Date.now() + 20_000;
@@ -51,7 +50,7 @@ try {
   }
   if (!screen.includes("q/esc quit")) throw new Error(`the wizard did not start: ${screen}`);
   tmux("send-keys", "-t", "wizard", "q");
-  console.log("version, help, schema, status, scan, plan, apply, undo and the wizard passed");
+  console.log("version, help, schema, status, scan, plan, apply and the wizard passed");
 } finally {
   tmux("kill-server");
   rmSync(scratch, { recursive: true, force: true });

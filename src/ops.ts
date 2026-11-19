@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import {
-  existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -10,7 +10,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { forget, forgetUnder } from "./cache";
 import { audit, withLock } from "./ledger";
 import type { Config, Context } from "./scanners";
@@ -24,21 +24,8 @@ import {
   lowestPriority,
   scan,
 } from "./scanners";
-import { defaultPaths, expandHome, liveFiles, niceness, type Paths, run, waitFor } from "./system";
-import {
-  bulkEligible,
-  count,
-  eligible,
-  type Finding,
-  outermost,
-  type Plan,
-  type Reniced,
-  type Risk,
-  risks,
-  schemaVersion,
-  type Transaction,
-  type TrashEntry,
-} from "./types";
+import { defaultPaths, expandHome, holders, liveFiles, niceness, type Paths, run, sizes } from "./system";
+import { bulkEligible, eligible, type Finding, outermost, type Plan, type Risk, risks, schemaVersion } from "./types";
 
 export function loadConfig(paths: Paths): Config {
   let parsed: Partial<Config>;
@@ -139,67 +126,28 @@ export function readPlan(paths: Paths, id: string): Plan {
   return JSON.parse(readFileSync(join(paths.state, "plans", `${id}.json`), "utf8")) as Plan;
 }
 
+/** One finding's removal, as the log keeps it: deletion is final, so this is the only record of what went. */
+export interface Deleted {
+  id: string;
+  paths: string[];
+  /** Uncompressed size the finding measured. A finding that failed partway records 0, because its share is unknown. */
+  bytes: number;
+}
+
 export interface Outcome {
   applied: string[];
   /** Plan items that changed or gained a blocker since planning. Nothing was done to them. */
   stale: string[];
   failed: { id: string; error: string }[];
   bytes: number;
+  /** Paths deleted, by finding, including what a finding that failed partway had already removed. */
+  deleted: Deleted[];
   /** Processes whose priority was lowered, which frees no space but is the point of a quiet machine again. */
   reniced: number;
-  /** Orphaned processes that were ended. Unlike a renice, undo cannot bring them back. */
+  /** Orphaned processes that were ended. */
   stopped: number;
-  transaction?: string;
-}
-
-/**
- * Paths per `mv`, and their argv bytes, well under ARG_MAX. A temp dir sweep moves tens of thousands, and one process
- * per path takes minutes.
- */
-const moveBatch = 1000;
-const moveBatchBytes = 128 * 1024;
-
-type Move = [from: string, to: string];
-
-/**
- * `mv` rather than rename, because a configured root or the temp dir may sit on a different filesystem from the trash.
- * Moves that keep their name and share both parents go in batches. Returns the moves that happened and the first error,
- * so a batch that failed partway still records what it took. `--no-clobber` keeps a path that appeared meanwhile.
- */
-async function moveAll(moves: readonly Move[]): Promise<{ moved: Move[]; error?: string }> {
-  const batches = new Map<string, Move[]>();
-  for (const move of moves) {
-    const [from, to] = move;
-    const key = basename(from) === basename(to) ? `${dirname(from)}\0${dirname(to)}` : `${from}\0${to}`;
-    const batch = batches.get(key);
-    if (batch) batch.push(move);
-    else batches.set(key, [move]);
-  }
-  const moved: Move[] = [];
-  let error: string | undefined;
-  for (const batch of batches.values()) {
-    for (let start = 0; start < batch.length; ) {
-      let end = start + 1;
-      for (let bytes = 0; end < batch.length && end - start < moveBatch; end++) {
-        bytes += (batch[end] as Move)[0].length + 1;
-        if (bytes > moveBatchBytes) break;
-      }
-      const chunk = batch.slice(start, end);
-      start = end;
-      const [from, to] = chunk[0] as Move;
-      mkdirSync(dirname(to), { recursive: true });
-      const argv =
-        basename(from) === basename(to)
-          ? ["mv", "--no-clobber", "--target-directory", dirname(to), "--", ...chunk.map(([source]) => source)]
-          : ["mv", "--no-clobber", "--no-target-directory", "--", from, to];
-      const result = await run(argv);
-      const done = chunk.filter(([source, target]) => existsSync(target) && !existsSync(source));
-      moved.push(...done);
-      if (done.length < chunk.length)
-        error ??= result.stderr || `${count(chunk.length - done.length, "path")} did not move`;
-    }
-  }
-  return { moved, error };
+  /** The trash an older keeper kept, deleted by this run. */
+  oldTrash?: OldTrash;
 }
 
 /** Transcripts leave one directory per session behind. rmdir only ever removes an empty directory. */
@@ -263,58 +211,121 @@ async function stop(pid: number): Promise<boolean> {
   return !running(pid);
 }
 
+/** Sanitised, because a hook's stderr ends up in JSON output and the log. */
+async function runDeleteHook(hook: string, path: string): Promise<string | undefined> {
+  const result = await run([hook, path]);
+  if (result.code === 0) return undefined;
+  const stderr = Array.from(result.stderr, (character) => (character < " " || character === "\x7f" ? " " : character))
+    .join("")
+    .trim()
+    .slice(0, 500);
+  return `delete hook ${hook} exited ${result.code}${stderr ? `: ${stderr}` : ""}`;
+}
+
 /**
- * `slot` is the finding's own directory in the transaction, so names from different findings never meet. Returns how
- * many processes it stopped.
+ * Deletes one path for good. A recursive remove does not stop at a mount point, so a directory with a filesystem
+ * mounted at or below it is refused, from a mount table read immediately before each removal. A failed lookup refuses
+ * too. `rm` cannot unlink entries inside a directory it may not write to, so on a refusal every directory the user owns
+ * below the path gets its permissions back and the removal runs once more. The walk happens only then, because most
+ * removals need no repair.
  */
-async function execute(finding: Finding, paths: Paths, tx: Transaction, slot: string): Promise<number> {
+async function removeTree(paths: Paths, path: string): Promise<void> {
+  let directory: boolean;
+  try {
+    directory = lstatSync(path).isDirectory();
+  } catch {
+    return; // already gone, such as a worktree's build output its parent took with it
+  }
+  if (!directory) {
+    rmSync(path, { force: true });
+    return;
+  }
+  const checkMounts = () => {
+    const mounts = mountsWithin(readFileSync(paths.mountinfo, "utf8"), realpathSync(path));
+    if (mounts.length)
+      throw new Error(`a filesystem is mounted at or inside ${path}, unmount it first: ${mounts.join(", ")}`);
+  };
+  checkMounts();
+  try {
+    rmSync(path, { recursive: true, force: true });
+    return;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "EACCES" && code !== "EPERM") throw error;
+  }
+  // `-exec ... ;` runs on a directory before find descends into it, so a tree find could not read opens up as it goes.
+  const locked = ["-type", "d", "-user", String(process.getuid?.()), "!", "-perm", "-u=rwx"];
+  await run(["find", path, "-xdev", ...locked, "-exec", "chmod", "u+rwx", "{}", ";"]);
+  checkMounts();
+  rmSync(path, { recursive: true, force: true });
+}
+
+/**
+ * Drops a deleted worktree's git metadata, then its local branch. Passing the old head makes the branch deletion a
+ * no-op on a branch that moved after the worktree was judged.
+ */
+async function forgetWorktree(gitDir: string, branch?: string, head?: string): Promise<void> {
+  await run(["git", "--git-dir", gitDir, "worktree", "prune"]);
+  if (branch && head) await run(["git", "--git-dir", gitDir, "update-ref", "-d", `refs/heads/${branch}`, head]);
+}
+
+/**
+ * Deletes a finding's paths, recording each in `deleted` as it goes. Nothing can bring them back, so the checks that
+ * matter run right before: the delete hook for a worktree, then whether a running process has its cwd or an open file
+ * inside any path, which the scan judged but which can have changed since.
+ */
+async function remove(finding: Finding, ctx: Context, deleted: string[]): Promise<void> {
+  const { gitDir, branch, head } = finding;
+  const hook = ctx.config.deleteHook;
+  if (gitDir && hook) {
+    for (const path of finding.paths) {
+      const error = await runDeleteHook(expandHome(ctx.paths.home)(hook), path);
+      if (error) throw new Error(error);
+    }
+  }
+  const live = liveFiles();
+  const busy = finding.paths.filter((path) => holders(path, live));
+  if (busy.length) throw new Error(`a running process works in or holds a file in ${busy.join(", ")}`);
+  for (const path of finding.paths) {
+    await removeTree(ctx.paths, path);
+    deleted.push(path);
+    if (finding.category === "transcripts") removeEmptyParents(path, ctx.paths.home);
+  }
+  if (gitDir) await forgetWorktree(gitDir, branch, head);
+}
+
+/** What a finding did besides deleting: processes reniced and processes stopped. */
+async function execute(
+  finding: Finding,
+  ctx: Context,
+  deleted: string[],
+): Promise<{ reniced: number; stopped: number }> {
   if (finding.action === "stop") {
     let stopped = 0;
     for (const pid of finding.pids ?? []) if (await stop(pid)) stopped++;
     if (stopped === 0) throw new Error("the process had already exited");
-    return stopped;
+    return { reniced: 0, stopped };
   }
   if (finding.action === "renice") {
-    let changed = 0;
+    let reniced = 0;
     for (const pid of [...(finding.pids ?? []), ...(finding.parent ? [finding.parent] : [])]) {
       const nice = niceness(pid);
       if (nice === undefined || nice >= lowestPriority) continue; // gone, or already at the bottom
       if ((await run(["renice", "-n", String(lowestPriority), "-p", String(pid)])).code !== 0) continue;
-      tx.reniced.push({ pid, nice });
-      changed++;
+      reniced++;
     }
-    // A process's own nice only competes inside its session's autogroup, so the group is lowered too. Raising the
-    // nice of an autogroup needs no root, which also makes it the part undo can always put back.
+    // A process's own nice only competes inside its session's autogroup, so the group is lowered too.
     for (const pid of finding.autogroups ?? []) {
       const nice = autogroupNice(pid);
       if (nice === undefined || nice >= lowestPriority || !(await setAutogroupNice(pid, lowestPriority))) continue;
-      tx.reniced.push({ pid, nice, autogroup: true });
-      changed++;
+      reniced++;
     }
-    if (changed === 0) throw new Error("no process in this group could be reniced");
-    return 0;
+    if (reniced === 0) throw new Error("no process in this group could be reniced");
+    return { reniced, stopped: 0 };
   }
-  if (finding.action === "trash") {
-    // Names repeat across a finding's parents, so each repeat goes in a slot of its own.
-    const seen = new Map<string, number>();
-    // A worktree and its own build output can share a plan, so the parent's move may have taken a path.
-    const pairs = finding.paths
-      .filter((path) => existsSync(path))
-      .map((original) => {
-        const name = basename(original);
-        const repeat = seen.get(name) ?? 0;
-        seen.set(name, repeat + 1);
-        return [original, join(repeat ? `${slot}.${repeat}` : slot, name)] satisfies Move;
-      });
-    const { moved, error } = await moveAll(pairs);
-    const { gitDir, branch, head } = finding;
-    const bytes = finding.paths.length === 1 ? finding.bytes : 0;
-    for (const [original, trashed] of moved) {
-      tx.entries.push({ original, trashed, bytes, gitDir, branch, head });
-      if (finding.category === "transcripts") removeEmptyParents(original, paths.home);
-    }
-    if (error) throw new Error(error);
-    return 0;
+  if (finding.action === "delete") {
+    await remove(finding, ctx, deleted);
+    return { reniced: 0, stopped: 0 };
   }
   if (finding.action === "truncate") {
     for (const path of finding.paths) {
@@ -323,7 +334,7 @@ async function execute(finding: Finding, paths: Paths, tx: Transaction, slot: st
       const tail = await Bun.file(path).slice(start).arrayBuffer();
       writeFileSync(path, Buffer.from(tail));
     }
-    return 0;
+    return { reniced: 0, stopped: 0 };
   }
   const command: Record<string, string[]> = {
     paccache: ["sudo", "-n", "paccache", "-rk1"],
@@ -339,14 +350,15 @@ async function execute(finding: Finding, paths: Paths, tx: Transaction, slot: st
   if (!argv) throw new Error(`action ${finding.action} cannot be applied`);
   const result = await run(argv);
   if (result.code !== 0) throw new Error(result.stderr || `${argv[0]} exited ${result.code}`);
-  if (finding.action === "remove-packages") tx.removedPackages.push(...finding.packages);
-  return 0;
+  return { reniced: 0, stopped: 0 };
 }
 
 /** Rescans and re-matches ids first: a plan is approval for the state it saw, not for whatever is there now. */
 export function applyPlan(plan: Plan, ctx: Context): Promise<Outcome> {
   return withLock(ctx.paths, async () => {
+    const oldTrash = await emptyOldTrashUnlocked(ctx.paths, ctx.config);
     const outcome = await applyUnlocked(plan, ctx);
+    if (oldTrash) outcome.oldTrash = oldTrash;
     forget(ctx.paths, plan.categories);
     audit(ctx.paths, "apply", { plan: plan.id, ...outcome });
     return outcome;
@@ -367,185 +379,96 @@ async function applyUnlocked(plan: Plan, ctx: Context): Promise<Outcome> {
       )
     ).findings.map((finding) => [finding.id, finding]),
   );
-  const outcome: Outcome = { applied: [], stale: [], failed: [], bytes: 0, reniced: 0, stopped: 0 };
-  const id = newId();
-  const base = join(ctx.paths.trash, id);
-  mkdirSync(base, { recursive: true });
-  const tx: Transaction = {
-    schemaVersion,
-    id,
-    appliedAt: new Date(ctx.now).toISOString(),
-    entries: [],
-    removedPackages: [],
-    reniced: [],
-  };
-  for (const [index, findingId] of plan.findingIds.entries()) {
+  const outcome: Outcome = { applied: [], stale: [], failed: [], bytes: 0, deleted: [], reniced: 0, stopped: 0 };
+  for (const findingId of plan.findingIds) {
     const finding = current.get(findingId);
     if (!finding || finding.state !== plan.states?.[findingId] || !eligible(finding)) {
       outcome.stale.push(findingId);
       continue;
     }
-    const reniced = tx.reniced.length;
+    const deleted: string[] = [];
     try {
-      outcome.stopped += await execute(finding, ctx.paths, tx, join(base, String(index)));
+      const done = await execute(finding, ctx, deleted);
       outcome.applied.push(findingId);
       outcome.bytes += finding.bytes;
-      outcome.reniced += tx.reniced.length - reniced;
+      outcome.reniced += done.reniced;
+      outcome.stopped += done.stopped;
+      if (deleted.length) outcome.deleted.push({ id: findingId, paths: deleted, bytes: finding.bytes });
     } catch (error) {
       outcome.failed.push({ id: findingId, error: String(error) });
+      if (deleted.length) outcome.deleted.push({ id: findingId, paths: deleted, bytes: 0 });
     }
-    writeJson(join(base, "transaction.json"), tx);
   }
   forgetUnder(
     ctx.paths,
-    tx.entries.map((entry) => entry.original),
+    outcome.deleted.flatMap((entry) => entry.paths),
   );
-  // A finding that failed partway still moved paths, and the transaction is the only way back to them.
-  if (outcome.applied.length === 0 && tx.entries.length === 0) rmSync(base, { recursive: true, force: true });
-  else outcome.transaction = id;
   return outcome;
 }
 
-export function transactions(paths: Paths): Transaction[] {
-  let dirs: string[];
-  try {
-    dirs = readdirSync(paths.trash);
-  } catch {
-    return [];
-  }
-  return dirs.flatMap((dir) => {
-    try {
-      return [JSON.parse(readFileSync(join(paths.trash, dir, "transaction.json"), "utf8")) as Transaction];
-    } catch {
-      return [];
-    }
-  });
+/** A transaction manifest from the trash an older keeper kept. */
+interface OldTransaction {
+  entries: { trashed: string; gitDir?: string; branch?: string; head?: string }[];
 }
 
-/** Raising a nice value back needs root, so an unprivileged attempt is followed by keeper's usual `sudo -n`. */
-async function restorePriority(entry: Reniced): Promise<boolean> {
-  if (entry.autogroup) return setAutogroupNice(entry.pid, entry.nice);
-  const argv = ["renice", "-n", String(entry.nice), "-p", String(entry.pid)];
-  return (await run(argv)).code === 0 || (await run(["sudo", "-n", ...argv])).code === 0;
-}
-
-export interface Undone {
-  restored: string[];
-  removedPackages: string[];
-  reniced: number;
-  stuck: Reniced[];
-}
-
-export function undo(paths: Paths, id: string): Promise<Undone> {
-  return withLock(paths, async () => {
-    const undone = await undoUnlocked(paths, id);
-    // A transaction does not record categories, and restored paths can be in any of them.
-    forget(paths);
-    return undone;
-  });
-}
-
-async function undoUnlocked(paths: Paths, id: string): Promise<Undone> {
-  const tx = transactions(paths).find((candidate) => candidate.id === id);
-  if (!tx) throw new Error(`no transaction ${id}`);
-  // Entries already moved back by an interrupted undo are skipped, so running it again finishes the job.
-  const pending = tx.entries.filter((entry) => existsSync(entry.trashed));
-  const taken = pending.filter((entry) => existsSync(entry.original)).map((entry) => entry.original);
-  if (taken.length) throw new Error(`nothing restored, these paths exist again: ${taken.join(", ")}`);
-  const { moved, error } = await moveAll(pending.map((entry): Move => [entry.trashed, entry.original]));
-  const restored = moved.map(([, original]) => original);
-  if (error) throw new Error(`restored ${restored.length} of ${pending.length}, run undo again to finish: ${error}`);
-  // A process that has since exited cannot be put back, and one at the bottom cannot be raised without root.
-  let reniced = 0;
-  const stuck: Reniced[] = [];
-  for (const entry of tx.reniced ?? []) {
-    if (await restorePriority(entry)) reniced++;
-    else stuck.push(entry);
-  }
-  rmSync(join(paths.trash, id), { recursive: true, force: true });
-  audit(paths, "undo", { transaction: id, restored: restored.length, reniced, stuck: stuck.length });
-  return { restored, removedPackages: tx.removedPackages, reniced, stuck };
-}
-
-/** Deletion is final here, so git metadata for trashed worktrees is pruned only now and undo keeps working until then. */
-export interface Purged {
-  purged: string[];
-  /** Uncompressed size of what was purged, which a compressing filesystem such as btrfs stores in far less. */
+export interface OldTrash {
+  /** Measured before deletion, so the log keeps the last size the old trash had. */
   bytes: number;
-  /** Measured gain in free space. Other writers on the machine can make it lower than what was truly released. */
-  freed: number;
-  /**
-   * Transactions kept because the purge hook failed or their files could not be removed, so the next purge tries them
-   * again.
-   */
-  failed: string[];
-  /** Why each failed transaction was kept, by its id. */
+  transactions: number;
+  /** Transactions kept because the delete hook failed or their files could not be removed, by id, with why. */
   errors: Record<string, string>;
 }
 
-export function purge(
-  paths: Paths,
-  olderThanDays: number,
-  now = Date.now(),
-  selected?: readonly string[],
-): Promise<Purged> {
+/**
+ * Older keeper versions moved removals into a trash and freed nothing until a purge. Each apply deletes what is left
+ * of it, after measuring its size for the report. A worktree in it gets the delete hook, with its path in the trash,
+ * and its git metadata and branch are dropped as for any deleted worktree.
+ */
+export function emptyOldTrash(paths: Paths): Promise<OldTrash | undefined> {
   return withLock(paths, async () => {
-    const result = await purgeUnlocked(paths, olderThanDays, now, selected);
-    if (result.purged.length) audit(paths, "purge", result);
+    const result = await emptyOldTrashUnlocked(paths, loadConfig(paths));
+    if (result) audit(paths, "old-trash", result);
     return result;
   });
 }
 
-/** The hook sees the trashed tree, which still holds whatever it needs to read, such as a worktree's .env. */
-async function runPurgeHook(hook: string, entries: readonly TrashEntry[]): Promise<string | undefined> {
-  for (const entry of entries.filter((item) => item.gitDir)) {
-    const result = await run([hook, entry.trashed, entry.original]);
-    if (result.code !== 0) {
-      const stderr = Array.from(result.stderr, (character) =>
-        character < " " || character === "\x7f" ? " " : character,
-      )
-        .join("")
-        .trim()
-        .slice(0, 500);
-      return `purge hook ${hook} exited ${result.code}${stderr ? `: ${stderr}` : ""}`;
-    }
-  }
-  return undefined;
-}
-
-/**
- * Deletes a trash directory. `rm` cannot unlink entries inside a directory it may not write to, and a trashed tree
- * keeps its modes, so one read-only directory would hold a whole transaction. The trash is keeper's own, so on a
- * refusal every directory the user owns gets its permissions back and the removal runs once more. The walk happens only
- * then, because a purge is usually many gigabytes that need no repair.
- */
-async function removeTrash(paths: Paths, dir: string): Promise<void> {
-  const checkMounts = () => {
-    // Read immediately before each removal, including the retry after an awaited permission repair.
-    // A failed mount-table lookup throws too, keeping the transaction.
-    const mounts = mountsWithin(readFileSync(paths.mountinfo, "utf8"), realpathSync(dir));
-    if (mounts.length)
-      throw new Error(`a filesystem is mounted at or inside it, unmount it first: ${mounts.join(", ")}`);
-  };
-  checkMounts();
+async function emptyOldTrashUnlocked(paths: Paths, config: Config): Promise<OldTrash | undefined> {
+  let ids: string[];
   try {
-    rmSync(dir, { recursive: true, force: true });
-    return;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "EACCES" && code !== "EPERM") throw error;
+    ids = readdirSync(paths.oldTrash);
+  } catch {
+    return undefined;
   }
-  // `-exec ... ;` runs on a directory before find descends into it, so a tree find could not read opens up as it goes.
-  const locked = ["-type", "d", "-user", String(process.getuid?.()), "!", "-perm", "-u=rwx"];
-  await run(["find", dir, "-xdev", ...locked, "-exec", "chmod", "u+rwx", "{}", ";"]);
-  checkMounts();
-  rmSync(dir, { recursive: true, force: true });
+  const bytes = (await sizes([paths.oldTrash])).get(paths.oldTrash) ?? 0;
+  const errors: Record<string, string> = {};
+  for (const id of ids) {
+    const dir = join(paths.oldTrash, id);
+    let tx: OldTransaction | undefined;
+    try {
+      tx = JSON.parse(readFileSync(join(dir, "transaction.json"), "utf8")) as OldTransaction;
+    } catch {}
+    try {
+      for (const entry of tx?.entries ?? []) {
+        if (!entry.gitDir || !config.deleteHook) continue;
+        const error = await runDeleteHook(expandHome(paths.home)(config.deleteHook), entry.trashed);
+        if (error) throw new Error(error);
+      }
+      await removeTree(paths, dir);
+    } catch (error) {
+      errors[id] = error instanceof Error ? error.message : String(error);
+      continue;
+    }
+    for (const entry of tx?.entries ?? [])
+      if (entry.gitDir) await forgetWorktree(entry.gitDir, entry.branch, entry.head);
+  }
+  if (!Object.keys(errors).length) rmSync(paths.oldTrash, { recursive: true, force: true });
+  return { bytes, transactions: ids.length, errors };
 }
 
 /**
- * Mount points at or below `dir`. A recursive remove does not stop at a mount point, and a directory holding one can
- * be renamed into the trash, so a purge would delete whatever that filesystem holds. The mount point is field 5 of
- * each mountinfo line, with space, tab, newline and backslash escaped as octal.
+ * Mount points at or below `dir`. A recursive remove does not stop at a mount point, so deleting the directory would
+ * delete whatever that filesystem holds. The mount point is field 5 of each mountinfo line, with space, tab, newline
+ * and backslash escaped as octal.
  */
 export function mountsWithin(mountinfo: string, dir: string): string[] {
   const prefix = `${dir}/`;
@@ -557,83 +480,6 @@ export function mountsWithin(mountinfo: string, dir: string): string[] {
       point.replace(/\\([0-7]{3})/g, (_, octal: string) => String.fromCharCode(Number.parseInt(octal, 8))),
     )
     .filter((point) => point === dir || point.startsWith(prefix));
-}
-
-async function purgeUnlocked(
-  paths: Paths,
-  olderThanDays: number,
-  now: number,
-  selected?: readonly string[],
-): Promise<Purged> {
-  const { purgeHook } = loadConfig(paths);
-  const purged: string[] = [];
-  const failed: string[] = [];
-  const errors: Record<string, string> = {};
-  const freeBefore = await freeBytes(paths.home);
-  let bytes = 0;
-  const known = new Map(transactions(paths).map((tx) => [tx.id, tx]));
-  // Every directory in the trash is a transaction, but one whose manifest went missing cannot be found by
-  // `transactions`. An interrupted purge leaves exactly that, so past the window it is still trash: delete it.
-  let ids: string[] = [];
-  try {
-    ids = readdirSync(paths.trash);
-  } catch {}
-  if (selected) {
-    for (const id of selected) {
-      if (!ids.includes(id)) throw new Error(`unknown trash transaction: ${id}`);
-    }
-    ids = [...new Set(selected)];
-  }
-  for (const id of ids) {
-    const dir = join(paths.trash, id);
-    // Clamped, because a file timestamp can land a fraction of a millisecond after the clock read and 0 means everything.
-    const age = Math.max(0, now - statSync(dir).mtimeMs);
-    if (!selected && age < olderThanDays * 86_400_000) continue;
-    const tx = known.get(id);
-    if (tx && purgeHook) {
-      const hookError = await runPurgeHook(expandHome(paths.home)(purgeHook), tx.entries);
-      if (hookError) {
-        failed.push(id);
-        errors[id] = hookError;
-        continue;
-      }
-    }
-    // One transaction that cannot be removed is kept, and the rest are still purged.
-    try {
-      await removeTrash(paths, dir);
-    } catch (error) {
-      failed.push(id);
-      errors[id] = error instanceof Error ? error.message : String(error);
-      continue;
-    }
-    // A manifest-less directory names neither a branch nor a worktree, so there is nothing to prune for it.
-    if (!tx) {
-      purged.push(id);
-      continue;
-    }
-    for (const gitDir of new Set(tx.entries.flatMap((entry) => (entry.gitDir ? [entry.gitDir] : [])))) {
-      // `worktree prune` is repository-wide. Defer it while another recoverable transaction still references the
-      // repository, or it can remove that transaction's admin registration and make its undo unusable.
-      const referencedByRecoverable = [...known.values()].some(
-        (other) =>
-          other.id !== id && !purged.includes(other.id) && other.entries.some((entry) => entry.gitDir === gitDir),
-      );
-      if (!referencedByRecoverable) await run(["git", "--git-dir", gitDir, "worktree", "prune"]);
-    }
-    for (const { gitDir, branch, head } of tx.entries) {
-      // Passing the old value makes this a no-op on a branch that moved after the worktree was trashed.
-      if (gitDir && branch && head)
-        await run(["git", "--git-dir", gitDir, "update-ref", "-d", `refs/heads/${branch}`, head]);
-    }
-    purged.push(id);
-    bytes += tx.entries.reduce((sum, entry) => sum + entry.bytes, 0);
-  }
-  // Flushing a whole filesystem can take seconds, so only a purge that removed something measures.
-  if (purged.length === 0) return { purged, bytes, freed: 0, failed, errors };
-  // Copy-on-write filesystems release space when the transaction commits, so measuring now needs a sync. A busy
-  // disk can take far longer to flush, and the lock is held meanwhile, so past two seconds `freed` may undercount.
-  await waitFor(["sync", "--file-system", paths.home], 2000);
-  return { purged, bytes, freed: Math.max(0, (await freeBytes(paths.home)) - freeBefore), failed, errors };
 }
 
 export function withinRisk(finding: Finding, max: Risk): boolean {

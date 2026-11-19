@@ -1,7 +1,7 @@
 {
   "version": 1,
   "id": "screen-wizard-history",
-  "description": "Free space history with marks for applies, purges and undo.",
+  "description": "Free space history with marks for applies and nightly runs.",
   "platform": "cli",
   "requires": [
     "screen-wizard-space"

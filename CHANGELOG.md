@@ -7,6 +7,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+- **`keeper apply` deletes at once.** Removals no longer go to a trash that frees nothing until a purge, so the space a
+  cleanup reports is free when apply returns. `keeper undo`, `keeper purge` and `--older-days` are gone. Right before
+  each deletion apply checks again that no running process works in or holds a file in the path and that no filesystem
+  is mounted inside it, and refuses the finding if either is true. Every apply logs each deleted path and its bytes in
+  `deleted`. A deleted worktree's git metadata and local branch go with it, the branch only if it has not moved.
+- **The trash an older keeper kept is deleted on the first apply or nightly run.** Its measured size is reported first,
+  in `oldTrash` and the log. A transaction with a filesystem mounted inside it is kept and named in `oldTrash.errors`.
+- **`purgeHook` is now `deleteHook`,** run with the worktree's path right before keeper deletes it. A failing hook keeps
+  the worktree and fails that finding.
+- **The `trash` action is now `delete`,** and the scan schema version is 8.
+
 ## [0.6.0] - 2026-11-16
 
 - **`keeper purge TX...` deletes only the named trash transactions.** It validates the full selection before deleting anything, keeps the existing purge hooks and mount checks, and leaves other recent trash recoverable.

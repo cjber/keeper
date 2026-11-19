@@ -84,12 +84,13 @@ export interface Paths {
   worktrees: string[];
   aurClones: string[];
   state: string;
-  trash: string;
+  /** Where an older keeper kept its trash, which apply now deletes. */
+  oldTrash: string;
   /** The temp dir the `tmp` category scans: $TMPDIR, else /tmp. */
   tmp: string;
   config: string;
   units: string;
-  /** The kernel's mount table, read before a purge so it never deletes a filesystem mounted inside the trash. */
+  /** The kernel's mount table, read before each deletion so it never deletes a filesystem mounted inside a path. */
   mountinfo: string;
 }
 
@@ -99,7 +100,7 @@ export function defaultPaths(home = homedir(), env: Record<string, string | unde
     worktrees: [join(home, ".worktrees")],
     aurClones: [join(home, ".cache/paru/clone"), join(home, ".cache/yay")],
     state: join(env.XDG_STATE_HOME ?? join(home, ".local/state"), "keeper"),
-    trash: join(home, ".local/share/keeper/trash"),
+    oldTrash: join(home, ".local/share/keeper/trash"),
     tmp: resolve(env.TMPDIR || "/tmp"),
     config: join(env.XDG_CONFIG_HOME ?? join(home, ".config"), "keeper/config.toml"),
     units: join(env.XDG_CONFIG_HOME ?? join(home, ".config"), "systemd/user"),

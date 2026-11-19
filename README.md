@@ -8,7 +8,7 @@
 **Keeps an Arch machine clean, with your agent doing the deciding.**
 
 Finds what is safe to remove on a machine where coding agents leave worktrees, build output, caches and transcripts
-behind, moves it to a trash you can undo, and proves its work before it touches anything.
+behind, proves its work before it touches anything, and then deletes it so the space is free at once.
 
 [![ci](https://img.shields.io/github/actions/workflow/status/cjber/keeper/ci.yml?branch=main&style=flat-square&label=ci)](https://github.com/cjber/keeper/actions/workflows/ci.yml)
 ![platform](https://img.shields.io/badge/platform-arch%20linux-475569?style=flat-square)
@@ -26,8 +26,10 @@ behind, moves it to a trash you can undo, and proves its work before it touches 
   wizard is a thin layer over the same calls.
 - **Agents can protect their work.** `keeper hold` outranks every scanner until it expires, so a session can mark a
   worktree it will return to.
-- **Nothing is final until purge.** Paths move to a trash, and `keeper undo` restores them. Local branches are deleted
-  only at purge, and only if they have not moved.
+- **Deleted means free.** `keeper apply` deletes at once, with no trash and nothing to restore, so the space a cleanup
+  reports is space you have. The safety is in what a plan may include: blockers, holds, proof, and a last check right
+  before each deletion that no running process works in the path and no filesystem is mounted inside it. A deleted
+  worktree's local branch goes too, only if it has not moved, and the log records every deleted path and its size.
 - **It renices instead of killing.** When the machine is overloaded, keeper names the commands holding the CPU and can
   lower their priority, so the work survives. With the kernel's autogroup on, it lowers each session's autogroup too,
   never the desktop's; with it off, it lowers the session process the work hangs from, so what it starts next inherits
@@ -77,10 +79,7 @@ agent review             LLM agent, optional. Reads PRs and history, adds keeper
 keeper plan              Code. Saves the eligible findings you chose
      |
      v
-keeper apply PLAN --yes  Code. Rescans, and skips anything that changed since the plan
-     |
-     v
-trash                    keeper undo TX restores. keeper purge deletes for good after 14 days
+keeper apply PLAN --yes  Code. Rescans, skips anything that changed since the plan, and deletes the rest for good
 ```
 
 An agent can only add a blocker. It has no way to clear one, so a bad judgement can keep a file but never lose one.
@@ -91,12 +90,10 @@ skips an id that is gone or blocked, says why, and plans the rest.
 ## Sizes and freed space
 
 Sizes in scans and plans are uncompressed. On btrfs with compression, removing a directory can free far less than its
-size, and worktree build output often stores in under a third of it. Trash sits on the same disk, so nothing is freed
-until `keeper purge`, which reports the measured change in free space as `freed`.
+size, and worktree build output often stores in under a third of it. `keeper auto` reports the free space measured after
+its run.
 
-The `tmp` category is the exception. Its entries usually live on a tmpfs, so applying it copies them into the trash on
-disk, which frees the tmpfs and its inodes at once and keeps undo working until purge. A temp dir often runs out of
-inodes before bytes, so each `tmp` finding also reports `inodes`. Thousands of entries that differ only in a random
+A temp dir often runs out of inodes before bytes, so each `tmp` finding also reports `inodes`. Thousands of entries that differ only in a random
 suffix, such as a test suite's `mkdtemp` leftovers, are one finding, named by their pattern.
 
 ## Temp files
@@ -183,13 +180,13 @@ useful, and `keeper scan --cached` or the wizard reuse them:
 | 1 hour | `build`, `agent`, `transcripts`, `tmp`, `logs`, `docker`, `downloads`, `screenshots` |
 | 6 hours | `aur`, `pacman-cache`, `orphans`, `package-cache`, `snapshots`, `apps`, `large`, `duplicates` |
 
-Applying rescans the categories in its plan first, so a kept finding can never be what decides a removal, and applying,
-undoing or claiming drops the categories it changed. Holds are applied on every read. `keeper scan` without `--cached`
+Applying rescans the categories in its plan first, so a kept finding can never be what decides a removal, and applying
+or claiming drops the categories it changed. Holds are applied on every read. `keeper scan` without `--cached`
 always scans everything.
 
 keeper records free space whenever it scans or changes something, at most every 10 minutes, and hourly once the timer
-is installed. `keeper history` returns those readings with the applies, purges, undos and nightly runs, and the
-wizard draws them.
+is installed. `keeper history` returns those readings with the applies and nightly runs, and the wizard draws
+them.
 
 The `apps` category reads a last-seen ledger that `keeper sample` records hourly: which executables are running, folded
 to their owning package. Use is never judged from atime, and only packages with a `.desktop` launcher count as apps, so
@@ -207,13 +204,10 @@ actually sampled to judge every unseen app against it. With no samples at all, a
 | Command | What it does |
 | --- | --- |
 | `keeper` | Opens the wizard (terminal only) |
-| `keeper status` | Free space, schedule, last run and whether the nightly runs are healthy, holds, trash and missing tools |
+| `keeper status` | Free space, schedule, last run and whether the nightly runs are healthy, holds and missing tools |
 | `keeper scan` | Lists findings and their blockers. `--cached` reuses recently scanned categories |
 | `keeper plan` | Saves a plan of eligible findings. Apps and personal files need their id. Add `--max-risk medium` once medium risk is approved |
-| `keeper apply PLAN --yes` | Rescans, then applies what is unchanged |
-| `keeper undo TX` | Restores a transaction from trash |
-| `keeper purge` | Deletes trash over 14 days old for good |
-| `keeper purge TX...` | Deletes only the named transactions for good, regardless of age |
+| `keeper apply PLAN --yes` | Rescans, then applies what is unchanged. Removals are deleted for good |
 | `keeper hold PATH --reason R` | Protects a path for 1 day at most; `--days N` shortens it |
 | `keeper claim PATH` | Declares your own scratch disposable once stale. A git clone is claimable only under `~/.cache/agent-scratch` or an agent root. Claims record the Codex session when one is available, but they are not leases: use `keeper hold PATH --reason R` while active work must be protected |
 | `keeper release PATH` | Drops a hold or claim |
@@ -221,7 +215,7 @@ actually sampled to judge every unseen app against it. With no samples at all, a
 | `keeper history` | Free space readings and the events that changed it, over 30 days or `--days N` |
 | `keeper sample` | Records free space and which executables are running, as the hourly timer does |
 | `keeper schema` | Describes the CLI as JSON |
-| `keeper auto` | Applies low-risk findings, purges old trash and notifies |
+| `keeper auto` | Applies low-risk findings and notifies |
 | `keeper timer install` | Schedules `keeper auto` daily and `keeper sample` hourly with systemd, or `--cron` |
 | `keeper timer remove` | Removes the schedule |
 
@@ -259,8 +253,8 @@ logs = ["~/scripts/backup.log"]
 warnFreeGb = 20
 # Files under $HOME this large or more are offered by `large` once stale, outside application trees. Default: 524288000 (500M)
 largeBytes = 524288000
-# Run before a worktree is deleted for good, with its trashed path then its original path.
-purgeHook = "~/bin/drop-worktree-db"
+# Run with a worktree's path right before keeper deletes it.
+deleteHook = "~/bin/drop-worktree-db"
 # Have keeper auto return main checkouts to the default branch and fast-forward them.
 freshen = false
 
@@ -280,8 +274,8 @@ medium = "yellow"
 high = "red"
 ```
 
-If `purgeHook` exits non-zero, or a transaction's files cannot be removed, that transaction stays in the trash and purge
-tries again next time: its id is in `failed`, its reason in `errors`, and `keeper purge` exits 5. `freshen` never
+If `deleteHook` exits non-zero, the worktree is kept and apply lists it in `failed` with the hook's exit code and
+the start of its stderr, then exits 5. `freshen` never
 resets, rebases or stashes, and leaves a checkout alone when tracked files changed or a branch has unpushed commits.
 
 ## Requirements

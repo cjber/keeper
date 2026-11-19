@@ -10,6 +10,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - **A worktree still on a default-branch commit is offered after 1 idle day instead of 7.** A clean checkout whose
   commits are all on the default branch holds nothing it lacks, so branches agents cut and never used no longer pile
   up for a week. A lower `--stale-days` still wins, and a hold, a running process or an open PR still blocks.
+- **A clean worktree with every commit on a remote is low risk.** An open pull request no longer blocks it, since the
+  branch and PR stay on the remote and `git worktree add` recreates the worktree. A detached HEAD on a remote commit
+  counts too. It is offered after 1 idle day instead of 7. Commits on no remote or uncommitted files still block.
 
 ## [0.7.0] - 2026-11-19
 

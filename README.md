@@ -146,7 +146,12 @@ keeper keeps is in a different top-level folder of your own documents: `Document
 `Downloads` or `Desktop`.
 
 These block a worktree whatever its age: uncommitted files, commits on no remote, a running process inside it, an open
-pull request, a rebase, merge, bisect or cherry-pick in progress, and any hold.
+pull request while the worktree has commits on no remote or uncommitted files, a rebase, merge, bisect or
+cherry-pick in progress, and any hold.
+
+A clean worktree whose every commit is on a remote, a detached HEAD included, is low risk even while its pull request is
+open: the branch and PR stay on the remote, and `git worktree add` recreates the worktree. It is offered after 1 idle
+day instead of `--stale-days`. A merged PR or the default branch holding every commit needs no idle time.
 
 ## Blocked findings
 

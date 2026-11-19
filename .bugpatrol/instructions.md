@@ -34,7 +34,7 @@ Run keeper only through the sandbox wrappers, from the project root:
    with Enter, show blocked rows with b, read the explanation under the list, and quit with q. Close and reopen it:
    the second open reuses recent categories and says so, and r rescans everything.
 2. **Graphs:** press g for disk by category and why it waits, then g for free space over time. The sandbox seeds a
-   week of readings with nightly runs, an apply and a purge, so the chart has events to mark. g again returns to the list.
+   week of readings with nightly runs, an apply, so the chart has events to mark. g again returns to the list.
 3. **Agent CLI:** `scan` (and `scan --cached`), `plan`, `apply`, `hold`, `claim`, `release`, `status`,
    `log`, `history`, `sample` and `schema`.
    Check that piped output is valid JSON, that errors share one shape with a code, a message and a next step, and

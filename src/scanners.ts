@@ -323,7 +323,7 @@ function touchedAgo(days: number, window: number): string {
 }
 
 const inUse = "in use by a running process, offered once it exits";
-const treeUnwritable = "holds a directory keeper cannot write, so it cannot move whole";
+const treeUnwritable = "holds a directory keeper cannot write, so it cannot delete it whole";
 
 const found = <T>(items: (T | undefined)[]): T[] => items.filter((item): item is T => item !== undefined);
 
@@ -1032,7 +1032,7 @@ async function scanTmp(context: Context): Promise<Finding[]> {
     ...(listening.has(entry.path) ? [tmpSocket] : []),
     ...(alive(lockPid(entry.path)) ? [tmpLockAlive] : []),
     ...(mixed.has(entry.path)
-      ? ["holds files another user owns, or a directory keeper cannot write or read, so it cannot move whole"]
+      ? ["holds files another user owns, or a directory keeper cannot write or read, so it cannot delete it whole"]
       : []),
     ...(references.sessions.has(basename(entry.path)) && entry.path.startsWith(`${claude}/`)
       ? ["its Claude Code session is still running, offered once it exits"]

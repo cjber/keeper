@@ -20,7 +20,7 @@ import { cachedScan, categoriesOf, lastKnown } from "./cache";
 import { claimRefusal, health, runCli, schema, scratchRoots } from "./cli";
 import { freshen } from "./freshen";
 import { actor, BusyError, type Ledger, readLedger, updateLedger, withLock, writeLedger } from "./ledger";
-import { applyPlan, bulkPlan, context, createPlan, emptyOldTrash, loadConfig, pickById } from "./ops";
+import { applyPlan, bulkPlan, context, createPlan, emptyOldTrash, loadConfig, pickById, readPlan } from "./ops";
 import {
   type Context,
   defaultConfig,
@@ -289,7 +289,7 @@ test("claimed output holding a directory keeper cannot write is blocked rather t
   const { findings } = await scan(ctx, ["agent"]);
   chmodSync(locked, 0o700);
   const finding = findings.find((item) => item.paths[0] === scratch);
-  expect(finding?.blockers).toContain("holds a directory keeper cannot write, so it cannot move whole");
+  expect(finding?.blockers).toContain("holds a directory keeper cannot write, so it cannot delete it whole");
   expect(findings.filter(eligible)).toEqual([]);
 });
 
@@ -1398,6 +1398,15 @@ test("a theme sets only the colours it names, and a misspelt one is an error", (
   expect(loadConfig(ctx.paths).theme).toMatchObject({ cursor: "#333333", accent: "cyan", blocked: "" });
   writeFileSync(ctx.paths.config, '[theme]\ncursour = "#333333"\n');
   expect(() => loadConfig(ctx.paths)).toThrow("theme.cursour");
+});
+
+test("an older config's purgeHook still names the delete hook, and a plan from another version is refused", () => {
+  mkdirSync(join(home, ".config/keeper"), { recursive: true });
+  writeFileSync(ctx.paths.config, 'purgeHook = "/bin/true"\n');
+  expect(loadConfig(ctx.paths).deleteHook).toBe("/bin/true");
+  mkdirSync(join(ctx.paths.state, "plans"), { recursive: true });
+  writeFileSync(join(ctx.paths.state, "plans", "old.json"), JSON.stringify({ id: "old", schemaVersion: 7 }));
+  expect(() => readPlan(ctx.paths, "old")).toThrow("another keeper version");
 });
 
 test("a misspelt config key is an error, and configured roots replace the defaults", () => {

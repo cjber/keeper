@@ -377,7 +377,10 @@ async function dispatch(
         };
       }
       const outcome = await applyPlan(plan, context(plan.staleDays, plan.appStaleDays));
-      const partial = outcome.failed.length > 0 || (outcome.stale.length > 0 && outcome.applied.length > 0);
+      const partial =
+        outcome.failed.length > 0 ||
+        Object.keys(outcome.oldTrash?.errors ?? {}).length > 0 ||
+        (outcome.stale.length > 0 && outcome.applied.length > 0);
       const removed = outcome.bytes > 0 ? `, ${size(outcome.bytes)} removed` : "";
       const lowered = outcome.reniced > 0 ? `, ${count(outcome.reniced, "process", "processes")} deprioritised` : "";
       const ended = outcome.stopped > 0 ? `, ${count(outcome.stopped, "process", "processes")} stopped` : "";

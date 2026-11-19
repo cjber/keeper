@@ -74,12 +74,12 @@
     },
     {
       "kind": "run",
-      "command": "K=.bugpatrol/sandbox/keeper; for c in \"bogus\" \"scan --category nope\" \"scan --stale-days abc\" \"apply nosuchplan --yes\" \"undo deadbeef\" \"hold /tmp/keeper-patrol/home\" \"release /tmp/keeper-patrol/home/nothing\" \"plan --max-risk high\" \"purge --older-days -1\"; do echo \"== $c\"; $K $c | cat; echo \"exit=${pipestatus[1]}\"; done 2>&1",
+      "command": "K=.bugpatrol/sandbox/keeper; for c in \"bogus\" \"scan --category nope\" \"scan --stale-days abc\" \"apply nosuchplan --yes\" \"hold /tmp/keeper-patrol/home\" \"release /tmp/keeper-patrol/home/nothing\" \"plan --max-risk high\"; do echo \"== $c\"; $K $c | cat; echo \"exit=${pipestatus[1]}\"; done 2>&1",
       "at": "terminal||e3b0c44298fc"
     },
     {
       "kind": "run",
-      "command": "bash -c 'K=.bugpatrol/sandbox/keeper; for c in \"bogus\" \"apply nosuchplan --yes\" \"undo deadbeef\" \"release /tmp/keeper-patrol/home/nothing\" \"plan\" \"status\" \"log\"; do $K $c >/tmp/keeper-patrol/o.txt 2>/tmp/keeper-patrol/e.txt; echo \"== $c exit=$? stdout=$(head -c 300 /tmp/keeper-patrol/o.txt) stderr=$(head -c 200 /tmp/keeper-patrol/e.txt)\"; done'",
+      "command": "bash -c 'K=.bugpatrol/sandbox/keeper; for c in \"bogus\" \"apply nosuchplan --yes\" \"release /tmp/keeper-patrol/home/nothing\" \"plan\" \"status\" \"log\"; do $K $c >/tmp/keeper-patrol/o.txt 2>/tmp/keeper-patrol/e.txt; echo \"== $c exit=$? stdout=$(head -c 300 /tmp/keeper-patrol/o.txt) stderr=$(head -c 200 /tmp/keeper-patrol/e.txt)\"; done'",
       "at": "terminal||e3b0c44298fc"
     },
     {

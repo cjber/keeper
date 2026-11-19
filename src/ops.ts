@@ -37,13 +37,20 @@ export function loadConfig(paths: Paths): Config {
   }
   // A misspelt key must not leave a path unprotected or a root unscanned without anyone noticing.
   const unknown = [
-    ...Object.keys(parsed).filter((key) => !(key in defaultConfig)),
+    ...Object.keys(parsed).filter((key) => !(key in defaultConfig) && key !== "purgeHook"),
     ...Object.keys(parsed.theme ?? {})
       .filter((key) => !(key in defaultTheme))
       .map((key) => `theme.${key}`),
   ];
   if (unknown.length) throw new Error(`unknown keys in ${paths.config}: ${unknown.join(", ")}`);
-  return { ...defaultConfig, ...parsed, theme: { ...defaultTheme, ...parsed.theme } };
+  // An older config's purgeHook is the same hook under its old name, so an upgrade does not break the config.
+  const { purgeHook, ...rest } = parsed as Partial<Config> & { purgeHook?: string };
+  return {
+    ...defaultConfig,
+    ...rest,
+    deleteHook: rest.deleteHook ?? purgeHook ?? defaultConfig.deleteHook,
+    theme: { ...defaultTheme, ...rest.theme },
+  };
 }
 
 function configuredPaths(paths: Paths, config: Config): Paths {
@@ -123,7 +130,11 @@ export function pickById(
 }
 
 export function readPlan(paths: Paths, id: string): Plan {
-  return JSON.parse(readFileSync(join(paths.state, "plans", `${id}.json`), "utf8")) as Plan;
+  const plan = JSON.parse(readFileSync(join(paths.state, "plans", `${id}.json`), "utf8")) as Plan;
+  // A plan from an older keeper approved moving to a trash, not deleting for good.
+  if (plan.schemaVersion !== schemaVersion)
+    throw new Error(`plan ${id} was made by another keeper version, make a new one`);
+  return plan;
 }
 
 /** One finding's removal, as the log keeps it: deletion is final, so this is the only record of what went. */
@@ -233,8 +244,9 @@ async function removeTree(paths: Paths, path: string): Promise<void> {
   let directory: boolean;
   try {
     directory = lstatSync(path).isDirectory();
-  } catch {
-    return; // already gone, such as a worktree's build output its parent took with it
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return; // gone, such as build output its worktree took with it
+    throw error;
   }
   if (!directory) {
     rmSync(path, { force: true });
@@ -265,8 +277,15 @@ async function removeTree(paths: Paths, path: string): Promise<void> {
  * no-op on a branch that moved after the worktree was judged.
  */
 async function forgetWorktree(gitDir: string, branch?: string, head?: string): Promise<void> {
-  await run(["git", "--git-dir", gitDir, "worktree", "prune"]);
+  const pruned = await run(["git", "--git-dir", gitDir, "worktree", "prune"]);
+  if (pruned.code !== 0) throw new Error(`deleted, but git worktree prune failed: ${pruned.stderr.trim()}`);
   if (branch && head) await run(["git", "--git-dir", gitDir, "update-ref", "-d", `refs/heads/${branch}`, head]);
+}
+
+function assertIdle(paths: readonly string[]): void {
+  const live = liveFiles();
+  const busy = paths.filter((path) => holders(path, live));
+  if (busy.length) throw new Error(`a running process works in or holds a file in ${busy.join(", ")}`);
 }
 
 /**
@@ -277,15 +296,15 @@ async function forgetWorktree(gitDir: string, branch?: string, head?: string): P
 async function remove(finding: Finding, ctx: Context, deleted: string[]): Promise<void> {
   const { gitDir, branch, head } = finding;
   const hook = ctx.config.deleteHook;
+  // Checked before the hook, which may drop external state, and again after it, which can take a while.
+  assertIdle(finding.paths);
   if (gitDir && hook) {
     for (const path of finding.paths) {
       const error = await runDeleteHook(expandHome(ctx.paths.home)(hook), path);
       if (error) throw new Error(error);
     }
+    assertIdle(finding.paths);
   }
-  const live = liveFiles();
-  const busy = finding.paths.filter((path) => holders(path, live));
-  if (busy.length) throw new Error(`a running process works in or holds a file in ${busy.join(", ")}`);
   for (const path of finding.paths) {
     await removeTree(ctx.paths, path);
     deleted.push(path);
@@ -356,8 +375,9 @@ async function execute(
 /** Rescans and re-matches ids first: a plan is approval for the state it saw, not for whatever is there now. */
 export function applyPlan(plan: Plan, ctx: Context): Promise<Outcome> {
   return withLock(ctx.paths, async () => {
-    const oldTrash = await emptyOldTrashUnlocked(ctx.paths, ctx.config);
     const outcome = await applyUnlocked(plan, ctx);
+    // After the rescan, so a stale plan does not empty the trash it never applied anything beside.
+    const oldTrash = await emptyOldTrashUnlocked(ctx.paths, ctx.config);
     if (oldTrash) outcome.oldTrash = oldTrash;
     forget(ctx.paths, plan.categories);
     audit(ctx.paths, "apply", { plan: plan.id, ...outcome });
@@ -412,10 +432,11 @@ interface OldTransaction {
 }
 
 export interface OldTrash {
-  /** Measured before deletion, so the log keeps the last size the old trash had. */
+  /** Measured before deletion, for the transactions deleted, so the log keeps the last size they had. */
   bytes: number;
+  /** Transactions deleted. */
   transactions: number;
-  /** Transactions kept because the delete hook failed or their files could not be removed, by id, with why. */
+  /** Transactions kept because they hold a running process's files, the delete hook failed or their files could not be removed, by id, with why. */
   errors: Record<string, string>;
 }
 
@@ -439,7 +460,9 @@ async function emptyOldTrashUnlocked(paths: Paths, config: Config): Promise<OldT
   } catch {
     return undefined;
   }
-  const bytes = (await sizes([paths.oldTrash])).get(paths.oldTrash) ?? 0;
+  const dirs = ids.map((id) => join(paths.oldTrash, id));
+  const measured = await sizes(dirs);
+  let bytes = 0;
   const errors: Record<string, string> = {};
   for (const id of ids) {
     const dir = join(paths.oldTrash, id);
@@ -448,6 +471,7 @@ async function emptyOldTrashUnlocked(paths: Paths, config: Config): Promise<OldT
       tx = JSON.parse(readFileSync(join(dir, "transaction.json"), "utf8")) as OldTransaction;
     } catch {}
     try {
+      assertIdle([dir]);
       for (const entry of tx?.entries ?? []) {
         if (!entry.gitDir || !config.deleteHook) continue;
         const error = await runDeleteHook(expandHome(paths.home)(config.deleteHook), entry.trashed);
@@ -458,11 +482,12 @@ async function emptyOldTrashUnlocked(paths: Paths, config: Config): Promise<OldT
       errors[id] = error instanceof Error ? error.message : String(error);
       continue;
     }
+    bytes += measured.get(dir) ?? 0;
     for (const entry of tx?.entries ?? [])
       if (entry.gitDir) await forgetWorktree(entry.gitDir, entry.branch, entry.head);
   }
   if (!Object.keys(errors).length) rmSync(paths.oldTrash, { recursive: true, force: true });
-  return { bytes, transactions: ids.length, errors };
+  return { bytes, transactions: ids.length - Object.keys(errors).length, errors };
 }
 
 /**

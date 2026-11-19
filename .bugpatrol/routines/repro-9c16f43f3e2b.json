@@ -17,7 +17,7 @@
     },
     {
       "kind": "run",
-      "command": "bash -c 'K=.bugpatrol/sandbox/keeper; $K undo 9c7076d7 | cat; echo undo=${PIPESTATUS[0]}; $K undo 9c7076d7 | cat; echo undo2=${PIPESTATUS[0]}; $K scan --json | head -c 600; echo; $K scan --json | python3 -I -c \"import json,sys; d=json.load(sys.stdin); print(type(d).__name__, list(d)[:5] if isinstance(d,dict) else len(d))\"'"
+      "command": "bash -c 'K=.bugpatrol/sandbox/keeper; $K scan --json | head -c 600; echo; $K scan --json | python3 -I -c \"import json,sys; d=json.load(sys.stdin); print(type(d).__name__, list(d)[:5] if isinstance(d,dict) else len(d))\"'"
     },
     {
       "kind": "run",
@@ -37,7 +37,7 @@
     },
     {
       "kind": "run",
-      "command": ".bugpatrol/sandbox/tui stop; bash -c 'K=.bugpatrol/sandbox/keeper; for c in \"hold /tmp/keeper-patrol/home/.worktrees/old-experiment --reason testing\" \"hold /tmp/keeper-patrol/home/.worktrees/old-experiment --reason again\" \"claim /tmp/keeper-patrol/home/nosuch\" \"hold /nonexistent --reason x\" \"scan --category worktree\" \"plan 0000 --max-risk low\" \"purge\" \"timer install --cron\" \"--version\" \"auto\"; do echo \"== $c\"; $K $c 2>&1 | head -c 400; echo \" exit=${PIPESTATUS[0]}\"; done'"
+      "command": ".bugpatrol/sandbox/tui stop; bash -c 'K=.bugpatrol/sandbox/keeper; for c in \"hold /tmp/keeper-patrol/home/.worktrees/old-experiment --reason testing\" \"hold /tmp/keeper-patrol/home/.worktrees/old-experiment --reason again\" \"claim /tmp/keeper-patrol/home/nosuch\" \"hold /nonexistent --reason x\" \"scan --category worktree\" \"plan 0000 --max-risk low\" \"timer install --cron\" \"--version\" \"auto\"; do echo \"== $c\"; $K $c 2>&1 | head -c 400; echo \" exit=${PIPESTATUS[0]}\"; done'"
     }
   ],
   "screenId": "cli-errors",

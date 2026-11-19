@@ -51,6 +51,9 @@ export const liveActions: Actions = {
       outcome.applied.length || outcome.deleted.length
         ? `${done.charAt(0).toUpperCase()}${done.slice(1)}`
         : "Nothing was changed",
+      outcome.oldTrash
+        ? `Deleted the old trash, ${size(outcome.oldTrash.bytes)}${Object.keys(outcome.oldTrash.errors).length ? `, ${count(Object.keys(outcome.oldTrash.errors).length, "transaction")} kept, see keeper log` : ""}`
+        : "",
       stale.length ? `Skipped ${stale.join(", ")}: changed since the scan, r rescans` : "",
       outcome.failed.length ? `${count(outcome.failed.length, "finding")} failed, see keeper log` : "",
     ]

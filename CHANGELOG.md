@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-19
+
 - **`keeper apply` deletes at once.** Removals no longer go to a trash that frees nothing until a purge, so the space a
   cleanup reports is free when apply returns. `keeper undo`, `keeper purge` and `--older-days` are gone. Right before
   each deletion apply checks again that no running process works in or holds a file in the path and that no filesystem

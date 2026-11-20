@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import {
+  existsSync,
   lstatSync,
   mkdirSync,
   readdirSync,
@@ -274,9 +275,11 @@ async function removeTree(paths: Paths, path: string): Promise<void> {
 
 /**
  * Drops a deleted worktree's git metadata, then its local branch. Passing the old head makes the branch deletion a
- * no-op on a branch that moved after the worktree was judged.
+ * no-op on a branch that moved after the worktree was judged. A clone keeps its git dir inside itself, so deleting it
+ * took the metadata and the branch along and nothing is left to drop.
  */
 async function forgetWorktree(gitDir: string, branch?: string, head?: string): Promise<void> {
+  if (!existsSync(gitDir)) return;
   const pruned = await run(["git", "--git-dir", gitDir, "worktree", "prune"]);
   if (pruned.code !== 0) throw new Error(`deleted, but git worktree prune failed: ${pruned.stderr.trim()}`);
   if (branch && head) await run(["git", "--git-dir", gitDir, "update-ref", "-d", `refs/heads/${branch}`, head]);

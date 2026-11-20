@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-11-20
+
 - **Deleting a clone under a worktree root no longer reports a failure.** A full clone kept beside the worktrees holds
   its own git metadata, so after deleting it apply had nothing left to prune, yet it reported the finding as failed and
   the run exited as partial, which raised the failure notification. Apply now skips the prune when the deletion took the

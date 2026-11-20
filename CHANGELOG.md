@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-20
+
 - **A worktree folded into another pull request is proven by it.** A branch merged into an integration branch whose PR
   was squash-merged, or a detached checkout of that branch, is no longer blocked as commits on no remote once its own
   PR closes unmerged. Any merged PR whose head holds every local commit proves it, as long as that PR's merge commit is

@@ -11,6 +11,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   was squash-merged, or a detached checkout of that branch, is no longer blocked as commits on no remote once its own
   PR closes unmerged. Any merged PR whose head holds every local commit proves it, as long as that PR's merge commit is
   on the default branch. Commits made after the fold and uncommitted files still block.
+- **A worktree whose `git status` fails is blocked.** A corrupt index used to read as no uncommitted files, so a
+  merged checkout with unsaved edits could be planned for deletion.
 
 ## [0.8.0] - 2026-11-19
 

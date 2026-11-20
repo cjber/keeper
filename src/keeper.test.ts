@@ -1164,6 +1164,15 @@ test("a branch folded into another PR's squash is proven by that PR's head, and 
   expect(extra.findings[0]?.blockers.join()).toContain("on no remote");
 });
 
+test("a checkout whose status cannot be read is blocked even when merged", async () => {
+  const path = await worktree("unreadable");
+  const head = await git(path, "rev-parse", "HEAD");
+  writeFileSync(join(path, "draft"), "uncommitted");
+  writeFileSync(await git(path, "rev-parse", "--path-format=absolute", "--git-path", "index"), "corrupt");
+  const report = await scan({ ...ctx, pullRequests: pull("MERGED", head, "b-unreadable") }, ["worktree"]);
+  expect(report.findings[0]?.blockers.join()).toContain("could not be checked");
+});
+
 test("a branch older than the newest page of PRs is looked up by name", async () => {
   const path = await worktree("old");
   const head = await git(path, "rev-parse", "HEAD");

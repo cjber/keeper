@@ -544,7 +544,10 @@ async function inspectWorktree(path: string, context: Context, lookup: PullReque
   const valid = names.code === 0;
   const [commonDir = "", gitDir = "", head = "", branch = ""] = valid ? names.stdout.split("\n") : [];
   if (!valid) blockers.push("not a valid checkout, so its work cannot be checked. Look at it yourself");
-  if (status.stdout) {
+  // A failed status saw no files at all, so uncommitted work cannot be ruled out.
+  if (status.code !== 0)
+    blockers.push("its files could not be checked, so uncommitted work is unknown. Look at it yourself");
+  else if (status.stdout) {
     const files = status.stdout.split("\n").length;
     blockers.push(
       `${count(files, "uncommitted or untracked file")}, commit, stash or delete ${files === 1 ? "it" : "them"}`,

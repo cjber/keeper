@@ -664,7 +664,9 @@ async function scanWorktrees(context: Context): Promise<Finding[]> {
     // A full page means older pull requests went unlisted, so a branch it lacks gets a lookup of its own.
     if (!all || all.length < pullRequestLimit || branch === "HEAD" || all.some((pr) => pr.headRefName === branch))
       return all;
-    return list(commonDir, path, branch);
+    // The page is kept, because a PR from another branch can prove this one folded into it.
+    const own = await list(commonDir, path, branch);
+    return own && [...all, ...own.filter((pr) => !all.some((listedPr) => listedPr.number === pr.number))];
   };
   // Walking a checkout is the costly part of a scan, and most worktrees are blocked, so only one that could be planned
   // is measured. A blocked finding keeps 0 bytes, which reads as an unknown size.

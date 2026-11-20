@@ -1147,6 +1147,21 @@ test("a branch folded into another PR's squash is proven by that PR's head, and 
   const report = await scan({ ...ctx, pullRequests: listed(squash) }, ["worktree"]);
   expect(report.findings[0]).toMatchObject({ risk: "low", blockers: [] });
   expect(report.findings[0]?.reason).toContain("PR #8");
+  // A full page of PRs that lacks this branch still keeps the integration PR beside the branch's own lookup.
+  const page = async (_repo: string, branch?: string): Promise<PullRequest[]> =>
+    branch
+      ? []
+      : [
+          ...(await listed(squash)()).slice(1),
+          ...Array.from({ length: 999 }, (_, i) => ({
+            number: i + 2000,
+            state: "OPEN" as const,
+            headRefName: `other-${i}`,
+            headRefOid: "x",
+          })),
+        ];
+  const paged = await scan({ ...ctx, pullRequests: page }, ["worktree"]);
+  expect(paged.findings[0]?.reason).toContain("PR #8");
   // A detached pre-squash head of the integration branch is held by the same PR.
   await git(path, "checkout", "-q", "--detach", integration);
   const detached = await scan({ ...ctx, pullRequests: listed(squash) }, ["worktree"]);

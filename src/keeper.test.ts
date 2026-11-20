@@ -4,7 +4,6 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -525,6 +524,19 @@ test("deleting an old trashed worktree drops its branch only if it has not moved
   expect(await git(join(home, "gone-main"), "branch", "--list", "b-gone")).toBe("");
   expect(await git(movedMain, "branch", "--list", "b-moved")).toContain("b-moved");
   expect(existsSync(join(home, "gone-main/.git/worktrees/gone"))).toBe(false);
+});
+
+test("deleting a clone that sits under a worktree root leaves nothing to prune", async () => {
+  await worktree("origin");
+  const clone = join(home, ".worktrees", "clone");
+  await git(home, "clone", "-q", join(home, "origin.git"), clone);
+  age(clone);
+  age(join(clone, ".git/logs/HEAD"));
+  const { findings } = await scan(ctx, ["worktree"]);
+  const found = findings.filter((finding) => finding.paths[0] === clone);
+  expect(found).toMatchObject([{ blockers: [], gitDir: join(clone, ".git") }]);
+  expect(await applyPlan(createPlan(ctx.paths, found, 7), ctx)).toMatchObject({ applied: [found[0]?.id], failed: [] });
+  expect(existsSync(clone)).toBe(false);
 });
 
 test("run stops a command that outlives its wait and reports it as timed out", async () => {

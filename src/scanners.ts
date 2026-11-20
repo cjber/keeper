@@ -459,7 +459,10 @@ const unfinishedOperations = ["rebase-merge", "rebase-apply", "BISECT_LOG", "MER
  * a branch can gain commits after its PR merged. The ancestor test needs commits that no remote holds: without them the
  * checkout has no work of its own, like a branch just cut from main under a reused name, so only the age window may
  * judge it. A PR a bot rebased before merging holds none of the local commits, so it proves the checkout by content
- * instead: every file the local commits changed is exactly as the merge commit landed it.
+ * instead: every file the local commits changed is exactly as the merge commit landed it. A branch folded into another
+ * PR, an integration branch say, closes unmerged while that PR's squash lands its work, so any merged PR whose head holds
+ * the local commits proves it too, once its merge commit is on the default branch. GitHub keeps that head as
+ * refs/pull/N/head after the branch is deleted, so the commits stay on a remote.
  */
 async function findMerged(
   pullRequests: readonly PullRequest[],
@@ -467,6 +470,7 @@ async function findMerged(
   head: string,
   git: (...args: string[]) => Promise<{ code: number; stdout: string }>,
   ownCommits: boolean,
+  mainline: string,
 ): Promise<PullRequest | undefined> {
   const candidates = pullRequests.filter((pr) => pr.state === "MERGED" && pr.headRefName === branch);
   const exact = candidates.find((pr) => pr.headRefOid === head);
@@ -476,6 +480,25 @@ async function findMerged(
   }
   for (const pr of candidates) {
     if (pr.mergeCommit?.oid && (await landedContent(pr.mergeCommit.oid, git))) return pr;
+  }
+  if (!mainline) return undefined;
+  const landed = pullRequests.filter((pr) => pr.state === "MERGED" && pr.mergeCommit?.oid);
+  // One walk rules out the usual case: no merged head this clone holds contains HEAD. A head it never fetched is skipped.
+  const outside = await git(
+    "rev-list",
+    "--ignore-missing",
+    "--max-count=1",
+    "HEAD",
+    "--not",
+    ...landed.map((pr) => pr.headRefOid),
+  );
+  if (outside.code !== 0 || outside.stdout) return undefined;
+  for (const pr of landed) {
+    if (
+      (await git("merge-base", "--is-ancestor", "HEAD", pr.headRefOid)).code === 0 &&
+      (await git("merge-base", "--is-ancestor", pr.mergeCommit?.oid ?? "", mainline)).code === 0
+    )
+      return pr;
   }
   return undefined;
 }
@@ -541,8 +564,8 @@ async function inspectWorktree(path: string, context: Context, lookup: PullReque
   const pushed = valid && !status.stdout && ahead.code === 0 && ahead.stdout === "0" && blockers.length === 0;
   if (open && !pushed) blockers.push(`PR #${open.number} is open, merge or close it`);
   const ownCommits = ahead.code === 0 && Number(ahead.stdout) > 0;
-  const merged = await findMerged(pullRequests, branch, head, git, ownCommits);
   const mainlineRef = defaultBranch.stdout;
+  const merged = await findMerged(pullRequests, branch, head, git, ownCommits, mainlineRef);
   // A merged branch is usually deleted from the remote, and the pull request is what still holds this commit.
   if (!merged && (ahead.code !== 0 || ahead.stdout !== "0")) {
     blockers.push(

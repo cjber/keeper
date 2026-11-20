@@ -1114,6 +1114,56 @@ test("a squash-merged PR that a bot rebased is proven by content, and extra loca
   expect(extra.findings[0]?.blockers.join()).toContain("on no remote");
 });
 
+test("a branch folded into another PR's squash is proven by that PR's head, and only once it landed", async () => {
+  const path = await worktree("folded");
+  const main = join(home, "folded-main");
+  writeFileSync(join(path, "file"), "work");
+  await git(path, "commit", "-qam", "work");
+  const head = await git(path, "rev-parse", "HEAD");
+  // An integration branch merges this one with other work, its PR is squash-merged, and both branches are deleted.
+  await git(main, "checkout", "-qb", "b-integration");
+  writeFileSync(join(main, "other"), "other work");
+  await git(main, "add", ".");
+  await git(main, "commit", "-qm", "other");
+  await git(main, "merge", "-q", "--no-ff", "-m", "fold", "b-folded");
+  const integration = await git(main, "rev-parse", "HEAD");
+  await git(main, "checkout", "-q", "main");
+  await git(main, "merge", "-q", "--squash", "b-integration");
+  await git(main, "commit", "-qm", "squash");
+  const squash = await git(main, "rev-parse", "HEAD");
+  await git(main, "push", "-q", "origin", "HEAD:main");
+  await git(main, "branch", "-qD", "b-integration");
+  await git(main, "remote", "set-head", "origin", "main");
+  const listed = (mergeCommit: string) => async (): Promise<PullRequest[]> => [
+    { number: 7, state: "CLOSED", headRefName: "b-folded", headRefOid: head },
+    {
+      number: 8,
+      state: "MERGED",
+      headRefName: "b-integration",
+      headRefOid: integration,
+      mergeCommit: { oid: mergeCommit },
+    },
+  ];
+  const report = await scan({ ...ctx, pullRequests: listed(squash) }, ["worktree"]);
+  expect(report.findings[0]).toMatchObject({ risk: "low", blockers: [] });
+  expect(report.findings[0]?.reason).toContain("PR #8");
+  // A detached pre-squash head of the integration branch is held by the same PR.
+  await git(path, "checkout", "-q", "--detach", integration);
+  const detached = await scan({ ...ctx, pullRequests: listed(squash) }, ["worktree"]);
+  expect(detached.findings[0]).toMatchObject({ risk: "low", blockers: [] });
+  // A PR merged into a base that never reached the default branch landed nothing there.
+  const stacked = await scan({ ...ctx, pullRequests: listed(integration) }, ["worktree"]);
+  expect(stacked.findings[0]?.blockers.join()).toContain("on no remote");
+  // Work committed after the fold is in no PR.
+  await git(path, "checkout", "-q", "b-folded");
+  writeFileSync(join(path, "extra"), "unmerged");
+  await git(path, "add", ".");
+  await git(path, "commit", "-qm", "more");
+  const extra = await scan({ ...ctx, pullRequests: listed(squash) }, ["worktree"]);
+  expect(extra.findings[0]?.risk).toBe("medium");
+  expect(extra.findings[0]?.blockers.join()).toContain("on no remote");
+});
+
 test("a branch older than the newest page of PRs is looked up by name", async () => {
   const path = await worktree("old");
   const head = await git(path, "rev-parse", "HEAD");

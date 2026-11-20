@@ -151,7 +151,9 @@ cherry-pick in progress, and any hold.
 
 A clean worktree whose every commit is on a remote, a detached HEAD included, is low risk even while its pull request is
 open: the branch and PR stay on the remote, and `git worktree add` recreates the worktree. It is offered after 1 idle
-day instead of `--stale-days`. A merged PR or the default branch holding every commit needs no idle time.
+day instead of `--stale-days`. A merged PR or the default branch holding every commit needs no idle time. That PR
+can be another branch's: a branch folded into an integration PR is proven by that PR's head once its merge is on the
+default branch.
 
 ## Blocked findings
 

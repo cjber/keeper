@@ -1131,9 +1131,11 @@ test("a branch folded into another PR's squash is proven by that PR's head, and 
   await git(main, "merge", "-q", "--squash", "b-integration");
   await git(main, "commit", "-qm", "squash");
   const squash = await git(main, "rev-parse", "HEAD");
-  await git(main, "push", "-q", "origin", "HEAD:main");
+  await git(main, "push", "-q", "origin", "HEAD:main", `${integration}:refs/pull/8/head`);
   await git(main, "branch", "-qD", "b-integration");
   await git(main, "remote", "set-head", "origin", "main");
+  // GitHub keeps refs/pull/8/head after the branch is deleted, so the remote still holds the folded commit.
+  await git(join(home, "folded.git"), "merge-base", "--is-ancestor", head, "refs/pull/8/head");
   const listed = (mergeCommit: string) => async (): Promise<PullRequest[]> => [
     { number: 7, state: "CLOSED", headRefName: "b-folded", headRefOid: head },
     {
@@ -1147,6 +1149,12 @@ test("a branch folded into another PR's squash is proven by that PR's head, and 
   const report = await scan({ ...ctx, pullRequests: listed(squash) }, ["worktree"]);
   expect(report.findings[0]).toMatchObject({ risk: "low", blockers: [] });
   expect(report.findings[0]?.reason).toContain("PR #8");
+  // A PR head this clone never fetched proves nothing.
+  const unfetched = async (): Promise<PullRequest[]> => [
+    { number: 9, state: "MERGED", headRefName: "b-x", headRefOid: "1".repeat(40), mergeCommit: { oid: squash } },
+  ];
+  const missing = await scan({ ...ctx, pullRequests: unfetched }, ["worktree"]);
+  expect(missing.findings[0]?.blockers.join()).toContain("on no remote");
   // A full page of PRs that lacks this branch still keeps the integration PR beside the branch's own lookup.
   const page = async (_repo: string, branch?: string): Promise<PullRequest[]> =>
     branch
@@ -1162,6 +1170,11 @@ test("a branch folded into another PR's squash is proven by that PR's head, and 
         ];
   const paged = await scan({ ...ctx, pullRequests: page }, ["worktree"]);
   expect(paged.findings[0]?.reason).toContain("PR #8");
+  // Without a known default branch nothing shows the PR landed.
+  await git(main, "remote", "set-head", "origin", "-d");
+  const headless = await scan({ ...ctx, pullRequests: listed(squash) }, ["worktree"]);
+  expect(headless.findings[0]?.blockers.join()).toContain("on no remote");
+  await git(main, "remote", "set-head", "origin", "main");
   // A detached pre-squash head of the integration branch is held by the same PR.
   await git(path, "checkout", "-q", "--detach", integration);
   const detached = await scan({ ...ctx, pullRequests: listed(squash) }, ["worktree"]);

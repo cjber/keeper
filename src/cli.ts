@@ -27,7 +27,7 @@ import {
   pickById,
   readPlan,
 } from "./ops";
-import { defaultAppStaleDays, defaultStaleDays, primaryCheckouts } from "./scanners";
+import { defaultAppStaleDays, defaultStaleDays, primaryCheckouts, targetIds } from "./scanners";
 import { defaultPaths, expandHome, run, waitFor } from "./system";
 import { installCron, installSystemd, lastServiceResult, removeSchedule, scheduleStatus } from "./timer";
 import {
@@ -54,8 +54,8 @@ const help = `keeper keeps an Arch machine clean. Output is JSON when stdout is 
   keeper                         open the wizard (terminal only)
   keeper scan [--category C] [--stale-days N] [--app-stale-days N] [--cached]
                                  list findings; --cached reuses categories scanned recently, never load or memory
-  keeper plan [ID...] [--category C] [--max-risk low|medium] [--stale-days N] [--app-stale-days N]
-                                 save a plan of eligible findings; apps and personal files need their id
+  keeper plan [ID|PATH...] [--category C] [--max-risk low|medium] [--stale-days N] [--app-stale-days N]
+                                 save a plan of eligible findings; apps and personal files need their id or path
   keeper apply PLAN --yes        rescan, then apply what is unchanged; removals are deleted at once, for good
   keeper hold PATH --reason R [--days N]
                                  protect a path you will return to (1 day at most; --days N shortens it)
@@ -96,6 +96,11 @@ interface Flags {
   appStaleDays: number;
   days?: number;
   reason?: string;
+}
+
+/** A word a POSIX shell reads back unchanged: as it is when it holds no special character, single-quoted otherwise. */
+function shellWord(word: string): string {
+  return /^[\w./~:@%+=,-]+$/.test(word) ? word : `'${word.replaceAll("'", "'\\''")}'`;
 }
 
 /** A mistake in how keeper was called. `next` is the command that gets the caller unstuck. */
@@ -224,12 +229,12 @@ export function schema() {
     risks,
     version: packageJson.version,
     finding:
-      "id, category, risk, action, title, paths, packages, bytes, reason, blockers, explicit; worktrees add gitDir, branch and head; load findings add cpu and pids; memory stop findings add memory (RAM plus swap bytes), cpu and pids; tmp findings add inodes",
+      "id, category, risk, action, title, paths, packages, bytes, reason, blockers, explicit, idle (the blocker --stale-days lifts); worktrees add gitDir, branch and head; load findings add cpu and pids; memory stop findings add memory (RAM plus swap bytes), cpu and pids; tmp findings add inodes",
     explicit:
       "true means a person has to name the finding's id in `keeper plan`. A plan with no ids never takes it, whatever --max-risk says",
     bytes: "uncompressed size, so a compressing filesystem frees less",
     apply:
-      "deletes for good, with no trash or undo. deleted lists each finding's removed paths and bytes, and the log keeps it",
+      "deletes for good, with no trash or undo. deleted lists each finding's removed paths and bytes, and the log keeps it. staleReasons says why each stale id was left",
     eligible: "blockers is empty and action is not report",
     scan: "schemaVersion, scannedAt, categoryScannedAt (when each category was scanned), cached (categories reused), live (categories --cached could not reuse, because they describe this moment), findings, warnings",
     environment: { KEEPER_ACTOR: "name recorded in holds, claims and the log" },
@@ -342,15 +347,22 @@ async function dispatch(
     }
     case "plan": {
       const ctx = context(flags.staleDays, flags.appStaleDays);
-      // Ids found in the last scan rescan only their own categories, rather than every category on the machine.
+      // Targets found in the last scan rescan only their own categories, rather than every category on the machine.
       const only = flags.category ?? (rest.length ? categoriesOf(ctx, rest) : undefined);
-      // Named ids are the only findings a plan can take, so they are the only ones worth measuring.
-      const report = await cachedScan(rest.length ? { ...ctx, sizeOnly: new Set(rest) } : ctx, { reuse: false, only });
+      // Named targets are the only findings a plan can take, so they are the only ones worth measuring.
+      const named = { ...ctx, sizeOnly: new Set(rest.flatMap(targetIds)) };
+      const report = await cachedScan(rest.length ? named : ctx, { reuse: false, only });
       const { chosen, skipped } = rest.length
         ? pickById(report.findings, rest)
         : { chosen: bulkPlan(report.findings, flags.maxRisk), skipped: [] };
+      // When only the idle window holds every target back, the way on is the flag that sets it, not another scan.
       if (rest.length && !chosen.length)
-        throw new UsageError(skipped.map(({ id, reason }) => `${id}: ${reason}`).join("; "), "keeper scan");
+        throw new UsageError(
+          skipped.map(({ id, reason }) => `${id}: ${reason}`).join("; "),
+          skipped.every((entry) => entry.idle)
+            ? `keeper plan ${rest.map(shellWord).join(" ")} --stale-days 0`
+            : "keeper scan",
+        );
       const plan = createPlan(paths, chosen, flags.staleDays, flags.appStaleDays);
       const skippedText = skipped.map(({ id, reason }) => `\nskipped ${id}: ${reason}`).join("");
       return {
@@ -386,7 +398,7 @@ async function dispatch(
       const ended = outcome.stopped > 0 ? `, ${count(outcome.stopped, "process", "processes")} stopped` : "";
       return {
         value: { ...outcome, next: partial || outcome.applied.length === 0 ? "keeper scan" : "done" },
-        text: `applied ${outcome.applied.length}, stale ${outcome.stale.length}, failed ${outcome.failed.length}${removed}${lowered}${ended}${outcome.failed.map(({ id, error }) => `\nfailed ${id}: ${error}`).join("")}${oldTrashText(outcome.oldTrash)}`,
+        text: `applied ${outcome.applied.length}, stale ${outcome.stale.length}, failed ${outcome.failed.length}${removed}${lowered}${ended}${outcome.stale.map((id) => `\nstale ${id}: ${outcome.staleReasons[id]}`).join("")}${outcome.failed.map(({ id, error }) => `\nfailed ${id}: ${error}`).join("")}${oldTrashText(outcome.oldTrash)}`,
         code: partial
           ? exit.partial
           : outcome.applied.length === 0 && outcome.stale.length > 0

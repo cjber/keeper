@@ -7,6 +7,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+- **Pull requests are listed through GitHub's REST API.** `gh pr list` spent the GraphQL limit that every agent and tool
+  on a machine shares, so worktrees often stayed unproven while REST had plenty left. When a lookup still fails, the
+  worktree's blocker says why, and a spent rate limit names itself and the time it resets. A branch pushed to a fork
+  is looked up under the fork's owner.
+- **`keeper plan` takes a path, relative or absolute, as well as an id**, so a worktree or claimed scratch you just finished with can be
+  planned without looking up its id first.
+- **A refusal held back only by the idle window names `--stale-days 0`**, both in its reason and as the `next` command,
+  instead of pointing at another scan that cannot change the outcome. `--stale-days 0` now waits for nothing, even for
+  a path written a moment before the scan read the clock.
+- **`keeper apply` says why each stale item was left**: gone, blocked and by what, or changed since the plan. A
+  blocker found during apply's rescan, such as a failed pull request lookup, no longer reads as a plain "stale".
+
 ## [0.8.2] - 2026-11-20
 
 - **Deleting a clone under a worktree root no longer reports a failure.** A full clone kept beside the worktrees holds

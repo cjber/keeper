@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { type Context, scan, withHolds } from "./scanners";
+import { type Context, scan, targetIds, withHolds } from "./scanners";
 import type { Paths } from "./system";
 import { type Category, categories, type Finding, type Scan, schemaVersion } from "./types";
 
@@ -202,17 +202,21 @@ export async function cachedScan(
 }
 
 /**
- * The categories that hold these finding ids in the last stored scan, however old, so planning by id rescans only
- * them. Undefined when any id is unknown, which leaves the caller to rescan everything.
+ * The categories that hold these finding ids or paths in the last stored scan, however old, so planning by them rescans
+ * only those. Undefined when any target is unknown, which leaves the caller to rescan everything.
  */
-export function categoriesOf(context: Context, ids: readonly string[]): Category[] | undefined {
+export function categoriesOf(context: Context, targets: readonly string[]): Category[] | undefined {
   const stored = read(context.paths);
   if (!stored || stored.fingerprint !== fingerprint(context)) return undefined;
   const owner = new Map<string, Category>();
   for (const [category, entry] of Object.entries(stored.entries) as [Category, Entry][]) {
     for (const finding of entry.findings) owner.set(finding.id, category);
   }
-  const found = ids.map((id) => owner.get(id));
+  const found = targets.map((target) =>
+    targetIds(target)
+      .map((id) => owner.get(id))
+      .find(Boolean),
+  );
   if (found.some((category) => !category)) return undefined;
   return [...new Set(found as Category[])];
 }

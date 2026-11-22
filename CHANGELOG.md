@@ -9,8 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 - **Pull requests are listed through GitHub's REST API.** `gh pr list` spent the GraphQL limit that every agent and tool
   on a machine shares, so worktrees often stayed unproven while REST had plenty left. When a lookup still fails, the
-  worktree's blocker says why, and a spent rate limit names itself and the time it resets.
-- **`keeper plan` takes a path as well as an id**, so a worktree or claimed scratch you just finished with can be
+  worktree's blocker says why, and a spent rate limit names itself and the time it resets. A branch pushed to a fork
+  is looked up under the fork's owner.
+- **`keeper plan` takes a path, relative or absolute, as well as an id**, so a worktree or claimed scratch you just finished with can be
   planned without looking up its id first.
 - **A refusal held back only by the idle window names `--stale-days 0`**, both in its reason and as the `next` command,
   instead of pointing at another scan that cannot change the outcome. `--stale-days 0` now waits for nothing, even for

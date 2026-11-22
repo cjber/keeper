@@ -300,11 +300,11 @@ export function findingId(category: Category, target: string, state: string): { 
 }
 
 /**
- * The ids an argument to `plan` may name. An id names itself. A path names the finding for that target in whichever
- * category holds it, since an id is a hash of category and target; ids are hex, so a slash marks a path.
+ * The ids an argument to `plan` may name: the argument as an id, and as a path, relative ones included, the finding for
+ * that target in whichever category holds it, since an id is a hash of category and target.
  */
 export function targetIds(target: string): string[] {
-  return target.includes("/") ? categories.map((category) => findingId(category, resolve(target), "").id) : [target];
+  return [target, ...categories.map((category) => findingId(category, resolve(target), "").id)];
 }
 
 /** Whether a scan measures this finding: every one, unless a plan named the few it is about. */
@@ -462,7 +462,7 @@ interface RestPullRequest {
  */
 async function listPullRequests(repo: string, branch?: string, timeout = pullRequestTimeoutMs): Promise<PullRequest[]> {
   // gh fills {owner} and {repo} from the checkout's remote. REST matches a head only as owner:branch.
-  const head = branch ? `&head={owner}:${encodeURIComponent(branch)}` : "";
+  const head = branch ? `&head=${await headOwner(repo, branch)}:${encodeURIComponent(branch)}` : "";
   const listed: PullRequest[] = [];
   for (let page = 1; listed.length < pullRequestLimit; page++) {
     const endpoint = `repos/{owner}/{repo}/pulls?state=all&per_page=${pullRequestPageSize}&page=${page}${head}`;
@@ -474,6 +474,24 @@ async function listPullRequests(repo: string, branch?: string, timeout = pullReq
     if (batch.length < pullRequestPageSize) break;
   }
   return listed;
+}
+
+/**
+ * Who owns a branch's pull request head: the owner of the GitHub remote the branch pushes to, so a branch pushed to a
+ * fork finds its PR, else `{owner}`, which gh fills with the checkout's own repo owner.
+ */
+export async function headOwner(repo: string, branch: string): Promise<string> {
+  const config = async (key: string) => {
+    const result = await run(["git", "--no-optional-locks", "-C", repo, "config", "--get", key]);
+    return result.code === 0 ? result.stdout : "";
+  };
+  const remote =
+    (await config(`branch.${branch}.pushRemote`)) ||
+    (await config("remote.pushDefault")) ||
+    (await config(`branch.${branch}.remote`));
+  const url = remote ? await config(`remote.${remote}.url`) : "";
+  // GitHub remote URLs name the owner right after the host: https://github.com/OWNER/REPO or git@github.com:OWNER/REPO.
+  return /github\.com[:/]([^/]+)\//.exec(url)?.[1] ?? "{owner}";
 }
 
 /**

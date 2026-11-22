@@ -132,13 +132,7 @@ export function pickById(
     const finding = targetIds(target)
       .map((id) => byId.get(id))
       .find(Boolean);
-    if (!finding)
-      skipped.push({
-        id: target,
-        reason: target.includes("/")
-          ? "no finding for this path now, so keeper does not remove it"
-          : "no such finding now",
-      });
+    if (!finding) skipped.push({ id: target, reason: "no finding with this id or path now" });
     else if (finding.idle && finding.blockers.length === 1 && finding.blockers[0] === finding.idle)
       skipped.push({
         id: target,

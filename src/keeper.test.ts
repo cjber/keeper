@@ -24,6 +24,7 @@ import {
   type Context,
   defaultConfig,
   dockerFindings,
+  headOwner,
   type ProcessInfo,
   type PullRequest,
   pullRequestPage,
@@ -1319,7 +1320,7 @@ test("planning by id skips an unknown or blocked id and keeps the rest", () => {
   const { chosen, skipped } = pickById([finding("ready", []), finding("busy", ["in use"])], ["gone", "busy", "ready"]);
   expect(chosen.map((found) => found.id)).toEqual(["ready"]);
   expect(skipped).toEqual([
-    { id: "gone", reason: "no such finding now" },
+    { id: "gone", reason: "no finding with this id or path now" },
     { id: "busy", reason: "not eligible: in use" },
   ]);
 });
@@ -1341,7 +1342,28 @@ test("a target only the idle window holds back says --stale-days lifts it, and a
   ]);
   const now = (await scan({ ...ctx, staleDays: 0 }, ["agent"])).findings;
   expect(pickById(now, [scratch]).chosen.map((finding) => finding.paths[0])).toEqual([scratch]);
-  expect(pickById(now, [join(home, "elsewhere")]).skipped[0]?.reason).toContain("no finding for this path");
+  expect(pickById(now, [join(home, "elsewhere")]).skipped[0]?.reason).toBe("no finding with this id or path now");
+  // A relative path names its finding too, a bare name with no slash included.
+  const cwd = process.cwd();
+  process.chdir(home);
+  try {
+    expect(pickById(now, ["scratch"]).chosen.map((finding) => finding.paths[0])).toEqual([scratch]);
+  } finally {
+    process.chdir(cwd);
+  }
+});
+
+test("a branch's pull request head is owned by the GitHub remote it pushes to, a fork included", async () => {
+  const repo = join(home, "owned");
+  mkdirSync(repo);
+  await git(repo, "init", "-q");
+  expect(await headOwner(repo, "b")).toBe("{owner}");
+  await git(repo, "remote", "add", "fork", "git@github.com:someone/keeper.git");
+  await git(repo, "config", "branch.b.remote", "fork");
+  expect(await headOwner(repo, "b")).toBe("someone");
+  await git(repo, "remote", "add", "mine", "https://github.com/other/keeper");
+  await git(repo, "config", "branch.b.pushRemote", "mine");
+  expect(await headOwner(repo, "b")).toBe("other");
 });
 
 test("a fresh worktree on the default branch is planned by its path once --stale-days 0 lifts the wait", async () => {

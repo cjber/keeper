@@ -14,6 +14,8 @@ If `keeper` is not on `PATH`, ask the user before installing it with `paru -S ke
 3. Show the user the plan's size and items, then run `keeper apply PLAN --yes`. Apply deletes for good: there is no trash and nothing to restore, so the plan you show is the last chance to drop an item.
 4. Done when exit code is 0: the space is free. On 5, scan again and report what changed. On 4, make a new plan.
 
+To remove a worktree or claimed scratch you made and are done with, `keeper release` it if held, then `keeper plan PATH`. If the refusal says only the idle window holds it back, its `next` is `keeper plan PATH --stale-days 0`; run that only for your own finished work.
+
 An app is only a package with a `.desktop` launcher. Until the ledger has sampled the whole window without a gap, only the largest unseen apps appear, as candidates you can still remove by id; after the window they are proven unused. `large` and `duplicates` skip game libraries, Wine prefixes, flatpak data and VM stores. If the user wants one of these removed, show the finding and ask before passing its id to `keeper plan`.
 
 When the complaint is speed rather than space, scan the two health categories first:

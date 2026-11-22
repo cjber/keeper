@@ -26,6 +26,7 @@ import {
   dockerFindings,
   type ProcessInfo,
   type PullRequest,
+  pullRequestPage,
   sampleMs,
   scan,
   tmpPatterns,
@@ -1269,7 +1270,7 @@ test("a pull request lookup that keeps failing warns once for the repo and block
   expect(report.warnings[0]).toContain(join(home, "down-main"));
   expect(report.warnings[0]).toContain("HTTP 502");
   for (const finding of report.findings) {
-    expect(finding.blockers.join()).toContain("could not be listed");
+    expect(finding.blockers.join()).toContain("could not be listed (HTTP 502)");
     expect(eligible(finding)).toBe(false);
   }
   // An incomplete scan is never reused, so the next one asks GitHub again.
@@ -1297,6 +1298,7 @@ test("a finding keeps its id when its state moves, and apply refuses the moved s
   expect(eligible(after)).toBe(true);
   const outcome = await applyPlan(plan, ctx);
   expect(outcome.stale).toEqual([before.id]);
+  expect(outcome.staleReasons).toEqual({ [before.id]: "changed since the plan" });
   expect(existsSync(path)).toBe(true);
 });
 
@@ -1320,6 +1322,119 @@ test("planning by id skips an unknown or blocked id and keeps the rest", () => {
     { id: "gone", reason: "no such finding now" },
     { id: "busy", reason: "not eligible: in use" },
   ]);
+});
+
+test("a target only the idle window holds back says --stale-days lifts it, and a path names its finding", async () => {
+  const scratch = join(home, "scratch");
+  mkdirSync(scratch);
+  writeLedger(ctx.paths, { holds: [], claims: [{ path: scratch, actor: "a", at: "now" }] });
+  const fresh = (await scan(ctx, ["agent"])).findings;
+  const { chosen, skipped } = pickById(fresh, [`${scratch}/`]);
+  expect(chosen).toEqual([]);
+  expect(skipped).toEqual([
+    {
+      id: `${scratch}/`,
+      reason:
+        "not eligible: touched today, offered after 7 idle days. If it is yours and finished, --stale-days 0 plans it now",
+      idle: true,
+    },
+  ]);
+  const now = (await scan({ ...ctx, staleDays: 0 }, ["agent"])).findings;
+  expect(pickById(now, [scratch]).chosen.map((finding) => finding.paths[0])).toEqual([scratch]);
+  expect(pickById(now, [join(home, "elsewhere")]).skipped[0]?.reason).toContain("no finding for this path");
+});
+
+test("a fresh worktree on the default branch is planned by its path once --stale-days 0 lifts the wait", async () => {
+  const path = await worktree("shot");
+  await git(path, "checkout", "-q", "--detach", "origin/main");
+  const waiting = (await scan({ ...ctx, pullRequests: async () => [] }, ["worktree"])).findings;
+  expect(pickById(waiting, [path]).skipped[0]).toMatchObject({ idle: true });
+  const lifted = (await scan({ ...ctx, staleDays: 0, pullRequests: async () => [] }, ["worktree"])).findings;
+  expect(pickById(lifted, [path]).skipped).toEqual([]);
+  expect(pickById(lifted, [path]).chosen.map((finding) => finding.paths[0])).toEqual([path]);
+});
+
+test("an idle window beside another blocker is not offered as liftable", () => {
+  const blocked: Finding = {
+    id: "both",
+    state: "both",
+    category: "agent",
+    title: "both",
+    paths: ["/both"],
+    packages: [],
+    bytes: 1,
+    risk: "low",
+    action: "delete",
+    reason: "",
+    blockers: ["in use", "touched today, offered after 7 idle days"],
+    idle: "touched today, offered after 7 idle days",
+  };
+  expect(pickById([blocked], ["both"]).skipped).toEqual([
+    { id: "both", reason: "not eligible: in use; touched today, offered after 7 idle days" },
+  ]);
+});
+
+test("a REST page of pull requests reads merges, and a spent rate limit names itself and its reset", () => {
+  const headers = (status: string, extra: string[] = []) =>
+    [`HTTP/2.0 ${status}`, "Content-Type: application/json", ...extra].join("\r\n");
+  const body = JSON.stringify([
+    {
+      number: 3,
+      state: "closed",
+      merged_at: "2026-11-20T00:00:00Z",
+      merge_commit_sha: "m3",
+      head: { ref: "a", sha: "h3" },
+    },
+    { number: 2, state: "closed", merged_at: null, merge_commit_sha: "m2", head: { ref: "b", sha: "h2" } },
+    { number: 1, state: "open", merged_at: null, merge_commit_sha: "m1", head: { ref: "c", sha: "h1" } },
+  ]);
+  expect(pullRequestPage({ code: 0, stdout: `${headers("200 OK")}\r\n\r\n${body}`, stderr: "" }, 0)).toEqual([
+    { number: 3, state: "MERGED", headRefName: "a", headRefOid: "h3", mergeCommit: { oid: "m3" } },
+    { number: 2, state: "CLOSED", headRefName: "b", headRefOid: "h2", mergeCommit: null },
+    { number: 1, state: "OPEN", headRefName: "c", headRefOid: "h1", mergeCommit: null },
+  ]);
+  const reset = Date.UTC(2026, 10, 22, 10, 35) / 1000;
+  const spent = headers("403 Forbidden", [
+    "X-Ratelimit-Remaining: 0",
+    `X-Ratelimit-Reset: ${reset}`,
+    "X-Ratelimit-Resource: core",
+  ]);
+  expect(() =>
+    pullRequestPage({ code: 1, stdout: `${spent}\r\n\r\n{}`, stderr: "gh: API rate limit exceeded (HTTP 403)" }, 0),
+  ).toThrow("GitHub's core rate limit is spent until 10:35 UTC");
+  const secondary = headers("429 Too Many Requests", ["X-Ratelimit-Remaining: 12", "Retry-After: 60"]);
+  expect(() =>
+    pullRequestPage(
+      { code: 1, stdout: `${secondary}\r\n\r\n{}`, stderr: "gh: (HTTP 429)" },
+      Date.UTC(2026, 0, 1, 9, 0),
+    ),
+  ).toThrow("GitHub's secondary rate limit is spent until 09:01 UTC");
+  const missing = headers("404 Not Found", ["X-Ratelimit-Remaining: 4000"]);
+  expect(() =>
+    pullRequestPage({ code: 1, stdout: `${missing}\r\n\r\n{}`, stderr: "gh: Not Found (HTTP 404)" }, 0),
+  ).toThrow("gh: Not Found (HTTP 404)");
+});
+
+test("a rate-limited pull request lookup is not retried, and the blocker names the limit", async () => {
+  await worktree("limited");
+  let calls = 0;
+  const limited = async (): Promise<PullRequest[]> => {
+    calls++;
+    return pullRequestPage(
+      {
+        code: 1,
+        stdout:
+          "HTTP/2.0 403 Forbidden\r\nX-Ratelimit-Remaining: 0\r\nX-Ratelimit-Reset: 1795343700\r\nX-Ratelimit-Resource: core\r\n\r\n{}",
+        stderr: "",
+      },
+      0,
+    );
+  };
+  const report = await scan({ ...ctx, pullRequests: limited, retryPause: 1 }, ["worktree"]);
+  expect(calls).toBe(1);
+  expect(report.findings[0]?.blockers.join()).toContain(
+    "could not be listed (GitHub's core rate limit is spent until 10:35 UTC)",
+  );
 });
 
 test("a reused branch name is not proof, because the commit differs", async () => {

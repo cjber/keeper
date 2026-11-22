@@ -24,6 +24,7 @@ import {
   logKeepBytes,
   lowestPriority,
   scan,
+  targetIds,
 } from "./scanners";
 import { defaultPaths, expandHome, holders, liveFiles, niceness, type Paths, run, sizes } from "./system";
 import { bulkEligible, eligible, type Finding, outermost, type Plan, type Risk, risks, schemaVersion } from "./types";
@@ -109,23 +110,44 @@ export function createPlan(
   return plan;
 }
 
+/** A target `plan` left out, and why. `idle` marks one only the `--stale-days` window holds back. */
+export interface Skipped {
+  id: string;
+  reason: string;
+  idle?: true;
+}
+
 /**
- * The findings named by id. An id that vanished or gained a blocker since the scan is skipped with its reason, so one
- * of them never costs the rest of the plan.
+ * The findings named by id or path. A target that vanished or gained a blocker since the scan is skipped with its
+ * reason, so one of them never costs the rest of the plan.
  */
 export function pickById(
   findings: readonly Finding[],
-  ids: readonly string[],
-): { chosen: Finding[]; skipped: { id: string; reason: string }[] } {
+  targets: readonly string[],
+): { chosen: Finding[]; skipped: Skipped[] } {
   const byId = new Map(findings.map((finding) => [finding.id, finding]));
   const chosen: Finding[] = [];
-  const skipped: { id: string; reason: string }[] = [];
-  for (const id of ids) {
-    const finding = byId.get(id);
-    if (!finding) skipped.push({ id, reason: "no such finding now" });
+  const skipped: Skipped[] = [];
+  for (const target of targets) {
+    const finding = targetIds(target)
+      .map((id) => byId.get(id))
+      .find(Boolean);
+    if (!finding)
+      skipped.push({
+        id: target,
+        reason: target.includes("/")
+          ? "no finding for this path now, so keeper does not remove it"
+          : "no such finding now",
+      });
+    else if (finding.idle && finding.blockers.length === 1 && finding.blockers[0] === finding.idle)
+      skipped.push({
+        id: target,
+        reason: `not eligible: ${finding.idle}. If it is yours and finished, --stale-days 0 plans it now`,
+        idle: true,
+      });
     else if (!eligible(finding))
-      skipped.push({ id, reason: `not eligible: ${finding.blockers.join("; ") || finding.action}` });
-    else chosen.push(finding);
+      skipped.push({ id: target, reason: `not eligible: ${finding.blockers.join("; ") || finding.action}` });
+    else if (!chosen.includes(finding)) chosen.push(finding);
   }
   return { chosen, skipped };
 }
@@ -150,6 +172,8 @@ export interface Outcome {
   applied: string[];
   /** Plan items that changed or gained a blocker since planning. Nothing was done to them. */
   stale: string[];
+  /** Why each stale item was left, by id: gone, blocked and by what, or changed since the plan. */
+  staleReasons: Record<string, string>;
   failed: { id: string; error: string }[];
   bytes: number;
   /** Paths deleted, by finding, including what a finding that failed partway had already removed. */
@@ -402,11 +426,26 @@ async function applyUnlocked(plan: Plan, ctx: Context): Promise<Outcome> {
       )
     ).findings.map((finding) => [finding.id, finding]),
   );
-  const outcome: Outcome = { applied: [], stale: [], failed: [], bytes: 0, deleted: [], reniced: 0, stopped: 0 };
+  const outcome: Outcome = {
+    applied: [],
+    stale: [],
+    staleReasons: {},
+    failed: [],
+    bytes: 0,
+    deleted: [],
+    reniced: 0,
+    stopped: 0,
+  };
   for (const findingId of plan.findingIds) {
     const finding = current.get(findingId);
-    if (!finding || finding.state !== plan.states?.[findingId] || !eligible(finding)) {
+    if (!finding || !eligible(finding) || finding.state !== plan.states?.[findingId]) {
       outcome.stale.push(findingId);
+      // A blocker comes first: a failed lookup during the rescan also moves the state, and the blocker names why.
+      outcome.staleReasons[findingId] = !finding
+        ? "gone since the plan"
+        : !eligible(finding)
+          ? `blocked now: ${finding.blockers.join("; ") || finding.action}`
+          : "changed since the plan";
       continue;
     }
     const deleted: string[] = [];

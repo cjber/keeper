@@ -85,7 +85,9 @@ keeper apply PLAN --yes  Code. Rescans, skips anything that changed since the pl
 An agent can only add a blocker. It has no way to clear one, so a bad judgement can keep a file but never lose one.
 Each finding's id names the thing itself, such as a worktree's path, so it stays the same from one scan to the next.
 A plan also records the state that was judged, so approval covers that state and nothing newer. `keeper plan ID...`
-skips an id that is gone or blocked, says why, and plans the rest.
+skips an id that is gone or blocked, says why, and plans the rest. A path works in place of an id, such as
+`keeper plan ~/.worktrees/repo/cb-done` for a worktree you made and finished with. When the idle window is the only
+thing holding a target back, the refusal names `--stale-days 0`, which plans it now.
 
 ## Sizes and freed space
 
@@ -162,7 +164,7 @@ matter. Each blocker names what to do about it:
 
 | Blocker | To resolve it |
 | --- | --- |
-| Touched recently | Wait. It is offered once idle for the age window, 7 days by default, or `--stale-days N` |
+| Touched recently | Wait. It is offered once idle for the age window, 7 days by default, or `--stale-days N`. For your own finished work, `keeper plan ID --stale-days 0` |
 | Built recently | Wait. Build output is offered after 3 days without a build. It counts as build, not as its worktree |
 | Uncommitted or untracked files | Commit, stash or delete them |
 | Commits on no remote | Push them to keep the work. Once every commit is on the default branch it becomes low risk |
@@ -213,7 +215,7 @@ actually sampled to judge every unseen app against it. With no samples at all, a
 | `keeper` | Opens the wizard (terminal only) |
 | `keeper status` | Free space, schedule, last run and whether the nightly runs are healthy, holds and missing tools |
 | `keeper scan` | Lists findings and their blockers. `--cached` reuses recently scanned categories |
-| `keeper plan` | Saves a plan of eligible findings. Apps and personal files need their id. Add `--max-risk medium` once medium risk is approved |
+| `keeper plan` | Saves a plan of eligible findings. Apps and personal files need their id or path. Add `--max-risk medium` once medium risk is approved |
 | `keeper apply PLAN --yes` | Rescans, then applies what is unchanged. Removals are deleted for good |
 | `keeper hold PATH --reason R` | Protects a path for 1 day at most; `--days N` shortens it |
 | `keeper claim PATH` | Declares your own scratch disposable once stale. A git clone is claimable only under `~/.cache/agent-scratch` or an agent root. Claims record the Codex session when one is available, but they are not leases: use `keeper hold PATH --reason R` while active work must be protected |
@@ -288,7 +290,7 @@ resets, rebases or stashes, and leaves a checkout alone when tracked files chang
 ## Requirements
 
 `git` and `pacman-contrib`. These add evidence or actions, and `keeper status` lists any that are missing:
-[`gh`](https://cli.github.com) for pull request proof, `expac` to size orphans, `notify-send` for notifications and
+[`gh`](https://cli.github.com) for pull request proof (REST, so a drained GraphQL limit does not block it), `expac` to size orphans, `notify-send` for notifications and
 `uv` to prune its cache. Removing packages and running `paccache` use `sudo -n`, so they need passwordless sudo for
 those commands.
 

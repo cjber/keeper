@@ -62,6 +62,8 @@ export interface Finding {
   reason: string;
   /** Any entry here makes the finding ineligible for a plan. */
   blockers: string[];
+  /** The blocker the `--stale-days` window added, if any, so a refusal can name the flag that lifts it. */
+  idle?: string;
   /**
    * Personal files and apps are only planned by explicit id. A bulk `keeper plan` with a risk ceiling never takes
    * them, because a person deciding "medium risk is fine" has not seen which game data or app it would remove.

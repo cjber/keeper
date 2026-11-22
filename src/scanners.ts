@@ -2,9 +2,9 @@ import { createHash } from "node:crypto";
 import { createReadStream, existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, statSync } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
 import { availableParallelism, loadavg } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { alive, type Hold, liveHolds, readLedger } from "./ledger";
-import { ageDays, expandHome, holders, type Paths, run, sizes, timedOut } from "./system";
+import { ageDays, expandHome, holders, type Paths, type Result, run, sizes, timedOut } from "./system";
 import { type Category, categories, count, type Finding, type Risk, type Scan, schemaVersion } from "./types";
 import { coveredDays, readUsage, type UsageLedger } from "./usage";
 
@@ -190,7 +190,7 @@ export const defaultConfig: Config = {
   theme: defaultTheme,
 };
 
-/** One pull request as `gh pr list` reports it. */
+/** One pull request, in the shape keeper judges it. */
 export interface PullRequest {
   number: number;
   state: "OPEN" | "CLOSED" | "MERGED";
@@ -224,7 +224,7 @@ export interface Context {
   pullRequests?: (repo: string, branch?: string) => Promise<PullRequest[]>;
   /** Milliseconds before the first retry of a failed pull request lookup. Tests shorten it. */
   retryPause?: number;
-  /** Milliseconds one `gh` pull request lookup may take. Falls back to `pullRequestTimeoutMs`. Tests shorten it. */
+  /** Milliseconds one page of a `gh` pull request lookup may take. Falls back to `pullRequestTimeoutMs`. Tests shorten it. */
   pullRequestTimeout?: number;
   /**
    * Finding ids a plan names. When set, only these agent, build and worktree findings are measured and checked for
@@ -299,6 +299,14 @@ export function findingId(category: Category, target: string, state: string): { 
   return { id: digest(category, target), state: digest(category, target, state) };
 }
 
+/**
+ * The ids an argument to `plan` may name. An id names itself. A path names the finding for that target in whichever
+ * category holds it, since an id is a hash of category and target; ids are hex, so a slash marks a path.
+ */
+export function targetIds(target: string): string[] {
+  return target.includes("/") ? categories.map((category) => findingId(category, resolve(target), "").id) : [target];
+}
+
 /** Whether a scan measures this finding: every one, unless a plan named the few it is about. */
 function measured(context: Context, id: string): boolean {
   return !context.sizeOnly || context.sizeOnly.has(id);
@@ -330,6 +338,14 @@ function touchedAgo(days: number, window: number): string {
   const whole = Math.max(0, Math.floor(days));
   const when = whole === 0 ? "touched today" : `touched ${count(whole, "day")} ago`;
   return `${when}, offered after ${count(window, "idle day")}`;
+}
+
+/**
+ * The blocker for a path touched within its `--stale-days` window, kept on the finding as `idle` too. Clamping the
+ * slightly negative age a write after the clock read gives means a window of 0 waits for nothing.
+ */
+function idleBlocker(days: number, window: number): string | undefined {
+  return Math.max(0, days) < window ? touchedAgo(days, window) : undefined;
 }
 
 const inUse = "in use by a running process, offered once it exits";
@@ -408,6 +424,9 @@ async function knownWorktrees(context: Context): Promise<string[]> {
 /** The newest pull requests in one call. A busy repository has more, so a branch missing here is looked up by name. */
 const pullRequestLimit = 1000;
 
+/** The most pull requests one REST page holds. */
+const pullRequestPageSize = 100;
+
 /** gh saying this repo is not on GitHub, which no retry changes. */
 const noGitHub = [/no git remotes found/, /none of the git remotes/, /not a git repository/];
 
@@ -415,27 +434,86 @@ const noGitHub = [/no git remotes found/, /none of the git remotes/, /not a git 
 const noGh = [127, 4];
 
 /**
- * How long one `gh pr list` may take. A full page of 1000 pull requests is ten API requests, which finish in seconds,
- * so a minute only ever ends a gh that is not going to answer, such as one blocked on a keyring that never replies.
+ * How long one page of pull requests may take. A page is one API request, which finishes in seconds, so a minute only
+ * ever ends a gh that is not going to answer, such as one blocked on a keyring that never replies.
  */
 const pullRequestTimeoutMs = 60_000;
 
 /** A lookup that used up its whole wait. Not retried: it already waited longer than every retry pause together. */
 class LookupTimeout extends Error {}
 
+/** A lookup GitHub refused because a rate limit is spent. Not retried: the limit stays spent until its reset. */
+class RateLimited extends Error {}
+
+/** One pull request as the REST API lists it. */
+interface RestPullRequest {
+  number: number;
+  state: "open" | "closed";
+  merged_at: string | null;
+  merge_commit_sha: string | null;
+  head: { ref: string; sha: string };
+}
+
 /**
- * A repo gh cannot serve has no pull requests, which leaves its worktrees behind the age window and approval. Any other
- * failure throws: a timeout or rate limit on a busy machine says nothing about whether a branch was merged.
+ * Lists through REST, never `gh pr list`: that spends the GraphQL bucket, which every agent and tool on the machine
+ * shares and often drains, while REST has its own. A repo gh cannot serve has no pull requests, which leaves its
+ * worktrees behind the age window and approval. Any other failure throws: a timeout or rate limit on a busy machine says
+ * nothing about whether a branch was merged.
  */
 async function listPullRequests(repo: string, branch?: string, timeout = pullRequestTimeoutMs): Promise<PullRequest[]> {
-  const fields = "number,state,headRefName,headRefOid,mergeCommit";
-  const filter = branch ? ["--head", branch] : [];
-  const command = ["gh", "pr", "list", "--state", "all", "--limit", String(pullRequestLimit), ...filter];
-  const result = await run([...command, "--json", fields], repo, timeout);
-  if (result.code === timedOut) throw new LookupTimeout(result.stderr);
-  if (noGh.includes(result.code) || noGitHub.some((pattern) => pattern.test(result.stderr))) return [];
-  if (result.code !== 0) throw new Error(result.stderr.split("\n")[0] || `gh exited ${result.code}`);
-  return JSON.parse(result.stdout) as PullRequest[];
+  // gh fills {owner} and {repo} from the checkout's remote. REST matches a head only as owner:branch.
+  const head = branch ? `&head={owner}:${encodeURIComponent(branch)}` : "";
+  const listed: PullRequest[] = [];
+  for (let page = 1; listed.length < pullRequestLimit; page++) {
+    const endpoint = `repos/{owner}/{repo}/pulls?state=all&per_page=${pullRequestPageSize}&page=${page}${head}`;
+    const result = await run(["gh", "api", "--include", endpoint], repo, timeout);
+    if (result.code === timedOut) throw new LookupTimeout(result.stderr);
+    if (noGh.includes(result.code) || noGitHub.some((pattern) => pattern.test(result.stderr))) return [];
+    const batch = pullRequestPage(result, Date.now());
+    listed.push(...batch);
+    if (batch.length < pullRequestPageSize) break;
+  }
+  return listed;
+}
+
+/**
+ * Reads one page `gh api --include` printed: the status line and headers, a blank line, then the body. A refusal for a
+ * spent rate limit says which limit and when it resets, from the headers GitHub sends for exactly that.
+ */
+export function pullRequestPage(result: Result, now: number): PullRequest[] {
+  const split = result.stdout.indexOf("\r\n\r\n");
+  const [status = "", ...lines] = (split < 0 ? "" : result.stdout.slice(0, split)).split(/\r?\n/);
+  const header = new Map(
+    lines.map((line) => [
+      line.slice(0, line.indexOf(":")).trim().toLowerCase(),
+      line.slice(line.indexOf(":") + 1).trim(),
+    ]),
+  );
+  if (result.code !== 0) {
+    if (["403", "429"].includes(status.split(" ")[1] ?? "")) {
+      // A spent primary limit sends its reset as epoch seconds; a secondary limit sends how many seconds to wait.
+      const retryAfter = Number(header.get("retry-after"));
+      const reset =
+        header.get("x-ratelimit-remaining") === "0"
+          ? Number(header.get("x-ratelimit-reset")) * 1000
+          : retryAfter
+            ? now + retryAfter * 1000
+            : 0;
+      const resource = header.get("x-ratelimit-resource") ?? "secondary";
+      if (reset)
+        throw new RateLimited(
+          `GitHub's ${resource} rate limit is spent until ${new Date(reset).toISOString().slice(11, 16)} UTC`,
+        );
+    }
+    throw new Error(result.stderr.split("\n")[0] || `gh exited ${result.code}`);
+  }
+  return (JSON.parse(split < 0 ? result.stdout : result.stdout.slice(split + 4)) as RestPullRequest[]).map((pr) => ({
+    number: pr.number,
+    state: pr.state === "open" ? "OPEN" : pr.merged_at ? "MERGED" : "CLOSED",
+    headRefName: pr.head.ref,
+    headRefOid: pr.head.sha,
+    mergeCommit: pr.merged_at && pr.merge_commit_sha ? { oid: pr.merge_commit_sha } : null,
+  }));
 }
 
 /** Tries a lookup that failed again after a pause, longer each time, before giving up on it. */
@@ -444,7 +522,7 @@ async function retried<T>(attempt: () => Promise<T>, pause: number, attempts = 3
     try {
       return await attempt();
     } catch (error) {
-      if (tries >= attempts || error instanceof LookupTimeout) throw error;
+      if (tries >= attempts || error instanceof LookupTimeout || error instanceof RateLimited) throw error;
       await Bun.sleep(pause * tries);
     }
   }
@@ -520,8 +598,12 @@ async function landedContent(
   );
 }
 
-/** Undefined when the repo's pull requests could not be listed, which is not the same as having none. */
-type PullRequestLookup = (commonDir: string, path: string, branch: string) => Promise<PullRequest[] | undefined>;
+/** Why a repo's pull requests could not be listed, which is not the same as having none. */
+interface LookupFailure {
+  failed: string;
+}
+
+type PullRequestLookup = (commonDir: string, path: string, branch: string) => Promise<PullRequest[] | LookupFailure>;
 
 async function inspectWorktree(path: string, context: Context, lookup: PullRequestLookup): Promise<Finding> {
   const git = (...args: string[]) => run(["git", "--no-optional-locks", "-C", path, ...args]);
@@ -558,9 +640,11 @@ async function inspectWorktree(path: string, context: Context, lookup: PullReque
   if (operation) blockers.push(`${operation} is in progress, finish or abort it`);
   const listed = valid && commonDir ? await lookup(commonDir, path, branch) : [];
   // An open pull request cannot be ruled out either, so the worktree waits for a scan that can list them.
-  if (!listed)
-    blockers.push("its pull requests could not be listed, so neither a merge nor an open PR is known. Scan again");
-  const pullRequests = listed ?? [];
+  if ("failed" in listed)
+    blockers.push(
+      `its pull requests could not be listed (${listed.failed}), so neither a merge nor an open PR is known. Scan again`,
+    );
+  const pullRequests = "failed" in listed ? [] : listed;
   const open = pullRequests.find((pr) => pr.state === "OPEN" && pr.headRefName === branch);
   // Every commit on a remote, with nothing uncommitted: the branch and its PR live on the remote, so nothing is lost.
   // Detached HEADs count too, because the rev-list covers HEAD itself.
@@ -601,9 +685,11 @@ async function inspectWorktree(path: string, context: Context, lookup: PullReque
     : contained
       ? Math.min(context.staleDays, containedDays)
       : context.staleDays;
-  if (!merged && touched < window) blockers.push(touchedAgo(touched, window));
+  const idle = merged ? undefined : idleBlocker(touched, window);
+  if (idle) blockers.push(idle);
   return {
     ...findingId("worktree", path, `${head}\0${status.stdout}\0${proof}\0${open?.number ?? ""}`),
+    idle,
     category: "worktree",
     risk: proof ? "low" : "medium",
     action: "delete",
@@ -648,25 +734,33 @@ async function scanWorktrees(context: Context): Promise<Finding[]> {
   const failed = new Set<string>();
   // One warning per repo, because one failed lookup leaves every worktree of that repo unproven.
   const list = (commonDir: string, path: string, branch?: string) =>
-    retried(() => fetch(path, branch), context.retryPause ?? 2000).catch((error: unknown) => {
+    retried(() => fetch(path, branch), context.retryPause ?? 2000).catch((error: unknown): LookupFailure => {
+      const reason = error instanceof Error ? error.message : String(error);
       if (!failed.has(commonDir)) {
         failed.add(commonDir);
         const repo = commonDir.replace(/\/\.git$/, "");
-        context.warn?.(`pull requests of ${repo} could not be listed, so its worktrees stay unproven: ${error}`);
+        context.warn?.(`pull requests of ${repo} could not be listed, so its worktrees stay unproven: ${reason}`);
       }
-      return undefined;
+      return { failed: reason };
     });
-  const known = new Map<string, Promise<PullRequest[] | undefined>>();
+  const known = new Map<string, Promise<PullRequest[] | LookupFailure>>();
   const lookup: PullRequestLookup = async (commonDir, path, branch) => {
     const found = known.get(commonDir) ?? list(commonDir, path);
     known.set(commonDir, found);
     const all = await found;
     // A full page means older pull requests went unlisted, so a branch it lacks gets a lookup of its own.
-    if (!all || all.length < pullRequestLimit || branch === "HEAD" || all.some((pr) => pr.headRefName === branch))
+    if (
+      "failed" in all ||
+      all.length < pullRequestLimit ||
+      branch === "HEAD" ||
+      all.some((pr) => pr.headRefName === branch)
+    )
       return all;
     // The page is kept, because a PR from another branch can prove this one folded into it.
     const own = await list(commonDir, path, branch);
-    return own && [...all, ...own.filter((pr) => !all.some((listedPr) => listedPr.number === pr.number))];
+    return "failed" in own
+      ? own
+      : [...all, ...own.filter((pr) => !all.some((listedPr) => listedPr.number === pr.number))];
   };
   // Walking a checkout is the costly part of a scan, and most worktrees are blocked, so only one that could be planned
   // is measured. A blocked finding keeps 0 bytes, which reads as an unknown size.
@@ -698,11 +792,13 @@ async function inspectLeftover(path: string, context: Context): Promise<Finding>
   const blockers: string[] = [];
   if (nested.stdout) blockers.push("contains a checkout");
   if (holders(path, context.live)) blockers.push(inUse);
-  if (age < context.staleDays) blockers.push(touchedAgo(age, context.staleDays));
+  const idle = idleBlocker(age, context.staleDays);
+  if (idle) blockers.push(idle);
   const wanted = !blockers.length && measured(context, findingId("worktree", path, "").id);
   const bytes = wanted ? ((await sizes([path])).get(path) ?? 0) : 0;
   return {
     ...findingId("worktree", path, `leftover\0${bytes}`),
+    idle,
     category: "worktree",
     risk: "medium",
     action: "delete",
@@ -824,9 +920,11 @@ async function scanAgent(context: Context): Promise<Finding[]> {
     const age = ageDays(path, context.now);
     const blockers: string[] = [];
     if (holders(path, context.live)) blockers.push(inUse);
-    if (age < context.staleDays) blockers.push(touchedAgo(age, context.staleDays));
+    const idle = idleBlocker(age, context.staleDays);
+    if (idle) blockers.push(idle);
     return {
       ...findingId("agent", path, `${statSync(path).mtimeMs}`),
+      idle,
       category: "agent",
       risk: "low",
       action: "delete",

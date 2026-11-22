@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-22
+
 - **Pull requests are listed through GitHub's REST API.** `gh pr list` spent the GraphQL limit that every agent and tool
   on a machine shares, so worktrees often stayed unproven while REST had plenty left. When a lookup still fails, the
   worktree's blocker says why, and a spent rate limit names itself and the time it resets. A branch pushed to a fork

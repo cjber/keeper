@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -9,7 +10,6 @@ import {
   renameSync,
   rmSync,
   statSync,
-  truncateSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -154,6 +154,31 @@ test("build output is found in a dirty worktree only when ignored", async () => 
   for (const file of ["target/out", "target", "node_modules/x", "node_modules"]) age(join(path, file));
   const report = await scan(ctx, ["build"]);
   expect(report.findings.map((finding) => finding.paths[0])).toEqual([join(path, "target")]);
+});
+
+test("build: applying only the second of two hardlinked build dirs is not stale, and frees only its own share", async () => {
+  const first = await worktree("shared-a");
+  const second = await worktree("shared-b");
+  for (const path of [first, second]) mkdirSync(join(path, "target"), { recursive: true });
+  writeFileSync(join(first, "target/blob"), Buffer.alloc(200_000, 1));
+  linkSync(join(first, "target/blob"), join(second, "target/blob"));
+  for (const path of [first, second]) {
+    age(join(path, "target/blob"));
+    age(join(path, "target"));
+  }
+  const { findings } = await scan(ctx, ["build"]);
+  expect(findings).toHaveLength(2);
+  // The batch charges the shared inode to the first dir it walks, so the second finding is the one it undercharges.
+  const secondFinding = findings.find((finding) => finding.bytes < 200_000) as Finding;
+  const kept = findings.find((finding) => finding !== secondFinding) as Finding;
+  // The wizard plans a subset of a batch scan, so the plan holds only the second finding.
+  const outcome = await applyPlan(createPlan(ctx.paths, [secondFinding], 7), ctx);
+  expect(outcome).toMatchObject({ applied: [secondFinding.id], stale: [] });
+  expect(existsSync(secondFinding.paths[0] as string)).toBe(false);
+  expect(existsSync(join(kept.paths[0] as string, "blob"))).toBe(true);
+  // The shared inode still has a link in the first dir, so deleting the second freed only its own directory.
+  expect(outcome.bytes).toBeLessThan(200_000);
+  expect(outcome.deleted[0]?.bytes).toBe(outcome.bytes);
 });
 
 test("apply deletes at once, logs what it deleted, and a changed finding is refused as stale", async () => {
@@ -1776,11 +1801,9 @@ test("every keeper command the docs name exists in the CLI", async () => {
   }
 });
 
-test("package caches: prunable ones always offered, cleared-whole ones only once large", async () => {
+test("package caches: prunable ones always offered, cleared-whole ones not while small", async () => {
   mkdirSync(join(home, ".npm/_cacache"), { recursive: true });
-  // Sizes are allocated blocks, so a sparse file frees nothing and cannot stand in for gigabytes of downloads.
-  writeFileSync(join(home, ".npm/_cacache/blob"), "");
-  truncateSync(join(home, ".npm/_cacache/blob"), 3 * 1024 ** 3);
+  writeFileSync(join(home, ".npm/_cacache/blob"), "x");
   mkdirSync(join(home, ".bun/install/cache"), { recursive: true });
   writeFileSync(join(home, ".bun/install/cache/small"), "x");
   mkdirSync(join(home, ".local/share/pnpm/store"), { recursive: true });

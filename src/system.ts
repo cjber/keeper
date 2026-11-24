@@ -177,20 +177,33 @@ export function writeAtomically(path: string, content: string): void {
 /**
  * Allocated bytes for a batch of paths, from one `du` walk over the whole batch. `du` charges a hardlinked inode
  * once per invocation, to the first path that holds it, so sizing each path on its own would count a file linked
- * into many worktrees once per worktree. `-B1` without `--apparent-size` reports the blocks a path actually holds,
- * which is what deleting it frees; a sparse file counts for almost nothing.
+ * into many worktrees once per worktree. `-B1` without `--apparent-size` reports allocated blocks, so a sparse
+ * file counts for almost nothing. The batch charge is an attribution, not what deleting one path alone frees:
+ * a shared inode stays on disk while another link to it does.
+ *
+ * `du` prints no line for an argument an earlier argument already covers, so only the outermost paths go to the
+ * batch walk. A nested path is then sized on a walk of its own, so its size is its standalone size (which counts
+ * inodes it shares with its parent again), never a silent 0.
  */
 export async function sizes(paths: readonly string[]): Promise<Map<string, number>> {
   const result = new Map(paths.map((path) => [path, 0]));
   if (!paths.length) return result;
-  // Size walks are the expensive part of every scan. Keep them in the idle CPU and IO classes so a diagnostic
-  // run does not compete with the desktop when the machine is already overloaded.
-  const du = await run(["nice", "-n", "19", "ionice", "-c", "3", "du", "-0", "-s", "-B1", "--", ...paths]);
-  for (const line of du.stdout.split("\0")) {
-    const tab = line.indexOf("\t");
-    if (tab < 0) continue;
-    const path = line.slice(tab + 1);
-    if (result.has(path)) result.set(path, Number.parseInt(line.slice(0, tab), 10) || 0);
-  }
+  const nested = (path: string, index: number) =>
+    paths.some(
+      (other, otherIndex) => (otherIndex < index && other === path) || (other !== path && path.startsWith(`${other}/`)),
+    );
+  const walk = async (batch: readonly string[]) => {
+    // Size walks are the expensive part of every scan. Keep them in the idle CPU and IO classes so a diagnostic
+    // run does not compete with the desktop when the machine is already overloaded.
+    const du = await run(["nice", "-n", "19", "ionice", "-c", "3", "du", "-0", "-s", "-x", "-B1", "--", ...batch]);
+    for (const line of du.stdout.split("\0")) {
+      const tab = line.indexOf("\t");
+      if (tab < 0) continue;
+      const path = line.slice(tab + 1);
+      if (result.has(path)) result.set(path, Number.parseInt(line.slice(0, tab), 10) || 0);
+    }
+  };
+  await walk(paths.filter((path, index) => !nested(path, index)));
+  for (const [index, path] of paths.entries()) if (nested(path, index)) await walk([path]);
   return result;
 }

@@ -1338,8 +1338,10 @@ async function scanBuild(context: Context): Promise<Finding[]> {
       )
       .map((entry) => entry.path),
   );
+  // Bytes stay out of the state: a batch charges a shared inode to whichever path it walks first, so the number
+  // depends on the batch, not on this path. Recent-ness is what was judged here.
   return judged.map(({ path, recent, blockers }) => ({
-    ...findingId("build", path, `${bytes.get(path) ?? 0}\0${recent}`),
+    ...findingId("build", path, `${recent}`),
     category: "build",
     risk: "low",
     action: "delete",

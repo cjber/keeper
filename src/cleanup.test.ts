@@ -356,6 +356,21 @@ test("sizes: a hardlinked file is charged once, to the first path, in allocated 
   expect(map.get(sparse) ?? 0).toBeLessThan(1024 ** 2);
 });
 
+test("sizes: a nested path is sized in its own right, in either argument order", async () => {
+  const parent = join(home, "parent");
+  const child = join(parent, "child");
+  mkdirSync(child, { recursive: true });
+  writeFileSync(join(child, "blob"), Buffer.alloc(200_000, 1));
+  for (const order of [
+    [parent, child],
+    [child, parent],
+  ]) {
+    const map = await sizes(order);
+    expect(map.get(child) ?? 0).toBeGreaterThanOrEqual(200_000);
+    expect(map.get(parent) ?? 0).toBeGreaterThanOrEqual(200_000);
+  }
+});
+
 test("duplicates: hard links and files inside git repos are skipped", async () => {
   const linked = join(home, "Documents", "a.bin");
   const link = join(home, "Music", "b.bin");

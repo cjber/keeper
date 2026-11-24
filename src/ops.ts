@@ -87,6 +87,40 @@ function writeJson(path: string, value: unknown): void {
 
 const newId = () => randomBytes(4).toString("hex");
 
+/**
+ * Allocated bytes deleting these paths would free on their own: an inode counts only once every link to it is
+ * inside the paths, so a file hardlinked from a path that stays behind counts for nothing. Directories and other
+ * inodes count their own blocks. A path that has vanished counts for nothing.
+ */
+function freedBytes(paths: readonly string[]): number {
+  const inodes = new Map<string, { blocks: number; nlink: number; regular: boolean; seen: number }>();
+  const stack = [...paths];
+  for (let path = stack.pop(); path !== undefined; path = stack.pop()) {
+    let stat: ReturnType<typeof lstatSync>;
+    try {
+      stat = lstatSync(path);
+    } catch {
+      continue;
+    }
+    const key = `${stat.dev}:${stat.ino}`;
+    const entry = inodes.get(key) ?? {
+      blocks: (stat.blocks ?? 0) * 512,
+      nlink: stat.nlink,
+      regular: stat.isFile(),
+      seen: 0,
+    };
+    entry.seen++;
+    inodes.set(key, entry);
+    if (!stat.isDirectory()) continue;
+    try {
+      for (const name of readdirSync(path)) stack.push(join(path, name));
+    } catch {}
+  }
+  let total = 0;
+  for (const entry of inodes.values()) if (!entry.regular || entry.seen >= entry.nlink) total += entry.blocks;
+  return total;
+}
+
 export function createPlan(
   paths: Paths,
   chosen: readonly Finding[],
@@ -95,6 +129,14 @@ export function createPlan(
   now = Date.now(),
 ): Plan {
   const findings = outermost(chosen);
+  // A delete finding whose paths are on disk is costed by what deleting the planned set would free, not by its
+  // batch-attributed size. A finding with nothing on disk keeps its measured size, as a package removal does.
+  const onDisk = findings.filter(
+    (finding) => finding.action === "delete" && finding.paths.some((path) => existsSync(path)),
+  );
+  const plannedBytes =
+    findings.reduce((sum, finding) => sum + (onDisk.includes(finding) ? 0 : finding.bytes), 0) +
+    freedBytes(onDisk.flatMap((finding) => finding.paths));
   const plan: Plan = {
     schemaVersion,
     id: newId(),
@@ -102,7 +144,7 @@ export function createPlan(
     findingIds: findings.map((finding) => finding.id),
     states: Object.fromEntries(findings.map((finding) => [finding.id, finding.state])),
     categories: [...new Set(findings.map((finding) => finding.category))],
-    bytes: findings.reduce((sum, finding) => sum + finding.bytes, 0),
+    bytes: plannedBytes,
     staleDays,
     appStaleDays,
   };
@@ -158,7 +200,7 @@ export function readPlan(paths: Paths, id: string): Plan {
 export interface Deleted {
   id: string;
   paths: string[];
-  /** Uncompressed size the finding measured. A finding that failed partway records 0, because its share is unknown. */
+  /** Allocated bytes the deletion freed, measured marginally at apply. A finding that failed partway records 0, because its share is unknown. */
   bytes: number;
 }
 
@@ -443,13 +485,16 @@ async function applyUnlocked(plan: Plan, ctx: Context): Promise<Outcome> {
       continue;
     }
     const deleted: string[] = [];
+    // Measured before the deletion, against what is on disk now: a shared inode another path still links frees
+    // nothing, however the scan batch attributed it. Non-delete actions keep their measured size.
+    const freed = finding.action === "delete" ? freedBytes(finding.paths) : finding.bytes;
     try {
       const done = await execute(finding, ctx, deleted);
       outcome.applied.push(findingId);
-      outcome.bytes += finding.bytes;
+      outcome.bytes += freed;
       outcome.reniced += done.reniced;
       outcome.stopped += done.stopped;
-      if (deleted.length) outcome.deleted.push({ id: findingId, paths: deleted, bytes: finding.bytes });
+      if (deleted.length) outcome.deleted.push({ id: findingId, paths: deleted, bytes: freed });
     } catch (error) {
       outcome.failed.push({ id: findingId, error: String(error) });
       if (deleted.length) outcome.deleted.push({ id: findingId, paths: deleted, bytes: 0 });

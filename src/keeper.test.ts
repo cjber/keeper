@@ -210,7 +210,7 @@ test("plan: overlapping roots do not count a hardlink with a link outside the pl
   expect(existsSync(join(child, "blob"))).toBe(true);
 });
 
-test("build: applying two hardlinked build dirs in reverse scan order credits the shared file once", async () => {
+test("build: applying two hardlinked build dirs in reverse scan order counts the shared file for neither", async () => {
   const first = await worktree("rev-a");
   const second = await worktree("rev-b");
   for (const path of [first, second]) mkdirSync(join(path, "target"), { recursive: true });
@@ -227,10 +227,38 @@ test("build: applying two hardlinked build dirs in reverse scan order credits th
   expect(outcome.applied).toEqual(reversed.map((finding) => finding.id));
   expect(outcome.stale).toEqual([]);
   expect(existsSync(first)).toBe(true);
-  // Both links are gone, so the shared inode was freed and must be credited to exactly one deletion.
-  expect(outcome.bytes).toBeGreaterThanOrEqual(200_000);
+  // Each deletion is measured on its own before the lock, when the other link still stands, so the shared
+  // inode is counted by neither: a conservative undercount, never a claim on space another link kept.
+  expect(outcome.bytes).toBeLessThan(200_000);
   expect(outcome.deleted.reduce((sum, entry) => sum + entry.bytes, 0)).toBe(outcome.bytes);
-  expect(outcome.deleted.filter((entry) => entry.bytes >= 200_000)).toHaveLength(1);
+  expect(outcome.deleted.filter((entry) => entry.bytes >= 200_000)).toHaveLength(0);
+});
+
+test("apply: a path that disappears after the rescan is stale, not deleted", async () => {
+  const first = await worktree("gone-first");
+  const second = await worktree("gone-second");
+  for (const [name, path] of [
+    ["gone-first", first],
+    ["gone-second", second],
+  ] as const) {
+    age(path);
+    age(join(home, `${name}-main/.git/worktrees/${name}/logs/HEAD`));
+  }
+  // The first finding's delete hook removes the second path, after the rescan has judged both.
+  const hook = join(home, "hook.sh");
+  writeFileSync(hook, `#!/bin/sh\nif [ "$1" = "${first}" ]; then rm -rf "${second}"; fi\n`);
+  chmodSync(hook, 0o755);
+  const hooked = { ...ctx, config: { ...ctx.config, deleteHook: hook } };
+  const { findings } = await scan(hooked, ["worktree"]);
+  const byPath = (path: string) => findings.find((finding) => finding.paths[0] === path) as Finding;
+  const ordered = [byPath(first), byPath(second)];
+  expect(ordered.map((finding) => finding.blockers)).toEqual([[], []]);
+  const outcome = await applyPlan(await createPlan(ctx.paths, ordered, 7), hooked);
+  expect(outcome.applied).toEqual([ordered[0]?.id as string]);
+  expect(outcome.stale).toEqual([ordered[1]?.id as string]);
+  expect(outcome.staleReasons[ordered[1]?.id as string]).toBe("gone since the plan");
+  expect(outcome.deleted.map((entry) => entry.id)).toEqual([ordered[0]?.id as string]);
+  expect(existsSync(first)).toBe(false);
 });
 
 test("apply: a hold taken after the plan blocks the deletion", async () => {

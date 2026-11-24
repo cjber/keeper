@@ -241,7 +241,12 @@ export function readPlan(paths: Paths, id: string): Plan {
 export interface Deleted {
   id: string;
   paths: string[];
-  /** Allocated bytes the deletion freed, measured marginally at apply. A finding that failed partway records 0, because its share is unknown. */
+  /**
+   * Allocated bytes deleting this finding's paths would free on their own, measured before the apply lock was
+   * taken: an inode counts only when every link to it lies inside this finding's paths, so a file shared
+   * between two deleted findings is counted by neither, a conservative undercount. A finding that failed
+   * partway records 0, because its share is unknown.
+   */
   bytes: number;
 }
 
@@ -476,10 +481,35 @@ async function execute(
   return { reniced: 0, stopped: 0 };
 }
 
+/**
+ * What each planned delete finding would free on its own, from a rescan and one `freedBytes` walk per finding,
+ * all before the lock is taken: the walks are full tree walks, so they must not hold the lock other keeper runs
+ * wait on, and no walk may sit between the under-lock eligibility check and its deletion. A finding the
+ * measurement rescan did not return gets no entry, and records 0 if it still deletes.
+ */
+async function measuredFreed(plan: Plan, ctx: Context): Promise<Map<string, number>> {
+  const scanned = await scan(
+    {
+      ...ctx,
+      staleDays: plan.staleDays,
+      appStaleDays: plan.appStaleDays ?? ctx.appStaleDays,
+      sizeOnly: new Set(plan.findingIds),
+    },
+    plan.categories,
+  );
+  const wanted = new Set(plan.findingIds);
+  const measured = new Map<string, number>();
+  for (const finding of scanned.findings)
+    if (wanted.has(finding.id) && finding.action === "delete")
+      measured.set(finding.id, await freedBytes(finding.paths));
+  return measured;
+}
+
 /** Rescans and re-matches ids first: a plan is approval for the state it saw, not for whatever is there now. */
-export function applyPlan(plan: Plan, ctx: Context): Promise<Outcome> {
+export async function applyPlan(plan: Plan, ctx: Context): Promise<Outcome> {
+  const measured = await measuredFreed(plan, ctx);
   return withLock(ctx.paths, async () => {
-    const outcome = await applyUnlocked(plan, ctx);
+    const outcome = await applyUnlocked(plan, ctx, measured);
     // After the rescan, so a stale plan does not empty the trash it never applied anything beside.
     const oldTrash = await emptyOldTrashUnlocked(ctx.paths, ctx.config);
     if (oldTrash) outcome.oldTrash = oldTrash;
@@ -489,7 +519,7 @@ export function applyPlan(plan: Plan, ctx: Context): Promise<Outcome> {
   });
 }
 
-async function applyUnlocked(plan: Plan, ctx: Context): Promise<Outcome> {
+async function applyUnlocked(plan: Plan, ctx: Context, measured: ReadonlyMap<string, number>): Promise<Outcome> {
   const current = new Map(
     (
       await scan(
@@ -525,12 +555,16 @@ async function applyUnlocked(plan: Plan, ctx: Context): Promise<Outcome> {
           : "changed since the plan";
       continue;
     }
+    // The rescan ran before this deletion, so a delete whose paths have all gone since then is stale, not a success.
+    if (finding.action === "delete" && finding.paths.length && finding.paths.every((path) => !existsSync(path))) {
+      outcome.stale.push(findingId);
+      outcome.staleReasons[findingId] = "gone since the plan";
+      continue;
+    }
     const deleted: string[] = [];
     try {
-      // Measured right before this deletion, under the lock: a regular inode counts only when every link left
-      // to it is inside this finding's paths, so earlier deletions in this run have already dropped their links
-      // and a file another path still links frees nothing. Non-delete actions keep their measured size.
-      const freed = finding.action === "delete" ? await freedBytes(finding.paths) : finding.bytes;
+      // Measured standalone before the lock, per finding: see `measuredFreed`. Non-delete actions keep their size.
+      const freed = finding.action === "delete" ? (measured.get(findingId) ?? 0) : finding.bytes;
       const done = await execute(finding, ctx, deleted);
       outcome.applied.push(findingId);
       outcome.bytes += freed;

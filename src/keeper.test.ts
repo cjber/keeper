@@ -3,6 +3,7 @@ import {
   chmodSync,
   existsSync,
   linkSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -210,6 +211,33 @@ test("plan: overlapping roots do not count a hardlink with a link outside the pl
   expect(existsSync(join(child, "blob"))).toBe(true);
 });
 
+test("plan: a walk that cannot read part of a tree keeps the scanned size", async () => {
+  const tree = join(home, "unreadable");
+  const locked = join(tree, "locked");
+  mkdirSync(locked, { recursive: true });
+  writeFileSync(join(locked, "blob"), Buffer.alloc(200_000, 1));
+  chmodSync(locked, 0o000);
+  try {
+    const finding: Finding = {
+      id: "unreadable",
+      state: "state-unreadable",
+      category: "build",
+      risk: "low",
+      action: "delete",
+      title: "unreadable",
+      paths: [tree],
+      packages: [],
+      bytes: 999_999,
+      reason: "test",
+      blockers: [],
+    };
+    // find reads the tree's own entries, reports the locked dir and exits 1: that share is no answer.
+    expect((await createPlan(ctx.paths, [finding], 7)).bytes).toBe(999_999);
+  } finally {
+    chmodSync(locked, 0o755);
+  }
+});
+
 test("build: applying two hardlinked build dirs in reverse scan order counts the shared file for neither", async () => {
   const first = await worktree("rev-a");
   const second = await worktree("rev-b");
@@ -259,6 +287,33 @@ test("apply: a path that disappears after the rescan is stale, not deleted", asy
   expect(outcome.staleReasons[ordered[1]?.id as string]).toBe("gone since the plan");
   expect(outcome.deleted.map((entry) => entry.id)).toEqual([ordered[0]?.id as string]);
   expect(existsSync(first)).toBe(false);
+});
+
+test("apply: a path that became a dangling symlink after the rescan is still deleted", async () => {
+  const first = await worktree("dangle-first");
+  const second = await worktree("dangle-second");
+  for (const [name, path] of [
+    ["dangle-first", first],
+    ["dangle-second", second],
+  ] as const) {
+    age(path);
+    age(join(home, `${name}-main/.git/worktrees/${name}/logs/HEAD`));
+  }
+  // The link is still on disk, so the finding is not gone: removeTree deletes the link itself.
+  const hook = join(home, "hook.sh");
+  writeFileSync(
+    hook,
+    `#!/bin/sh\nif [ "$1" = "${first}" ]; then rm -rf "${second}"; ln -s "${join(home, "nowhere")}" "${second}"; fi\n`,
+  );
+  chmodSync(hook, 0o755);
+  const hooked = { ...ctx, config: { ...ctx.config, deleteHook: hook } };
+  const { findings } = await scan(hooked, ["worktree"]);
+  const byPath = (path: string) => findings.find((finding) => finding.paths[0] === path) as Finding;
+  const ordered = [byPath(first), byPath(second)];
+  const outcome = await applyPlan(await createPlan(ctx.paths, ordered, 7), hooked);
+  expect(outcome.stale).toEqual([]);
+  expect(outcome.applied).toEqual(ordered.map((finding) => finding.id));
+  expect(() => lstatSync(second)).toThrow();
 });
 
 test("apply: a hold taken after the plan blocks the deletion", async () => {

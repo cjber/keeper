@@ -87,56 +87,138 @@ function writeJson(path: string, value: unknown): void {
 
 const newId = () => randomBytes(4).toString("hex");
 
+/** Paths reduced to the outermost ones, per path rather than per finding, so no subtree is walked twice. */
+function outermostPaths(paths: readonly string[]): string[] {
+  return paths.filter(
+    (path, index) =>
+      !paths.some(
+        (other, otherIndex) =>
+          otherIndex !== index && ((other === path && otherIndex < index) || path.startsWith(`${other}/`)),
+      ),
+  );
+}
+
+/** One inode from the freed walk, with the owners whose paths hold an entry for it, in owner order. */
+interface FreedInode {
+  blocks: number;
+  regular: boolean;
+  /** A regular file frees only once every link to it was seen inside the walked roots. Other inodes always free. */
+  eligible: boolean;
+  owners: string[];
+}
+
 /**
- * Allocated bytes deleting these paths would free on their own: an inode counts only once every link to it is
- * inside the paths, so a file hardlinked from a path that stays behind counts for nothing. Directories and other
- * inodes count their own blocks. A path that has vanished counts for nothing.
+ * Allocated bytes deleting the owners' paths would free, from one idle-priority `find -xdev` walk over the
+ * outermost roots: an inode counts only once every link to it is inside the roots, so a file hardlinked from a
+ * path that stays behind counts for nothing. Directories and other inodes count their own blocks once, however
+ * many roots reach them. The walk stays on each root's filesystem, as `removeTree` refuses a tree holding a
+ * mount, and a directory inode already visited is pruned with its whole subtree, so a bind mount that loops
+ * back cannot make the walk unbounded. A path that has vanished counts for nothing.
  */
-function freedBytes(paths: readonly string[]): number {
-  const inodes = new Map<string, { blocks: number; nlink: number; regular: boolean; seen: number }>();
-  const stack = [...paths];
-  for (let path = stack.pop(); path !== undefined; path = stack.pop()) {
-    let stat: ReturnType<typeof lstatSync>;
-    try {
-      stat = lstatSync(path);
-    } catch {
-      continue;
+async function freedInodes(owners: readonly { id: string; paths: readonly string[] }[]): Promise<FreedInode[]> {
+  const roots = outermostPaths(owners.flatMap((owner) => owner.paths));
+  if (!roots.length) return [];
+  const found = await run([
+    "nice",
+    "-n",
+    "19",
+    "ionice",
+    "-c",
+    "3",
+    "find",
+    ...roots,
+    "-xdev",
+    "-printf",
+    "%D %i %n %b %y %p\\0",
+  ]);
+  const inodes = new Map<string, FreedInode & { nlink: number; seen: number }>();
+  const visitedDirs = new Set<string>();
+  let skipped: string | undefined;
+  for (const record of found.stdout.split("\0")) {
+    const match = /^(\d+) (\d+) (\d+) (\d+) (.) ([\s\S]*)$/.exec(record);
+    if (!match) continue;
+    const [, dev, ino, nlink, blocks, type, path] = match as unknown as [
+      string,
+      string,
+      string,
+      string,
+      string,
+      string,
+      string,
+    ];
+    if (skipped !== undefined && (path === skipped || path.startsWith(`${skipped}/`))) continue;
+    skipped = undefined;
+    const key = `${dev}:${ino}`;
+    if (type === "d") {
+      if (visitedDirs.has(key)) {
+        skipped = path;
+        continue;
+      }
+      visitedDirs.add(key);
     }
-    const key = `${stat.dev}:${stat.ino}`;
+    const ownersHere = owners
+      .filter((owner) => owner.paths.some((root) => path === root || path.startsWith(`${root}/`)))
+      .map((owner) => owner.id);
     const entry = inodes.get(key) ?? {
-      blocks: (stat.blocks ?? 0) * 512,
-      nlink: stat.nlink,
-      regular: stat.isFile(),
+      blocks: (Number(blocks) || 0) * 512,
+      nlink: Number(nlink) || 0,
+      regular: type === "f",
+      eligible: type !== "f",
+      owners: [] as string[],
       seen: 0,
     };
     entry.seen++;
+    entry.eligible = !entry.regular || entry.seen >= entry.nlink;
+    for (const id of ownersHere) if (!entry.owners.includes(id)) entry.owners.push(id);
     inodes.set(key, entry);
-    if (!stat.isDirectory()) continue;
-    try {
-      for (const name of readdirSync(path)) stack.push(join(path, name));
-    } catch {}
   }
+  return [...inodes.values()].map(({ blocks, regular, eligible, owners: ids }) => ({
+    blocks,
+    regular,
+    eligible,
+    owners: ids,
+  }));
+}
+
+/**
+ * What one owner's deletion frees out of a joint walk, given the owners already deleted. A shared regular inode
+ * frees at its last owner's deletion, and only once every other owner has actually gone. A directory or other
+ * inode frees at the first owner that deletes it, so an owner whose predecessor failed can still record it.
+ */
+function recordedFreed(inodes: readonly FreedInode[], id: string, appliedBefore: ReadonlySet<string>): number {
   let total = 0;
-  for (const entry of inodes.values()) if (!entry.regular || entry.seen >= entry.nlink) total += entry.blocks;
+  for (const inode of inodes) {
+    if (!inode.eligible) continue;
+    const at = inode.owners.indexOf(id);
+    if (at < 0) continue;
+    if (inode.regular) {
+      if (at === inode.owners.length - 1 && inode.owners.every((owner) => owner === id || appliedBefore.has(owner)))
+        total += inode.blocks;
+    } else if (!inode.owners.slice(0, at).some((owner) => appliedBefore.has(owner))) total += inode.blocks;
+  }
   return total;
 }
 
-export function createPlan(
+export async function createPlan(
   paths: Paths,
   chosen: readonly Finding[],
   staleDays: number,
   appStaleDays = defaultAppStaleDays,
   now = Date.now(),
-): Plan {
+): Promise<Plan> {
   const findings = outermost(chosen);
   // A delete finding whose paths are on disk is costed by what deleting the planned set would free, not by its
   // batch-attributed size. A finding with nothing on disk keeps its measured size, as a package removal does.
   const onDisk = findings.filter(
     (finding) => finding.action === "delete" && finding.paths.some((path) => existsSync(path)),
   );
+  const onDiskIds = new Set(onDisk.map((finding) => finding.id));
+  const walked = onDisk.length
+    ? await freedInodes([{ id: "plan", paths: onDisk.flatMap((finding) => finding.paths) }])
+    : [];
   const plannedBytes =
-    findings.reduce((sum, finding) => sum + (onDisk.includes(finding) ? 0 : finding.bytes), 0) +
-    freedBytes(onDisk.flatMap((finding) => finding.paths));
+    findings.reduce((sum, finding) => sum + (onDiskIds.has(finding.id) ? 0 : finding.bytes), 0) +
+    walked.reduce((sum, inode) => sum + (inode.eligible ? inode.blocks : 0), 0);
   const plan: Plan = {
     schemaVersion,
     id: newId(),
@@ -435,10 +517,39 @@ async function execute(
   return { reniced: 0, stopped: 0 };
 }
 
+/**
+ * Rescans and measures what the planned deletions free, before the lock is taken: the scan only reads and the
+ * freed walk is a full tree walk, so neither must hold the lock other keeper runs wait on. Under the lock each
+ * finding is re-matched against this rescan, a delete whose paths have all gone since is stale, and
+ * `recordedFreed` only credits an inode to a deletion that actually happened, so the outcome keeps what each
+ * deletion freed.
+ */
+async function measurePlan(
+  plan: Plan,
+  ctx: Context,
+): Promise<{ current: Map<string, Finding>; measured: FreedInode[] }> {
+  const scanned = await scan(
+    {
+      ...ctx,
+      staleDays: plan.staleDays,
+      appStaleDays: plan.appStaleDays ?? ctx.appStaleDays,
+      sizeOnly: new Set(plan.findingIds),
+    },
+    plan.categories,
+  );
+  const current = new Map(scanned.findings.map((finding) => [finding.id, finding]));
+  const owners = plan.findingIds.flatMap((id) => {
+    const finding = current.get(id);
+    return finding && finding.action === "delete" ? [{ id, paths: finding.paths }] : [];
+  });
+  return { current, measured: await freedInodes(owners) };
+}
+
 /** Rescans and re-matches ids first: a plan is approval for the state it saw, not for whatever is there now. */
-export function applyPlan(plan: Plan, ctx: Context): Promise<Outcome> {
+export async function applyPlan(plan: Plan, ctx: Context): Promise<Outcome> {
+  const { current, measured } = await measurePlan(plan, ctx);
   return withLock(ctx.paths, async () => {
-    const outcome = await applyUnlocked(plan, ctx);
+    const outcome = await applyUnlocked(plan, ctx, current, measured);
     // After the rescan, so a stale plan does not empty the trash it never applied anything beside.
     const oldTrash = await emptyOldTrashUnlocked(ctx.paths, ctx.config);
     if (oldTrash) outcome.oldTrash = oldTrash;
@@ -448,20 +559,12 @@ export function applyPlan(plan: Plan, ctx: Context): Promise<Outcome> {
   });
 }
 
-async function applyUnlocked(plan: Plan, ctx: Context): Promise<Outcome> {
-  const current = new Map(
-    (
-      await scan(
-        {
-          ...ctx,
-          staleDays: plan.staleDays,
-          appStaleDays: plan.appStaleDays ?? ctx.appStaleDays,
-          sizeOnly: new Set(plan.findingIds),
-        },
-        plan.categories,
-      )
-    ).findings.map((finding) => [finding.id, finding]),
-  );
+async function applyUnlocked(
+  plan: Plan,
+  ctx: Context,
+  current: ReadonlyMap<string, Finding>,
+  measured: readonly FreedInode[],
+): Promise<Outcome> {
   const outcome: Outcome = {
     applied: [],
     stale: [],
@@ -472,6 +575,8 @@ async function applyUnlocked(plan: Plan, ctx: Context): Promise<Outcome> {
     reniced: 0,
     stopped: 0,
   };
+  /** Delete findings already deleted in this run, so a shared inode is credited only at its last link. */
+  const deletedOwners = new Set<string>();
   for (const findingId of plan.findingIds) {
     const finding = current.get(findingId);
     if (!finding || !eligible(finding) || finding.state !== plan.states?.[findingId]) {
@@ -484,16 +589,23 @@ async function applyUnlocked(plan: Plan, ctx: Context): Promise<Outcome> {
           : "changed since the plan";
       continue;
     }
+    // The rescan ran before the lock, so a delete whose paths have all gone since then is stale, not a success.
+    if (finding.action === "delete" && finding.paths.length && finding.paths.every((path) => !existsSync(path))) {
+      outcome.stale.push(findingId);
+      outcome.staleReasons[findingId] = "gone since the plan";
+      continue;
+    }
     const deleted: string[] = [];
-    // Measured before the deletion, against what is on disk now: a shared inode another path still links frees
-    // nothing, however the scan batch attributed it. Non-delete actions keep their measured size.
-    const freed = finding.action === "delete" ? freedBytes(finding.paths) : finding.bytes;
     try {
       const done = await execute(finding, ctx, deleted);
+      // From the walk taken before the lock: a shared inode another path still links frees nothing, however the
+      // scan batch attributed it. Non-delete actions keep their measured size.
+      const freed = finding.action === "delete" ? recordedFreed(measured, findingId, deletedOwners) : finding.bytes;
       outcome.applied.push(findingId);
       outcome.bytes += freed;
       outcome.reniced += done.reniced;
       outcome.stopped += done.stopped;
+      if (finding.action === "delete") deletedOwners.add(findingId);
       if (deleted.length) outcome.deleted.push({ id: findingId, paths: deleted, bytes: freed });
     } catch (error) {
       outcome.failed.push({ id: findingId, error: String(error) });

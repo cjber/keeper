@@ -210,6 +210,45 @@ test("plan: overlapping roots do not count a hardlink with a link outside the pl
   expect(existsSync(join(child, "blob"))).toBe(true);
 });
 
+test("build: applying two hardlinked build dirs in reverse scan order credits the shared file once", async () => {
+  const first = await worktree("rev-a");
+  const second = await worktree("rev-b");
+  for (const path of [first, second]) mkdirSync(join(path, "target"), { recursive: true });
+  writeFileSync(join(first, "target/blob"), Buffer.alloc(200_000, 1));
+  linkSync(join(first, "target/blob"), join(second, "target/blob"));
+  for (const path of [first, second]) {
+    age(join(path, "target/blob"));
+    age(join(path, "target"));
+  }
+  const { findings } = await scan(ctx, ["build"]);
+  expect(findings).toHaveLength(2);
+  const reversed = [...findings].reverse();
+  const outcome = await applyPlan(await createPlan(ctx.paths, reversed, 7), ctx);
+  expect(outcome.applied).toEqual(reversed.map((finding) => finding.id));
+  expect(outcome.stale).toEqual([]);
+  expect(existsSync(first)).toBe(true);
+  // Both links are gone, so the shared inode was freed and must be credited to exactly one deletion.
+  expect(outcome.bytes).toBeGreaterThanOrEqual(200_000);
+  expect(outcome.deleted.reduce((sum, entry) => sum + entry.bytes, 0)).toBe(outcome.bytes);
+  expect(outcome.deleted.filter((entry) => entry.bytes >= 200_000)).toHaveLength(1);
+});
+
+test("apply: a hold taken after the plan blocks the deletion", async () => {
+  const batch = join(home, "batch");
+  mkdirSync(batch);
+  writeFileSync(join(batch, "out"), "data");
+  age(batch);
+  const { findings } = await scan(ctx, ["agent"]);
+  const plan = await createPlan(ctx.paths, findings, 7);
+  const until = new Date(Date.now() + 86_400_000).toISOString();
+  writeLedger(ctx.paths, { holds: [{ path: batch, until, reason: "resuming", actor: "a" }], claims: [] });
+  const outcome = await applyPlan(plan, ctx);
+  expect(outcome.applied).toEqual([]);
+  expect(outcome.stale).toEqual([findings[0]?.id as string]);
+  expect(outcome.staleReasons[findings[0]?.id as string]).toContain("held by a");
+  expect(existsSync(join(batch, "out"))).toBe(true);
+});
+
 test("apply deletes at once, logs what it deleted, and a changed finding is refused as stale", async () => {
   const batch = join(home, "batch");
   mkdirSync(batch);

@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-24
+
 - **Sizes now count allocated blocks, and apply records what a deletion actually freed.** A batch of paths is
   measured in one walk, so a file hardlinked into many worktrees (as bun links `node_modules` from its shared
   cache) is charged once, to the first path that holds it, instead of once per worktree. That charge is only an

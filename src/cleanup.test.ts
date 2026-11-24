@@ -12,7 +12,7 @@ import {
   launcherOwners,
   scan,
 } from "./scanners";
-import { defaultPaths } from "./system";
+import { defaultPaths, sizes } from "./system";
 import { bulkEligible, eligible } from "./types";
 import { coveredDays, readUsage, recordUsage, type UsageLedger } from "./usage";
 
@@ -334,6 +334,26 @@ test("duplicates: copies stay inside one personal tree, and application trees ar
   age(downloads, new Date(Date.now() - 1 * day));
   const { findings } = await scan(ctx, ["duplicates"]);
   expect(findings.map((finding) => finding.paths[0])).toEqual([documents]);
+});
+
+test("sizes: a hardlinked file is charged once, to the first path, in allocated blocks", async () => {
+  const a = join(home, "a", "node_modules");
+  const b = join(home, "b", "node_modules");
+  mkdirSync(a, { recursive: true });
+  mkdirSync(b, { recursive: true });
+  writeFileSync(join(a, "blob.js"), Buffer.alloc(200_000, 1));
+  linkSync(join(a, "blob.js"), join(b, "blob.js"));
+  const sparse = join(home, "sparse");
+  mkdirSync(sparse, { recursive: true });
+  writeFileSync(join(sparse, "blob"), "");
+  truncateSync(join(sparse, "blob"), 10 * 1024 ** 2);
+  const map = await sizes([a, b, sparse]);
+  // The first path pays for the shared inode; the second pays only for its own directory, if anything.
+  expect(map.get(a) ?? 0).toBeGreaterThanOrEqual(200_000);
+  expect(map.get(b) ?? 0).toBeLessThan(200_000);
+  expect((map.get(a) ?? 0) + (map.get(b) ?? 0)).toBeLessThan(400_000);
+  // A sparse file frees almost nothing, however long it is.
+  expect(map.get(sparse) ?? 0).toBeLessThan(1024 ** 2);
 });
 
 test("duplicates: hard links and files inside git repos are skipped", async () => {

@@ -1,15 +1,6 @@
-import {
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  readlinkSync,
-  renameSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, readdirSync, readFileSync, readlinkSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { type Paths, run } from "./system";
+import { type Paths, run, writeAtomically } from "./system";
 
 /**
  * When keeper first recorded usage, the last time a process from each package was seen, and the hours it actually
@@ -54,10 +45,7 @@ export function readUsage(paths: Paths): UsageLedger | undefined {
 
 /** Atomic, so a scan never reads a half-written ledger. */
 export function writeUsage(paths: Paths, ledger: UsageLedger): void {
-  mkdirSync(paths.state, { recursive: true });
-  const temporary = `${usagePath(paths)}.${process.pid}`;
-  writeFileSync(temporary, `${JSON.stringify(ledger, null, 2)}\n`);
-  renameSync(temporary, usagePath(paths));
+  writeAtomically(usagePath(paths), `${JSON.stringify(ledger, null, 2)}\n`);
 }
 
 /**

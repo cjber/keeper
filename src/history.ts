@@ -1,7 +1,7 @@
-import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { readAudit } from "./ledger";
-import { type Paths, run } from "./system";
+import { type Paths, run, writeAtomically } from "./system";
 
 /** Free and total bytes on the filesystem that holds the home directory, at one moment. */
 export interface Sample {
@@ -61,9 +61,7 @@ export async function sample(paths: Paths, now = Date.now(), force = false): Pro
   if (old.length) {
     // Rewritten through a rename, so an interrupted prune leaves the old file whole.
     const kept = [...samples.filter((entry) => !old.includes(entry)), reading];
-    const temporary = `${historyPath(paths)}.${process.pid}`;
-    writeFileSync(temporary, kept.map((entry) => `${JSON.stringify(entry)}\n`).join(""));
-    renameSync(temporary, historyPath(paths));
+    writeAtomically(historyPath(paths), kept.map((entry) => `${JSON.stringify(entry)}\n`).join(""));
   } else appendFileSync(historyPath(paths), `${JSON.stringify(reading)}\n`);
   return reading;
 }

@@ -1778,7 +1778,7 @@ test("every keeper command the docs name exists in the CLI", async () => {
 
 test("package caches: prunable ones always offered, cleared-whole ones only once large", async () => {
   mkdirSync(join(home, ".npm/_cacache"), { recursive: true });
-  // du -b counts apparent size, so a sparse file stands in for gigabytes of downloads.
+  // Sizes are allocated blocks, so a sparse file frees nothing and cannot stand in for gigabytes of downloads.
   writeFileSync(join(home, ".npm/_cacache/blob"), "");
   truncateSync(join(home, ".npm/_cacache/blob"), 3 * 1024 ** 3);
   mkdirSync(join(home, ".bun/install/cache"), { recursive: true });
@@ -1786,7 +1786,7 @@ test("package caches: prunable ones always offered, cleared-whole ones only once
   mkdirSync(join(home, ".local/share/pnpm/store"), { recursive: true });
   const { findings } = await scan(ctx, ["package-cache"]);
   const byTitle = Object.fromEntries(findings.map((finding) => [finding.title, finding]));
-  expect(byTitle["npm cache"]).toMatchObject({ action: "npm-clean", bytes: 3 * 1024 ** 3, risk: "low" });
+  expect(byTitle["npm cache"]).toBeUndefined();
   expect(byTitle["pnpm cache"]).toMatchObject({ action: "pnpm-prune", bytes: 0 });
   expect(byTitle["bun cache"]).toBeUndefined();
 });

@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cachedScan, categoriesOf, forget, forgetUnder } from "./cache";
@@ -86,6 +95,27 @@ test("a hold made after caching still blocks the cached finding", async () => {
   const reused = await cachedScan(ctx, { only: ["agent"] });
   expect(reused.cached).toEqual(["agent"]);
   expect(reused.findings[0]?.blockers.join()).toContain("held by a");
+});
+
+test("state writes leave a same-pid temp file from another PID namespace alone", async () => {
+  await cachedScan(ctx, { only: ["agent"] });
+  // Another sandbox can own this process's pid, so its in-flight temp file must not be renamed away.
+  const cacheTemp = `${join(ctx.paths.state, "scan-cache.json")}.${process.pid}`;
+  const ledgerTemp = `${join(ctx.paths.state, "ledger.json")}.${process.pid}`;
+  writeFileSync(cacheTemp, "another writer");
+  writeFileSync(ledgerTemp, "another writer");
+  forget(ctx.paths, ["agent"]);
+  writeLedger(ctx.paths, { holds: [], claims: [] });
+  expect(readFileSync(cacheTemp, "utf8")).toBe("another writer");
+  expect(readFileSync(ledgerTemp, "utf8")).toBe("another writer");
+  expect(existsSync(join(ctx.paths.state, "scan-cache.json"))).toBe(true);
+  expect(existsSync(join(ctx.paths.state, "ledger.json"))).toBe(true);
+});
+
+test("a failed cache write does not fail the scan it follows", async () => {
+  mkdirSync(join(ctx.paths.state, "scan-cache.json"), { recursive: true });
+  const report = await cachedScan(ctx, { only: ["agent"] });
+  expect(report.findings).toHaveLength(1);
 });
 
 test("readings are spaced ten minutes apart, skip torn lines and drop past 90 days", async () => {

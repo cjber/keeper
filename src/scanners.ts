@@ -1016,7 +1016,7 @@ function quotedPaths(stderr: string): string[] {
 async function tmpUsage(root: string, depth: number): Promise<{ entries: TmpEntry[]; unreadable: string[] }> {
   const du = ["du", "-0", "-x", "-a", "-d", String(depth)];
   const [sized, counted] = await Promise.all([
-    run([...du, "-b", "--time", "--time-style=+%s", root]),
+    run([...du, "-B1", "--time", "--time-style=+%s", root]),
     run([...du, "--inodes", root]),
   ]);
   const fields = (line: string, n: number) => {

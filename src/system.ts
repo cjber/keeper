@@ -1,6 +1,16 @@
-import { readdirSync, readFileSync, readlinkSync, statSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import {
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 export interface Result {
   code: number;
@@ -147,20 +157,53 @@ export function ageDays(path: string, now = Date.now()): number {
   return (now - statSync(path).mtimeMs) / 86_400_000;
 }
 
-/** Two at a time: du spends its time walking inodes in the kernel, which idle priority does not yield. */
-export async function sizes(paths: readonly string[], limit = 2): Promise<Map<string, number>> {
-  const result = new Map<string, number>();
-  let next = 0;
-  await Promise.all(
-    Array.from({ length: limit }, async () => {
-      while (next < paths.length) {
-        const path = paths[next++] as string;
-        // Size walks are the expensive part of every scan. Keep them in the idle CPU and IO classes so a diagnostic
-        // run does not compete with the desktop when the machine is already overloaded.
-        const du = await run(["nice", "-n", "19", "ionice", "-c", "3", "du", "-sxb", path]);
-        result.set(path, Number.parseInt(du.stdout, 10) || 0);
-      }
-    }),
-  );
+/**
+ * Writes a file through a temp file and a rename, so a reader never sees half of it. The temp name carries random
+ * bytes as well as the pid: two PID namespaces can hold the same pid over one shared state directory, and a name
+ * built from the pid alone lets one writer rename the other's temp file away.
+ */
+export function writeAtomically(path: string, content: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const temporary = `${path}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+  try {
+    writeFileSync(temporary, content);
+    renameSync(temporary, path);
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    throw error;
+  }
+}
+
+/**
+ * Allocated bytes for a batch of paths, from one `du` walk over the whole batch. `du` charges a hardlinked inode
+ * once per invocation, to the first path that holds it, so sizing each path on its own would count a file linked
+ * into many worktrees once per worktree. `-B1` without `--apparent-size` reports allocated blocks, so a sparse
+ * file counts for almost nothing. The batch charge is an attribution, not what deleting one path alone frees:
+ * a shared inode stays on disk while another link to it does.
+ *
+ * `du` prints no line for an argument an earlier argument already covers, so only the outermost paths go to the
+ * batch walk. A nested path is then sized on a walk of its own, so its size is its standalone size (which counts
+ * inodes it shares with its parent again), never a silent 0.
+ */
+export async function sizes(paths: readonly string[]): Promise<Map<string, number>> {
+  const result = new Map(paths.map((path) => [path, 0]));
+  if (!paths.length) return result;
+  const nested = (path: string, index: number) =>
+    paths.some(
+      (other, otherIndex) => (otherIndex < index && other === path) || (other !== path && path.startsWith(`${other}/`)),
+    );
+  const walk = async (batch: readonly string[]) => {
+    // Size walks are the expensive part of every scan. Keep them in the idle CPU and IO classes so a diagnostic
+    // run does not compete with the desktop when the machine is already overloaded.
+    const du = await run(["nice", "-n", "19", "ionice", "-c", "3", "du", "-0", "-s", "-x", "-B1", "--", ...batch]);
+    for (const line of du.stdout.split("\0")) {
+      const tab = line.indexOf("\t");
+      if (tab < 0) continue;
+      const path = line.slice(tab + 1);
+      if (result.has(path)) result.set(path, Number.parseInt(line.slice(0, tab), 10) || 0);
+    }
+  };
+  await walk(paths.filter((path, index) => !nested(path, index)));
+  for (const [index, path] of paths.entries()) if (nested(path, index)) await walk([path]);
   return result;
 }

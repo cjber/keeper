@@ -292,7 +292,7 @@ async function auto(): Promise<{ value: { summary: string } & Record<string, unk
   const ready = report.findings.filter((finding) => bulkEligible(finding) && finding.risk === "low");
   const paths = ctx.paths;
   const outcome = ready.length
-    ? await applyPlan(createPlan(paths, ready, ctx.staleDays, ctx.appStaleDays), ctx)
+    ? await applyPlan(await createPlan(paths, ready, ctx.staleDays, ctx.appStaleDays), ctx)
     : undefined;
   // applyPlan deletes the trash an older keeper left, so with nothing to apply auto does it here.
   const oldTrash = outcome ? outcome.oldTrash : await emptyOldTrash(paths);
@@ -363,7 +363,7 @@ async function dispatch(
             ? `keeper plan ${rest.map(shellWord).join(" ")} --stale-days 0`
             : "keeper scan",
         );
-      const plan = createPlan(paths, chosen, flags.staleDays, flags.appStaleDays);
+      const plan = await createPlan(paths, chosen, flags.staleDays, flags.appStaleDays);
       const skippedText = skipped.map(({ id, reason }) => `\nskipped ${id}: ${reason}`).join("");
       return {
         value: { ...plan, skipped, next: `keeper apply ${plan.id} --yes` },

@@ -7,6 +7,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+- **Sizes now count allocated blocks, and apply records what a deletion actually freed.** A batch of paths is
+  measured in one walk, so a file hardlinked into many worktrees (as bun links `node_modules` from its shared
+  cache) is charged once, to the first path that holds it, instead of once per worktree. That charge is only an
+  attribution: deleting one path frees a shared file only when its last link goes, and apply now records what
+  deleting each finding on its own would free rather than the batch charge, so a file shared between two
+  findings in one apply is counted by neither, while the plan's total counts it once, since the plan deletes both. A walk that cannot read the whole tree keeps the scanned size instead of the share it read, and a path that is now a dangling symlink is still deleted rather than reported gone. Sizes are allocated blocks rather than file lengths, so sparse
+  files no longer promise space they do not hold. A path nested inside another path in the same batch is sized
+  on its own walk, so it reports its own size instead of 0.
+- **Parallel runs no longer fail each other's state writes.** State files are written through temp names that are
+  unique per write, not just per pid, so two sandboxes that share a pid cannot rename each other's temp file away,
+  and a lost scan cache write no longer fails the command behind it.
+
 ## [0.9.0] - 2026-11-22
 
 - **Pull requests are listed through GitHub's REST API.** `gh pr list` spent the GraphQL limit that every agent and tool

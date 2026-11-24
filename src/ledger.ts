@@ -1,16 +1,6 @@
-import {
-  appendFileSync,
-  closeSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-  writeSync,
-} from "node:fs";
+import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
-import type { Paths } from "./system";
+import { type Paths, writeAtomically } from "./system";
 
 /** What an agent declared itself, which outranks anything a scanner can infer. */
 export interface Hold {
@@ -59,10 +49,7 @@ export function readLedger(paths: Paths): Ledger {
 }
 
 export function writeLedger(paths: Paths, ledger: Ledger): void {
-  mkdirSync(paths.state, { recursive: true });
-  const temporary = `${ledgerPath(paths)}.${process.pid}`;
-  writeFileSync(temporary, `${JSON.stringify(ledger, null, 2)}\n`);
-  renameSync(temporary, ledgerPath(paths));
+  writeAtomically(ledgerPath(paths), `${JSON.stringify(ledger, null, 2)}\n`);
 }
 
 export function audit(paths: Paths, event: string, detail: object): void {

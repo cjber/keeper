@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { type Context, scan, targetIds, withHolds } from "./scanners";
-import type { Paths } from "./system";
+import { type Paths, writeAtomically } from "./system";
 import { type Category, categories, type Finding, type Scan, schemaVersion } from "./types";
 
 const minute = 60_000;
@@ -74,12 +74,14 @@ function read(paths: Paths): Cache | undefined {
   }
 }
 
-/** Atomic, so a reader never sees half a file. Two writers can each lose the other's categories, which only costs a rescan. */
+/**
+ * Atomic, so a reader never sees half a file. Two writers can each lose the other's categories, which only costs a
+ * rescan, so a lost write is never worth failing the command that triggered it, such as a claim.
+ */
 function write(paths: Paths, cache: Cache): void {
-  mkdirSync(paths.state, { recursive: true });
-  const temporary = `${cachePath(paths)}.${process.pid}`;
-  writeFileSync(temporary, JSON.stringify(cache));
-  renameSync(temporary, cachePath(paths));
+  try {
+    writeAtomically(cachePath(paths), JSON.stringify(cache));
+  } catch {}
 }
 
 /** Drops categories whose findings an action just changed, so the next read scans them. */

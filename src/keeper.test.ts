@@ -2,6 +2,8 @@ import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
+  linkSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -9,7 +11,6 @@ import {
   renameSync,
   rmSync,
   statSync,
-  truncateSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -156,13 +157,188 @@ test("build output is found in a dirty worktree only when ignored", async () => 
   expect(report.findings.map((finding) => finding.paths[0])).toEqual([join(path, "target")]);
 });
 
+test("build: applying only the second of two hardlinked build dirs is not stale, and frees only its own share", async () => {
+  const first = await worktree("shared-a");
+  const second = await worktree("shared-b");
+  for (const path of [first, second]) mkdirSync(join(path, "target"), { recursive: true });
+  writeFileSync(join(first, "target/blob"), Buffer.alloc(200_000, 1));
+  linkSync(join(first, "target/blob"), join(second, "target/blob"));
+  for (const path of [first, second]) {
+    age(join(path, "target/blob"));
+    age(join(path, "target"));
+  }
+  const { findings } = await scan(ctx, ["build"]);
+  expect(findings).toHaveLength(2);
+  // The batch charges the shared inode to the first dir it walks, so the second finding is the one it undercharges.
+  const secondFinding = findings.find((finding) => finding.bytes < 200_000) as Finding;
+  const kept = findings.find((finding) => finding !== secondFinding) as Finding;
+  // The wizard plans a subset of a batch scan, so the plan holds only the second finding.
+  const outcome = await applyPlan(await createPlan(ctx.paths, [secondFinding], 7), ctx);
+  expect(outcome).toMatchObject({ applied: [secondFinding.id], stale: [] });
+  expect(existsSync(secondFinding.paths[0] as string)).toBe(false);
+  expect(existsSync(join(kept.paths[0] as string, "blob"))).toBe(true);
+  // The shared inode still has a link in the first dir, so deleting the second freed only its own directory.
+  expect(outcome.bytes).toBeLessThan(200_000);
+  expect(outcome.deleted[0]?.bytes).toBe(outcome.bytes);
+});
+
+test("plan: overlapping roots do not count a hardlink with a link outside the plan", async () => {
+  const parent = join(home, "x/parent");
+  const child = join(parent, "child");
+  const other = join(home, "x/other");
+  mkdirSync(child, { recursive: true });
+  mkdirSync(other, { recursive: true });
+  writeFileSync(join(child, "blob"), Buffer.alloc(200_000, 1));
+  linkSync(join(child, "blob"), join(home, "outside"));
+  const make = (id: string, paths: string[]): Finding => ({
+    id,
+    state: `state-${id}`,
+    category: "build",
+    risk: "low",
+    action: "delete",
+    title: id,
+    paths,
+    packages: [],
+    bytes: 999_999,
+    reason: "test",
+    blockers: [],
+  });
+  const a = make("overlap-a", [parent]);
+  const b = make("overlap-b", [child, other]);
+  // Both survive outermost(): B has a path outside A, so the plan walks parent and child as separate roots.
+  const plan = await createPlan(ctx.paths, [a, b], 7);
+  expect(plan.bytes).toBeLessThan(200_000);
+  expect(existsSync(join(child, "blob"))).toBe(true);
+});
+
+test("plan: a walk that cannot read part of a tree keeps the scanned size", async () => {
+  const tree = join(home, "unreadable");
+  const locked = join(tree, "locked");
+  mkdirSync(locked, { recursive: true });
+  writeFileSync(join(locked, "blob"), Buffer.alloc(200_000, 1));
+  chmodSync(locked, 0o000);
+  try {
+    const finding: Finding = {
+      id: "unreadable",
+      state: "state-unreadable",
+      category: "build",
+      risk: "low",
+      action: "delete",
+      title: "unreadable",
+      paths: [tree],
+      packages: [],
+      bytes: 999_999,
+      reason: "test",
+      blockers: [],
+    };
+    // find reads the tree's own entries, reports the locked dir and exits 1: that share is no answer.
+    expect((await createPlan(ctx.paths, [finding], 7)).bytes).toBe(999_999);
+  } finally {
+    chmodSync(locked, 0o755);
+  }
+});
+
+test("build: applying two hardlinked build dirs in reverse scan order counts the shared file for neither", async () => {
+  const first = await worktree("rev-a");
+  const second = await worktree("rev-b");
+  for (const path of [first, second]) mkdirSync(join(path, "target"), { recursive: true });
+  writeFileSync(join(first, "target/blob"), Buffer.alloc(200_000, 1));
+  linkSync(join(first, "target/blob"), join(second, "target/blob"));
+  for (const path of [first, second]) {
+    age(join(path, "target/blob"));
+    age(join(path, "target"));
+  }
+  const { findings } = await scan(ctx, ["build"]);
+  expect(findings).toHaveLength(2);
+  const reversed = [...findings].reverse();
+  const outcome = await applyPlan(await createPlan(ctx.paths, reversed, 7), ctx);
+  expect(outcome.applied).toEqual(reversed.map((finding) => finding.id));
+  expect(outcome.stale).toEqual([]);
+  expect(existsSync(first)).toBe(true);
+  // Each deletion is measured on its own before the lock, when the other link still stands, so the shared
+  // inode is counted by neither: a conservative undercount, never a claim on space another link kept.
+  expect(outcome.bytes).toBeLessThan(200_000);
+  expect(outcome.deleted.reduce((sum, entry) => sum + entry.bytes, 0)).toBe(outcome.bytes);
+  expect(outcome.deleted.filter((entry) => entry.bytes >= 200_000)).toHaveLength(0);
+});
+
+test("apply: a path that disappears after the rescan is stale, not deleted", async () => {
+  const first = await worktree("gone-first");
+  const second = await worktree("gone-second");
+  for (const [name, path] of [
+    ["gone-first", first],
+    ["gone-second", second],
+  ] as const) {
+    age(path);
+    age(join(home, `${name}-main/.git/worktrees/${name}/logs/HEAD`));
+  }
+  // The first finding's delete hook removes the second path, after the rescan has judged both.
+  const hook = join(home, "hook.sh");
+  writeFileSync(hook, `#!/bin/sh\nif [ "$1" = "${first}" ]; then rm -rf "${second}"; fi\n`);
+  chmodSync(hook, 0o755);
+  const hooked = { ...ctx, config: { ...ctx.config, deleteHook: hook } };
+  const { findings } = await scan(hooked, ["worktree"]);
+  const byPath = (path: string) => findings.find((finding) => finding.paths[0] === path) as Finding;
+  const ordered = [byPath(first), byPath(second)];
+  expect(ordered.map((finding) => finding.blockers)).toEqual([[], []]);
+  const outcome = await applyPlan(await createPlan(ctx.paths, ordered, 7), hooked);
+  expect(outcome.applied).toEqual([ordered[0]?.id as string]);
+  expect(outcome.stale).toEqual([ordered[1]?.id as string]);
+  expect(outcome.staleReasons[ordered[1]?.id as string]).toBe("gone since the plan");
+  expect(outcome.deleted.map((entry) => entry.id)).toEqual([ordered[0]?.id as string]);
+  expect(existsSync(first)).toBe(false);
+});
+
+test("apply: a path that became a dangling symlink after the rescan is still deleted", async () => {
+  const first = await worktree("dangle-first");
+  const second = await worktree("dangle-second");
+  for (const [name, path] of [
+    ["dangle-first", first],
+    ["dangle-second", second],
+  ] as const) {
+    age(path);
+    age(join(home, `${name}-main/.git/worktrees/${name}/logs/HEAD`));
+  }
+  // The link is still on disk, so the finding is not gone: removeTree deletes the link itself.
+  const hook = join(home, "hook.sh");
+  writeFileSync(
+    hook,
+    `#!/bin/sh\nif [ "$1" = "${first}" ]; then rm -rf "${second}"; ln -s "${join(home, "nowhere")}" "${second}"; fi\n`,
+  );
+  chmodSync(hook, 0o755);
+  const hooked = { ...ctx, config: { ...ctx.config, deleteHook: hook } };
+  const { findings } = await scan(hooked, ["worktree"]);
+  const byPath = (path: string) => findings.find((finding) => finding.paths[0] === path) as Finding;
+  const ordered = [byPath(first), byPath(second)];
+  const outcome = await applyPlan(await createPlan(ctx.paths, ordered, 7), hooked);
+  expect(outcome.stale).toEqual([]);
+  expect(outcome.applied).toEqual(ordered.map((finding) => finding.id));
+  expect(() => lstatSync(second)).toThrow();
+});
+
+test("apply: a hold taken after the plan blocks the deletion", async () => {
+  const batch = join(home, "batch");
+  mkdirSync(batch);
+  writeFileSync(join(batch, "out"), "data");
+  age(batch);
+  const { findings } = await scan(ctx, ["agent"]);
+  const plan = await createPlan(ctx.paths, findings, 7);
+  const until = new Date(Date.now() + 86_400_000).toISOString();
+  writeLedger(ctx.paths, { holds: [{ path: batch, until, reason: "resuming", actor: "a" }], claims: [] });
+  const outcome = await applyPlan(plan, ctx);
+  expect(outcome.applied).toEqual([]);
+  expect(outcome.stale).toEqual([findings[0]?.id as string]);
+  expect(outcome.staleReasons[findings[0]?.id as string]).toContain("held by a");
+  expect(existsSync(join(batch, "out"))).toBe(true);
+});
+
 test("apply deletes at once, logs what it deleted, and a changed finding is refused as stale", async () => {
   const batch = join(home, "batch");
   mkdirSync(batch);
   writeFileSync(join(batch, "out"), "data");
   age(batch);
   const { findings } = await scan(ctx, ["agent"]);
-  const plan = createPlan(ctx.paths, findings, 7);
+  const plan = await createPlan(ctx.paths, findings, 7);
   const applied = await applyPlan(plan, ctx);
   expect(applied.applied).toHaveLength(1);
   expect(existsSync(batch)).toBe(false);
@@ -192,7 +368,7 @@ test("apply refuses a path a process started working in after the scan", async (
   const child = Bun.spawn(["sleep", "30"], { cwd: batch, stdout: "ignore", stderr: "ignore" });
   try {
     for (let i = 0; i < 40 && !holders(batch, liveFiles()); i++) await Bun.sleep(25);
-    const applied = await applyPlan(createPlan(ctx.paths, findings, 7), ctx);
+    const applied = await applyPlan(await createPlan(ctx.paths, findings, 7), ctx);
     expect(applied.applied).toEqual([]);
     expect(applied.failed[0]?.error).toContain(`a running process works in or holds a file in ${batch}`);
     expect(applied.deleted).toEqual([]);
@@ -207,7 +383,7 @@ test("apply still enforces the plan's window on findings it rescans", async () =
   const batch = join(home, "batch");
   mkdirSync(batch);
   const { findings } = await scan({ ...ctx, staleDays: 0 }, ["agent"]);
-  const plan = createPlan(ctx.paths, findings, 7);
+  const plan = await createPlan(ctx.paths, findings, 7);
   expect((await applyPlan(plan, ctx)).stale).toHaveLength(1);
   expect(existsSync(batch)).toBe(true);
 });
@@ -357,7 +533,7 @@ test("stale temp entries are one row that apply deletes, leaving fresh, open and
   expect(findings.flatMap((finding) => finding.paths)).not.toContain(held);
 
   // Applied a minute later, as a person would, so the id must not depend on the clock.
-  const applied = await applyPlan(createPlan(ctx.paths, ready, 7), { ...live, now: live.now + 60_000 });
+  const applied = await applyPlan(await createPlan(ctx.paths, ready, 7), { ...live, now: live.now + 60_000 });
   chmodSync(join(locked, "sub"), 0o755);
   expect(applied.applied).toHaveLength(1);
   expect(leaked.filter((dir) => existsSync(dir))).toEqual([]);
@@ -433,7 +609,7 @@ test("a git clone under a scratch root is claimable, and deleted as claimed scra
   const { findings } = await scan(claimed, ["agent"]);
   expect(findings).toHaveLength(1);
   expect(findings[0]).toMatchObject({ category: "agent", risk: "low", action: "delete", paths: [clone] });
-  const applied = await applyPlan(createPlan(ctx.paths, findings, 7), claimed);
+  const applied = await applyPlan(await createPlan(ctx.paths, findings, 7), claimed);
   expect(applied.applied).toHaveLength(1);
   expect(existsSync(clone)).toBe(false);
   expect(existsSync(batchClone)).toBe(true);
@@ -475,12 +651,12 @@ test("the next apply deletes an older keeper's trash, after measuring it, read-o
   chmodSync(join(locked, "0/tree/sealed"), 0o500);
   // A directory whose manifest went missing is still trash.
   mkdirSync(join(ctx.paths.oldTrash, "9f8e7d6c/0/tree"), { recursive: true });
-  const applied = await applyPlan(createPlan(ctx.paths, [], 7), ctx);
+  const applied = await applyPlan(await createPlan(ctx.paths, [], 7), ctx);
   expect(applied.oldTrash).toMatchObject({ transactions: 2, errors: {} });
   expect(applied.oldTrash?.bytes).toBeGreaterThanOrEqual(10_000);
   expect(existsSync(ctx.paths.oldTrash)).toBe(false);
   // Once it is gone there is nothing left to report.
-  expect((await applyPlan(createPlan(ctx.paths, [], 7), ctx)).oldTrash).toBeUndefined();
+  expect((await applyPlan(await createPlan(ctx.paths, [], 7), ctx)).oldTrash).toBeUndefined();
 });
 
 test("old trash with a filesystem mounted inside it is kept, and the rest is deleted", async () => {
@@ -537,7 +713,10 @@ test("deleting a clone that sits under a worktree root leaves nothing to prune",
   const { findings } = await scan(ctx, ["worktree"]);
   const found = findings.filter((finding) => finding.paths[0] === clone);
   expect(found).toMatchObject([{ blockers: [], gitDir: join(clone, ".git") }]);
-  expect(await applyPlan(createPlan(ctx.paths, found, 7), ctx)).toMatchObject({ applied: [found[0]?.id], failed: [] });
+  expect(await applyPlan(await createPlan(ctx.paths, found, 7), ctx)).toMatchObject({
+    applied: [found[0]?.id],
+    failed: [],
+  });
   expect(existsSync(clone)).toBe(false);
 });
 
@@ -600,7 +779,7 @@ test("a scan for named ids measures only them, and is never reused as a complete
   // The unmeasured row must not be served later as if the whole category had been sized.
   expect((await cachedScan({ ...ctx, config }, { only: ["agent"] })).cached).toEqual([]);
   // The plan's state still matches, so applying it takes the named finding.
-  const outcome = await applyPlan(createPlan(ctx.paths, [wanted], 7), { ...ctx, config });
+  const outcome = await applyPlan(await createPlan(ctx.paths, [wanted], 7), { ...ctx, config });
   expect(outcome).toMatchObject({ applied: [wanted.id], stale: [], bytes: wanted.bytes });
 });
 
@@ -882,7 +1061,7 @@ test("applying an abandoned-memory stop ends the process", async () => {
     processes: [idle({ pid: child.pid, command: "bun /gone/fixture.tsx" })],
   };
   const { findings } = await scan(idleCtx, ["memory"]);
-  const applied = await applyPlan(createPlan(ctx.paths, findings, 7), idleCtx);
+  const applied = await applyPlan(await createPlan(ctx.paths, findings, 7), idleCtx);
   expect(applied.stopped).toBe(1);
   expect(await Promise.race([child.exited.then(() => "exited"), Bun.sleep(2000).then(() => "running")])).toBe("exited");
 });
@@ -901,7 +1080,7 @@ test("applying a load plan lowers the priority", async () => {
     const start = niceness(child.pid);
     expect(start).toBeLessThan(19);
 
-    const applied = await applyPlan(createPlan(ctx.paths, findings, 7), hot);
+    const applied = await applyPlan(await createPlan(ctx.paths, findings, 7), hot);
     expect(applied.reniced).toBe(1);
     expect(niceness(child.pid)).toBe(19);
   } finally {
@@ -936,7 +1115,7 @@ test("applying a stop finding ends the process", async () => {
   };
   const { findings } = await scan(hot, ["load"]);
   const stop = findings.filter((finding) => finding.action === "stop");
-  const applied = await applyPlan(createPlan(ctx.paths, stop, 7), hot);
+  const applied = await applyPlan(await createPlan(ctx.paths, stop, 7), hot);
   expect(applied.stopped).toBe(1);
   expect(await Promise.race([child.exited.then(() => "exited"), Bun.sleep(2000).then(() => "running")])).toBe("exited");
 });
@@ -977,7 +1156,7 @@ test.skipIf(!autogroupOf(process.pid))("applying a load plan lowers the autogrou
       autogroup: true,
     };
     const { findings } = await scan(hot, ["load"]);
-    const applied = await applyPlan(createPlan(ctx.paths, findings, 7), hot);
+    const applied = await applyPlan(await createPlan(ctx.paths, findings, 7), hot);
     expect(applied.reniced).toBeGreaterThan(0);
     expect(autogroupOf(child.pid)?.nice).toBe(19);
   } finally {
@@ -1026,7 +1205,7 @@ test("applying a load plan lowers the session parent", async () => {
       autogroup: false,
     };
     const { findings } = await scan(hot, ["load"]);
-    const applied = await applyPlan(createPlan(ctx.paths, findings, 7), hot);
+    const applied = await applyPlan(await createPlan(ctx.paths, findings, 7), hot);
     expect(niceness(parent.pid)).toBe(19);
     expect(applied.reniced).toBe(2);
   } finally {
@@ -1288,7 +1467,7 @@ test("a finding keeps its id when its state moves, and apply refuses the moved s
   age(admin);
   const before = (await scan(ctx, ["worktree"])).findings[0] as Finding;
   expect(eligible(before)).toBe(true);
-  const plan = createPlan(ctx.paths, [before], 7);
+  const plan = await createPlan(ctx.paths, [before], 7);
   await git(path, "commit", "-qm", "more", "--allow-empty");
   await git(path, "push", "-q", "origin", "HEAD:b-moving");
   age(path);
@@ -1580,7 +1759,7 @@ test("applying a worktree deletes it with its git metadata and branch", async ()
   const prs = async (repo: string) => pull("MERGED", await git(repo, "rev-parse", "HEAD"), "b-gone")();
   const live = { ...ctx, pullRequests: prs };
   const { findings } = await scan(live, ["worktree"]);
-  const applied = await applyPlan(createPlan(ctx.paths, findings, 7), live);
+  const applied = await applyPlan(await createPlan(ctx.paths, findings, 7), live);
   expect(applied.deleted.map((entry) => entry.paths)).toEqual([[path]]);
   expect(existsSync(path)).toBe(false);
   expect(existsSync(join(home, "gone-main/.git/worktrees/gone"))).toBe(false);
@@ -1603,12 +1782,12 @@ test("a failing delete hook keeps the worktree, and a passing one sees it before
   age(path);
   age(join(home, "hooked-main/.git/worktrees/hooked/logs/HEAD"));
   const { findings } = await scan(hooked, ["worktree"]);
-  const failed = await applyPlan(createPlan(ctx.paths, findings, 7), hooked);
+  const failed = await applyPlan(await createPlan(ctx.paths, findings, 7), hooked);
   expect(failed.applied).toEqual([]);
   expect(failed.failed[0]?.error).toContain(`delete hook ${hook} exited 1: hook failed:`);
   expect(existsSync(join(path, "file"))).toBe(true);
   writeFileSync(join(home, "code"), "0");
-  expect((await applyPlan(createPlan(ctx.paths, findings, 7), hooked)).applied).toHaveLength(1);
+  expect((await applyPlan(await createPlan(ctx.paths, findings, 7), hooked)).applied).toHaveLength(1);
   expect(existsSync(path)).toBe(false);
   expect(readFileSync(seen, "utf8").trim().split("\n")).toEqual([path, path]);
 });
@@ -1623,12 +1802,12 @@ test("apply keeps a path with a filesystem mounted inside it", async () => {
   ctx.paths.mountinfo = mountinfo;
   const escaped = realpathSync(join(batch, "data dir")).replaceAll(" ", "\\040");
   writeFileSync(mountinfo, `22 1 0:21 / / rw - btrfs /dev/root rw\n90 22 0:50 / ${escaped} rw - ext4 /dev/sdb1 rw\n`);
-  const kept = await applyPlan(createPlan(ctx.paths, findings, 7), ctx);
+  const kept = await applyPlan(await createPlan(ctx.paths, findings, 7), ctx);
   expect(kept.applied).toEqual([]);
   expect(kept.failed[0]?.error).toContain(realpathSync(join(batch, "data dir")));
   expect(existsSync(join(batch, "data dir/file"))).toBe(true);
   writeFileSync(mountinfo, "22 1 0:21 / / rw - btrfs /dev/root rw\n");
-  expect((await applyPlan(createPlan(ctx.paths, findings, 7), ctx)).applied).toHaveLength(1);
+  expect((await applyPlan(await createPlan(ctx.paths, findings, 7), ctx)).applied).toHaveLength(1);
   expect(existsSync(batch)).toBe(false);
 });
 
@@ -1640,7 +1819,7 @@ test("apply keeps a path that is itself a mount point", async () => {
   const { findings } = await scan(ctx, ["agent"]);
   ctx.paths.mountinfo = join(home, "mountinfo");
   writeFileSync(ctx.paths.mountinfo, `90 22 0:50 / ${realpathSync(batch)} rw - ext4 /dev/sdb1 rw\n`);
-  expect((await applyPlan(createPlan(ctx.paths, findings, 7), ctx)).failed).toHaveLength(1);
+  expect((await applyPlan(await createPlan(ctx.paths, findings, 7), ctx)).failed).toHaveLength(1);
   expect(existsSync(join(batch, "out"))).toBe(true);
 });
 
@@ -1658,7 +1837,7 @@ test("apply checks mount changes made by its awaited delete hook", async () => {
   chmodSync(hook, 0o755);
   const hooked = { ...ctx, config: { ...ctx.config, deleteHook: hook } };
   const { findings } = await scan(hooked, ["worktree"]);
-  expect((await applyPlan(createPlan(ctx.paths, findings, 7), hooked)).failed).toHaveLength(1);
+  expect((await applyPlan(await createPlan(ctx.paths, findings, 7), hooked)).failed).toHaveLength(1);
   expect(existsSync(join(path, "file"))).toBe(true);
 });
 
@@ -1669,7 +1848,7 @@ test("an unreadable mount table keeps every directory", async () => {
   age(batch);
   const { findings } = await scan(ctx, ["agent"]);
   ctx.paths.mountinfo = join(home, "missing-mountinfo");
-  expect((await applyPlan(createPlan(ctx.paths, findings, 7), ctx)).failed).toHaveLength(1);
+  expect((await applyPlan(await createPlan(ctx.paths, findings, 7), ctx)).failed).toHaveLength(1);
   expect(existsSync(join(batch, "out"))).toBe(true);
 });
 
@@ -1691,7 +1870,7 @@ test("an oversized log keeps its tail and its inode", async () => {
   const live = { ...ctx, config: { ...ctx.config, logs: ["~/app.log", "~/absent.log"] } };
   const { findings } = await scan(live, ["logs"]);
   expect(findings).toHaveLength(1);
-  await applyPlan(createPlan(ctx.paths, findings, 7), live);
+  await applyPlan(await createPlan(ctx.paths, findings, 7), live);
   expect(statSync(log).size).toBe(5 * 1024 ** 2);
   expect(statSync(log).ino).toBe(inode);
 });
@@ -1731,7 +1910,7 @@ test("emptied transcript folders go too, and everything else stays", async () =>
   writeFileSync(join(home, ".claude/projects/keep2"), "x");
   age(join(session, "t.jsonl"));
   const { findings } = await scan(ctx, ["transcripts"]);
-  await applyPlan(createPlan(ctx.paths, findings, 7), ctx);
+  await applyPlan(await createPlan(ctx.paths, findings, 7), ctx);
   expect(existsSync(join(home, ".claude/projects/p"))).toBe(false);
   expect(existsSync(join(home, ".claude/projects/keep"))).toBe(true);
 });
@@ -1776,17 +1955,15 @@ test("every keeper command the docs name exists in the CLI", async () => {
   }
 });
 
-test("package caches: prunable ones always offered, cleared-whole ones only once large", async () => {
+test("package caches: prunable ones always offered, cleared-whole ones not while small", async () => {
   mkdirSync(join(home, ".npm/_cacache"), { recursive: true });
-  // du -b counts apparent size, so a sparse file stands in for gigabytes of downloads.
-  writeFileSync(join(home, ".npm/_cacache/blob"), "");
-  truncateSync(join(home, ".npm/_cacache/blob"), 3 * 1024 ** 3);
+  writeFileSync(join(home, ".npm/_cacache/blob"), "x");
   mkdirSync(join(home, ".bun/install/cache"), { recursive: true });
   writeFileSync(join(home, ".bun/install/cache/small"), "x");
   mkdirSync(join(home, ".local/share/pnpm/store"), { recursive: true });
   const { findings } = await scan(ctx, ["package-cache"]);
   const byTitle = Object.fromEntries(findings.map((finding) => [finding.title, finding]));
-  expect(byTitle["npm cache"]).toMatchObject({ action: "npm-clean", bytes: 3 * 1024 ** 3, risk: "low" });
+  expect(byTitle["npm cache"]).toBeUndefined();
   expect(byTitle["pnpm cache"]).toMatchObject({ action: "pnpm-prune", bytes: 0 });
   expect(byTitle["bun cache"]).toBeUndefined();
 });
@@ -1844,7 +2021,7 @@ test("schedule status preserves cron fallback when systemd is unavailable", () =
   expect(scheduleFromResults(systemd, { stdout: "" })).toBe("unavailable: Failed to connect to bus");
 });
 
-test("a plan counts a worktree's own build output once, inside the worktree", () => {
+test("a plan counts a worktree's own build output once, inside the worktree", async () => {
   const finding = (id: string, path: string, bytes: number): Finding => ({
     id,
     state: id,
@@ -1861,7 +2038,7 @@ test("a plan counts a worktree's own build output once, inside the worktree", ()
   const tree = finding("tree", "/w/feature", 4);
   const output = finding("output", "/w/feature/node_modules", 3);
   const sibling = finding("sibling", "/w/feature-two", 1);
-  const plan = createPlan(ctx.paths, [output, tree, sibling], 7);
+  const plan = await createPlan(ctx.paths, [output, tree, sibling], 7);
   expect(plan.findingIds).toEqual(["tree", "sibling"]);
   expect(plan.bytes).toBe(5);
 });

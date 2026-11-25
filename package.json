@@ -16,8 +16,8 @@
     "site:deploy": "rm -rf dist/site && mkdir -p dist/site && cp site/index.html assets/wordmark.svg assets/wordmark-dark.svg assets/logo.svg assets/icon.png dist/site && wrangler pages deploy dist/site --project-name keeper --branch main"
   },
   "dependencies": {
-    "@opentui/core": "^0.9.7",
-    "@opentui/react": "^0.9.7",
+    "@opentui/core": "^0.9.8",
+    "@opentui/react": "^0.9.8",
     "react": "^19.3.1"
   },
   "devDependencies": {

@@ -16,14 +16,14 @@
     "site:deploy": "rm -rf dist/site && mkdir -p dist/site && cp site/index.html assets/wordmark.svg assets/wordmark-dark.svg assets/logo.svg assets/icon.png dist/site && wrangler pages deploy dist/site --project-name keeper --branch main"
   },
   "dependencies": {
-    "@opentui/core": "^0.9.8",
-    "@opentui/react": "^0.9.8",
+    "@opentui/core": "^0.9.9",
+    "@opentui/react": "^0.9.9",
     "react": "^19.3.1"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.6.8",
+    "@biomejs/biome": "2.6.9",
     "@types/bun": "^1.4.5",
-    "@types/react": "^19.3.0",
+    "@types/react": "^19.3.1",
     "typescript": "^7.0.2"
   },
   "homepage": "https://keeper.cjber.dev"

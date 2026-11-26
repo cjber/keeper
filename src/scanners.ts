@@ -353,6 +353,20 @@ const treeUnwritable = "holds a directory keeper cannot write, so it cannot dele
 
 const found = <T>(items: (T | undefined)[]): T[] => items.filter((item): item is T => item !== undefined);
 
+/**
+ * Whether a directory is a git checkout, by what git itself requires of one: a `.git` file linking a worktree or
+ * submodule, or a `.git` directory with a HEAD and an object store. Sandboxes leave empty `.git` stubs to guard git
+ * paths in a directory that is not a repository, such as /tmp or a folder of repositories, and those are not checkouts.
+ */
+export function isCheckout(dir: string): boolean {
+  const git = join(dir, ".git");
+  try {
+    return statSync(git).isFile() || (existsSync(join(git, "HEAD")) && isDirectory(join(git, "objects")));
+  } catch {
+    return false;
+  }
+}
+
 function isDirectory(path: string): boolean {
   try {
     return statSync(path).isDirectory();
@@ -365,9 +379,7 @@ function isDirectory(path: string): boolean {
 export function worktreeDirs(root: string): string[] {
   return entries(root)
     .filter(isDirectory)
-    .flatMap((dir) =>
-      existsSync(join(dir, ".git")) ? [dir] : entries(dir).filter((d) => existsSync(join(d, ".git"))),
-    );
+    .flatMap((dir) => (isCheckout(dir) ? [dir] : entries(dir).filter(isCheckout)));
 }
 
 /** The main checkout of every repo keeper can see, whether listed directly or known through one of its worktrees. */
@@ -799,8 +811,8 @@ async function scanWorktrees(context: Context): Promise<Finding[]> {
 /** A directory beside worktrees that is not a checkout, usually what a manual removal left behind. */
 function leftoverDirs(root: string): string[] {
   return entries(root)
-    .filter((dir) => isDirectory(dir) && !existsSync(join(dir, ".git")))
-    .flatMap((dir) => entries(dir).filter((child) => isDirectory(child) && !existsSync(join(child, ".git"))));
+    .filter((dir) => isDirectory(dir) && !isCheckout(dir))
+    .flatMap((dir) => entries(dir).filter((child) => isDirectory(child) && !isCheckout(child)));
 }
 
 async function inspectLeftover(path: string, context: Context): Promise<Finding> {
@@ -1151,7 +1163,7 @@ async function scanTmp(context: Context): Promise<Finding[]> {
   const uid = process.getuid?.() ?? -1;
   const claude = join(root, `claude-${uid}`);
   const home = context.paths.home;
-  if (root === "/" || root === home || home.startsWith(`${root}/`) || existsSync(join(root, ".git")))
+  if (root === "/" || root === home || home.startsWith(`${root}/`) || isCheckout(root))
     throw new Error(`${root} holds home or a repository, so it is not scanned as the temp dir. Point TMPDIR at one`);
   const [top, sessions, foreign, unwritable] = await Promise.all([
     tmpUsage(root, 1),

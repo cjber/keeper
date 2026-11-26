@@ -26,8 +26,10 @@ import {
   defaultConfig,
   dockerFindings,
   headOwner,
+  isCheckout,
   type ProcessInfo,
   type PullRequest,
+  primaryCheckouts,
   pullRequestPage,
   sampleMs,
   scan,
@@ -91,12 +93,77 @@ beforeEach(() => {
 afterEach(() => rmSync(home, { recursive: true, force: true }));
 
 test("worktree discovery looks through repo parent folders", () => {
-  mkdirSync(join(home, ".worktrees/repo/one/.git"), { recursive: true });
-  mkdirSync(join(home, ".worktrees/flat/.git"), { recursive: true });
+  for (const dir of [".worktrees/repo/one", ".worktrees/flat"]) {
+    mkdirSync(join(home, dir, ".git/objects"), { recursive: true });
+    writeFileSync(join(home, dir, ".git/HEAD"), "ref: refs/heads/main\n");
+  }
   expect(worktreeDirs(join(home, ".worktrees")).sort()).toEqual([
     join(home, ".worktrees/flat"),
     join(home, ".worktrees/repo/one"),
   ]);
+});
+
+/** What the Claude Code sandbox leaves to guard git paths: no HEAD and no objects, so git calls it not a repository. */
+function gitStub(dir: string) {
+  mkdirSync(join(dir, ".git/info/.claude-sandbox-noreplace"), { recursive: true });
+  mkdirSync(join(dir, ".git/worktrees"));
+  writeFileSync(join(dir, ".git/config.worktree"), "");
+}
+
+test("a damaged or unreadable .git is still a checkout, so its work is not offered for deletion", () => {
+  const headless = join(home, "headless");
+  mkdirSync(join(headless, ".git/objects"), { recursive: true });
+  const objectless = join(home, "objectless");
+  mkdirSync(join(objectless, ".git"), { recursive: true });
+  writeFileSync(join(objectless, ".git/HEAD"), "ref: refs/heads/main\n");
+  expect([headless, objectless].filter(isCheckout)).toEqual([headless, objectless]);
+  if (process.getuid?.() === 0) return;
+  const locked = join(home, "locked");
+  mkdirSync(join(locked, ".git"), { recursive: true });
+  chmodSync(join(locked, ".git"), 0o000);
+  try {
+    expect(isCheckout(locked)).toBe(true);
+  } finally {
+    chmodSync(join(locked, ".git"), 0o755);
+  }
+});
+
+test("an empty .git stub is not a checkout, a gitdir link and a real repository are", async () => {
+  const stub = join(home, "stub");
+  gitStub(stub);
+  const linked = join(home, "linked");
+  mkdirSync(linked);
+  writeFileSync(join(linked, ".git"), "gitdir: /elsewhere\n");
+  const real = join(home, "real");
+  mkdirSync(real);
+  await git(real, "init", "-q");
+  expect([stub, linked, real].filter(isCheckout)).toEqual([linked, real]);
+});
+
+test("a folder of repositories with a .git stub is skipped, and its repositories are still found", async () => {
+  const folder = join(home, "proj");
+  gitStub(folder);
+  const repo = join(folder, "repo");
+  mkdirSync(repo);
+  await git(repo, "init", "-q");
+  const listing = { ...ctx, config: { ...ctx.config, repoRoots: [home] } };
+  expect(await primaryCheckouts(listing)).toEqual([repo]);
+  const report = await scan(listing, ["worktree"]);
+  expect(report.warnings).toEqual([]);
+});
+
+test("a temp dir holding a .git stub is still scanned, but one holding a repository is not", async () => {
+  const tmp = ctx.paths.tmp;
+  gitStub(tmp);
+  const stale = join(tmp, "leak-St4le");
+  writeFileSync(stale, "x");
+  age(stale);
+  const { findings, warnings } = await scan(ctx, ["tmp"]);
+  expect(warnings).toEqual([]);
+  expect(findings.filter(eligible).flatMap((finding) => finding.paths)).toEqual([stale]);
+  rmSync(join(tmp, ".git"), { recursive: true });
+  await git(tmp, "init", "-q");
+  expect((await scan(ctx, ["tmp"])).warnings.join()).toContain("holds home or a repository");
 });
 
 test("a pushed, clean, idle worktree is the only eligible one", async () => {
@@ -1752,6 +1819,16 @@ test("a stray directory is a finding, unless a checkout sits inside it", async (
   const by = (name: string) => findings.find((finding) => finding.paths[0]?.endsWith(name));
   expect(by("stray")).toMatchObject({ risk: "medium", blockers: [] });
   expect(by("repo/cb")?.blockers).toContain("contains a checkout");
+});
+
+test("a .git stub in a worktree root or its repo folder is not a stray directory", async () => {
+  for (const dir of [".worktrees", ".worktrees/repo"]) {
+    gitStub(join(home, dir));
+    age(join(home, dir));
+  }
+  const { findings, warnings } = await scan(ctx, ["worktree"]);
+  expect(warnings).toEqual([]);
+  expect(findings).toEqual([]);
 });
 
 test("applying a worktree deletes it with its git metadata and branch", async () => {

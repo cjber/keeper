@@ -7,6 +7,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+- **An empty `.git` stub no longer counts as a repository.** A directory is a checkout only when its `.git` is a gitdir
+  link or holds a HEAD or an object store, so a damaged or unreadable `.git` still counts and keeps its work blocked. The stub a sandbox leaves in `/tmp` no longer
+  stops the temp dir scan, and one left in a folder of repositories no longer makes that folder fail the worktrees
+  category with "not a git repository", so the nightly scan stays healthy.
+
 ## [0.9.1] - 2026-11-24
 
 - **Sizes now count allocated blocks, and apply records what a deletion actually freed.** A batch of paths is

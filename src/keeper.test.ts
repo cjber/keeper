@@ -110,6 +110,24 @@ function gitStub(dir: string) {
   writeFileSync(join(dir, ".git/config.worktree"), "");
 }
 
+test("a damaged or unreadable .git is still a checkout, so its work is not offered for deletion", () => {
+  const headless = join(home, "headless");
+  mkdirSync(join(headless, ".git/objects"), { recursive: true });
+  const objectless = join(home, "objectless");
+  mkdirSync(join(objectless, ".git"), { recursive: true });
+  writeFileSync(join(objectless, ".git/HEAD"), "ref: refs/heads/main\n");
+  expect([headless, objectless].filter(isCheckout)).toEqual([headless, objectless]);
+  if (process.getuid?.() === 0) return;
+  const locked = join(home, "locked");
+  mkdirSync(join(locked, ".git"), { recursive: true });
+  chmodSync(join(locked, ".git"), 0o000);
+  try {
+    expect(isCheckout(locked)).toBe(true);
+  } finally {
+    chmodSync(join(locked, ".git"), 0o755);
+  }
+});
+
 test("an empty .git stub is not a checkout, a gitdir link and a real repository are", async () => {
   const stub = join(home, "stub");
   gitStub(stub);
@@ -128,7 +146,7 @@ test("a folder of repositories with a .git stub is skipped, and its repositories
   const repo = join(folder, "repo");
   mkdirSync(repo);
   await git(repo, "init", "-q");
-  const listing = { ...ctx, config: { ...ctx.config, repoRoots: [folder] } };
+  const listing = { ...ctx, config: { ...ctx.config, repoRoots: [home] } };
   expect(await primaryCheckouts(listing)).toEqual([repo]);
   const report = await scan(listing, ["worktree"]);
   expect(report.warnings).toEqual([]);
@@ -1801,6 +1819,16 @@ test("a stray directory is a finding, unless a checkout sits inside it", async (
   const by = (name: string) => findings.find((finding) => finding.paths[0]?.endsWith(name));
   expect(by("stray")).toMatchObject({ risk: "medium", blockers: [] });
   expect(by("repo/cb")?.blockers).toContain("contains a checkout");
+});
+
+test("a .git stub in a worktree root or its repo folder is not a stray directory", async () => {
+  for (const dir of [".worktrees", ".worktrees/repo"]) {
+    gitStub(join(home, dir));
+    age(join(home, dir));
+  }
+  const { findings, warnings } = await scan(ctx, ["worktree"]);
+  expect(warnings).toEqual([]);
+  expect(findings).toEqual([]);
 });
 
 test("applying a worktree deletes it with its git metadata and branch", async () => {

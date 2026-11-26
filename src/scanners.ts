@@ -353,18 +353,32 @@ const treeUnwritable = "holds a directory keeper cannot write, so it cannot dele
 
 const found = <T>(items: (T | undefined)[]): T[] => items.filter((item): item is T => item !== undefined);
 
+const absent = (error: unknown) => ["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "");
+
+/** Whether a path exists. A lookup that fails for any other reason, such as a permission error, counts as present. */
+function entryExists(path: string): boolean {
+  try {
+    statSync(path);
+    return true;
+  } catch (error) {
+    return !absent(error);
+  }
+}
+
 /**
- * Whether a directory is a git checkout, by what git itself requires of one: a `.git` file linking a worktree or
- * submodule, or a `.git` directory with a HEAD and an object store. Sandboxes leave empty `.git` stubs to guard git
- * paths in a directory that is not a repository, such as /tmp or a folder of repositories, and those are not checkouts.
+ * Whether a directory is a git checkout: a `.git` file linking a worktree or submodule, or a `.git` directory holding
+ * a HEAD or an object store. Sandboxes leave `.git` stubs with neither to guard git paths in a directory that is not a
+ * repository, such as /tmp or a folder of repositories, and those are not checkouts. A damaged or unreadable `.git`
+ * stays a checkout, so its work is blocked instead of offered for deletion.
  */
 export function isCheckout(dir: string): boolean {
   const git = join(dir, ".git");
   try {
-    return statSync(git).isFile() || (existsSync(join(git, "HEAD")) && isDirectory(join(git, "objects")));
-  } catch {
-    return false;
+    if (statSync(git).isFile()) return true;
+  } catch (error) {
+    return !absent(error);
   }
+  return entryExists(join(git, "HEAD")) || entryExists(join(git, "objects"));
 }
 
 function isDirectory(path: string): boolean {
@@ -808,11 +822,16 @@ async function scanWorktrees(context: Context): Promise<Finding[]> {
   ];
 }
 
-/** A directory beside worktrees that is not a checkout, usually what a manual removal left behind. */
+/** A directory that is not a checkout and not a `.git` stub, usually what a manual removal left behind. */
+function isLeftover(dir: string): boolean {
+  return basename(dir) !== ".git" && isDirectory(dir) && !isCheckout(dir);
+}
+
+/** The directories beside worktrees that are not checkouts. */
 function leftoverDirs(root: string): string[] {
   return entries(root)
-    .filter((dir) => isDirectory(dir) && !isCheckout(dir))
-    .flatMap((dir) => entries(dir).filter((child) => isDirectory(child) && !isCheckout(child)));
+    .filter((dir) => isLeftover(dir))
+    .flatMap((dir) => entries(dir).filter(isLeftover));
 }
 
 async function inspectLeftover(path: string, context: Context): Promise<Finding> {

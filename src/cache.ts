@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { type Context, scan, targetIds, withHolds } from "./scanners";
+import { readLedger } from "./ledger";
+import { type Context, findingId, scan, targetIds, withHolds } from "./scanners";
 import { type Paths, writeAtomically } from "./system";
 import { type Category, categories, type Finding, type Scan, schemaVersion } from "./types";
 
@@ -50,18 +51,24 @@ interface Entry {
 interface Cache {
   /** What the findings depend on besides time. Entries from another config or window are never reused. */
   fingerprint: string;
+  /** What decides a path's category, so a plan can find its owners under any idle window. */
+  owners: string;
   entries: Partial<Record<Category, Entry>>;
 }
 
 const cachePath = (paths: Paths) => join(paths.state, "scan-cache.json");
 
+/** What decides which category holds a path. The idle windows only decide a blocker, never the owner. */
+function ownerFingerprint(context: Context): string {
+  const inputs = { schemaVersion, home: context.paths.home, config: context.config };
+  return createHash("sha256").update(JSON.stringify(inputs)).digest("hex").slice(0, 16);
+}
+
 function fingerprint(context: Context): string {
   const inputs = {
-    schemaVersion,
+    owners: ownerFingerprint(context),
     staleDays: context.staleDays,
     appStaleDays: context.appStaleDays,
-    home: context.paths.home,
-    config: context.config,
   };
   return createHash("sha256").update(JSON.stringify(inputs)).digest("hex").slice(0, 16);
 }
@@ -189,7 +196,7 @@ export async function cachedScan(
   // Re-read before merging, so a category another run stored meanwhile survives.
   const latest = read(context.paths);
   const base = latest?.fingerprint === print ? latest.entries : {};
-  write(context.paths, { fingerprint: print, entries: { ...base, ...scanned } });
+  write(context.paths, { fingerprint: print, owners: ownerFingerprint(context), entries: { ...base, ...scanned } });
   const reused = cached.flatMap((category) => usable[category]?.findings ?? []);
   return {
     ...report,
@@ -204,15 +211,18 @@ export async function cachedScan(
 }
 
 /**
- * The categories that hold these finding ids or paths in the last stored scan, however old, so planning by them rescans
- * only those. Undefined when any target is unknown, which leaves the caller to rescan everything.
+ * The categories that hold these finding ids or paths, so planning by them rescans only those: the last stored scan
+ * names them whatever its idle windows were, and a claimed path is an agent finding by definition, scanned or not.
+ * Undefined when any target is unknown, which leaves the caller to rescan everything.
  */
 export function categoriesOf(context: Context, targets: readonly string[]): Category[] | undefined {
   const stored = read(context.paths);
-  if (!stored || stored.fingerprint !== fingerprint(context)) return undefined;
   const owner = new Map<string, Category>();
-  for (const [category, entry] of Object.entries(stored.entries) as [Category, Entry][]) {
-    for (const finding of entry.findings) owner.set(finding.id, category);
+  for (const claim of readLedger(context.paths).claims) owner.set(findingId("agent", claim.path, "").id, "agent");
+  if (stored && stored.owners === ownerFingerprint(context)) {
+    for (const [category, entry] of Object.entries(stored.entries) as [Category, Entry][]) {
+      for (const finding of entry.findings) owner.set(finding.id, category);
+    }
   }
   const found = targets.map((target) =>
     targetIds(target)

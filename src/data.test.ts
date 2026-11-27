@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { cachedScan, categoriesOf, forget, forgetUnder } from "./cache";
 import { freeChart, spaceBars, waits } from "./charts";
 import { readEvents, readSamples, sample } from "./history";
-import { audit, writeLedger } from "./ledger";
+import { audit, updateLedger, writeLedger } from "./ledger";
 import { type Context, defaultConfig } from "./scanners";
 import { defaultPaths } from "./system";
 
@@ -66,7 +66,20 @@ test("planning known ids rescans only their categories, and an unknown id rescan
   const later = { ...ctx, now: ctx.now + 600 * minute };
   expect(categoriesOf(later, [finding.id])).toEqual(["agent"]);
   expect(categoriesOf(later, [finding.id, "0000000000"])).toBeUndefined();
-  expect(categoriesOf({ ...ctx, staleDays: 0 }, [finding.id])).toBeUndefined();
+  expect(categoriesOf({ ...ctx, staleDays: 0 }, [finding.id])).toEqual(["agent"]);
+  expect(
+    categoriesOf({ ...ctx, config: { ...ctx.config, agentRoots: ["~/elsewhere"] } }, [finding.id]),
+  ).toBeUndefined();
+});
+
+test("a claimed path plans through the agent category alone, scanned or not", async () => {
+  const scratch = join(home, "scratch-claim");
+  mkdirSync(scratch);
+  await updateLedger(ctx.paths, (ledger) => ({
+    ...ledger,
+    claims: [...ledger.claims, { path: scratch, actor: "test", at: new Date(ctx.now).toISOString() }],
+  }));
+  expect(categoriesOf({ ...ctx, staleDays: 0 }, [scratch])).toEqual(["agent"]);
 });
 
 test("an apply drops cached findings inside the paths it moved, whatever their category", async () => {

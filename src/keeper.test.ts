@@ -682,6 +682,17 @@ test("a git clone under a scratch root is claimable, and deleted as claimed scra
   expect(existsSync(batchClone)).toBe(true);
 });
 
+test("an unwritable state directory reports the permission error, not a missing lock", async () => {
+  if (process.getuid?.() === 0) return;
+  mkdirSync(ctx.paths.state, { recursive: true });
+  chmodSync(ctx.paths.state, 0o500);
+  try {
+    await expect(withLock(ctx.paths, async () => 1)).rejects.toMatchObject({ code: "EACCES" });
+  } finally {
+    chmodSync(ctx.paths.state, 0o755);
+  }
+});
+
 test("a live lock makes a second mutation fail as busy, and a dead lock is taken over", async () => {
   mkdirSync(ctx.paths.state, { recursive: true });
   writeFileSync(join(ctx.paths.state, "lock"), String(process.pid));

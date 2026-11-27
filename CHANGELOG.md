@@ -7,6 +7,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+- **`plan` on a named path no longer scans the whole machine.** The category that owns a path is found from the last
+  scan whatever its `--stale-days` window, and a claimed path is an agent finding by definition, so planning a claimed
+  scratch directory scans only that category instead of every one (minutes on a loaded machine).
+- **An unwritable state directory reports the permission error.** `keeper hold` in a read-only sandbox said the lock
+  file was missing; the lock is now read only when it exists, so the `EACCES` or `EROFS` is what surfaces.
+
 - **An empty `.git` stub no longer counts as a repository.** A directory is a checkout only when its `.git` is a gitdir
   link or holds a HEAD or an object store, so a damaged or unreadable `.git` still counts and keeps its work blocked. The stub a sandbox leaves in `/tmp` no longer
   stops the temp dir scan, and one left in a folder of repositories no longer makes that folder fail the worktrees

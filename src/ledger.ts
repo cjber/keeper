@@ -116,7 +116,9 @@ export async function withLock<T>(paths: Paths, work: () => Promise<T>): Promise
   let fd: number;
   try {
     fd = openSync(lock, "wx");
-  } catch {
+  } catch (error) {
+    // Only an existing lock is read. Any other failure (EACCES, EROFS) is the real one: there is no lock to read.
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     const owner = Number(readFileSync(lock, "utf8"));
     if (alive(owner)) throw new BusyError(`another keeper run holds the lock (pid ${owner})`);
     rmSync(lock, { force: true });

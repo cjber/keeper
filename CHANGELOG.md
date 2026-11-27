@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-11-27
+
 - **`plan` on a named path no longer scans the whole machine.** The category that owns a path is found from the last
   scan whatever its `--stale-days` window, and a claimed path is an agent finding by definition, so planning a claimed
   scratch directory scans only that category instead of every one (minutes on a loaded machine).

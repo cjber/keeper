@@ -227,11 +227,11 @@ export interface Context {
   /** Milliseconds one page of a `gh` pull request lookup may take. Falls back to `pullRequestTimeoutMs`. Tests shorten it. */
   pullRequestTimeout?: number;
   /**
-   * Finding ids a plan names. When set, only these agent, build and worktree findings are measured and checked for
-   * unwritable directories, because planning or applying a few ids must not walk every other tree in their category.
-   * The rest keep 0 bytes, so a scan made this way is never stored as a complete one.
+   * Finding ids a plan names. When set, the agent, build and worktree scans inspect, measure and check only these
+   * paths, because planning or applying a few ids must not examine every other tree in their category. The rest are
+   * not reported at all, so a scan made this way is never stored as a complete one.
    */
-  sizeOnly?: ReadonlySet<string>;
+  named?: ReadonlySet<string>;
   /** Hears a problem that left a category incomplete without failing it. `scan` sets it per category. */
   warn?: (message: string) => void;
   cores?: number;
@@ -307,9 +307,9 @@ export function targetIds(target: string): string[] {
   return [target, ...categories.map((category) => findingId(category, resolve(target), "").id)];
 }
 
-/** Whether a scan measures this finding: every one, unless a plan named the few it is about. */
-function measured(context: Context, id: string): boolean {
-  return !context.sizeOnly || context.sizeOnly.has(id);
+/** Whether a scan looks at this finding: every one, unless a plan named the few it is about. */
+function selected(context: Context, id: string): boolean {
+  return !context.named || context.named.has(id);
 }
 
 function entries(path: string): string[] {
@@ -349,7 +349,8 @@ function idleBlocker(days: number, window: number): string | undefined {
 }
 
 const inUse = "in use by a running process, offered once it exits";
-const treeUnwritable = "holds a directory keeper cannot write, so it cannot delete it whole";
+const treeUnwritable = ({ first, count: n }: { first: string; count: number }) =>
+  `holds ${count(n, "directory", "directories")} keeper cannot write, the first is ${first}, so it cannot delete it whole`;
 
 const found = <T>(items: (T | undefined)[]): T[] => items.filter((item): item is T => item !== undefined);
 
@@ -770,8 +771,9 @@ function headAge(gitDir: string, now: number): number {
 }
 
 async function scanWorktrees(context: Context): Promise<Finding[]> {
-  const dirs = await knownWorktrees(context);
-  const leftovers = context.paths.worktrees.flatMap(leftoverDirs);
+  const worktreeId = (path: string) => findingId("worktree", path, "").id;
+  const dirs = (await knownWorktrees(context)).filter((path) => selected(context, worktreeId(path)));
+  const leftovers = context.paths.worktrees.flatMap(leftoverDirs).filter((path) => selected(context, worktreeId(path)));
   const fetch =
     context.pullRequests ??
     ((repo: string, branch?: string) => listPullRequests(repo, branch, context.pullRequestTimeout));
@@ -812,9 +814,7 @@ async function scanWorktrees(context: Context): Promise<Finding[]> {
     await Promise.all(dirs.map((dir) => unlessGone(dir, () => inspectWorktree(dir, context, lookup)))),
   );
   const bytes = await sizes(
-    checkouts
-      .filter((finding) => !finding.blockers.length && measured(context, finding.id))
-      .flatMap((finding) => finding.paths),
+    checkouts.filter((finding) => !finding.blockers.length).flatMap((finding) => finding.paths),
   );
   return [
     ...checkouts.map((finding) => ({ ...finding, bytes: bytes.get(finding.paths[0] as string) ?? 0 })),
@@ -843,8 +843,7 @@ async function inspectLeftover(path: string, context: Context): Promise<Finding>
   if (holders(path, context.live)) blockers.push(inUse);
   const idle = idleBlocker(age, context.staleDays);
   if (idle) blockers.push(idle);
-  const wanted = !blockers.length && measured(context, findingId("worktree", path, "").id);
-  const bytes = wanted ? ((await sizes([path])).get(path) ?? 0) : 0;
+  const bytes = blockers.length ? 0 : ((await sizes([path])).get(path) ?? 0);
   return {
     ...findingId("worktree", path, `leftover\0${bytes}`),
     idle,
@@ -954,7 +953,7 @@ async function scanOrphans(): Promise<Finding[]> {
 async function unwritableDirs(roots: readonly string[]): Promise<string[]> {
   if (roots.length === 0) return [];
   const found = await run(["find", ...roots, "-xdev", "-type", "d", "!", "-writable", "-printf", "%p\\0"]);
-  return [...found.stdout.split("\0").filter(Boolean), ...quotedPaths(found.stderr)];
+  return [...new Set([...found.stdout.split("\0").filter(Boolean), ...quotedPaths(found.stderr)])];
 }
 
 async function scanAgent(context: Context): Promise<Finding[]> {
@@ -964,7 +963,9 @@ async function scanAgent(context: Context): Promise<Finding[]> {
     patterns.some((pattern) => pattern.test(path.slice(path.lastIndexOf("/") + 1))),
   );
   const claimed = readLedger(context.paths).claims.map((claim) => claim.path);
-  const roots = [...new Set([...context.config.agentRoots.map(expand), ...claimed, ...cached])].filter(existsSync);
+  const roots = [...new Set([...context.config.agentRoots.map(expand), ...claimed, ...cached])].filter(
+    (path) => selected(context, findingId("agent", path, "").id) && existsSync(path),
+  );
   const inspect = (path: string): Finding => {
     const age = ageDays(path, context.now);
     const blockers: string[] = [];
@@ -989,15 +990,17 @@ async function scanAgent(context: Context): Promise<Finding[]> {
   // Agent output inside its idle window is never planned, so only the rest are walked unless the caller wants every
   // size. The same walk catches a directory keeper cannot write, which a removal could not finish.
   const walked = judged
-    .filter((finding) => (context.sizeBlocked || !finding.blockers.length) && measured(context, finding.id))
+    .filter((finding) => context.sizeBlocked || !finding.blockers.length)
     .flatMap((finding) => finding.paths);
   const [bytes, unwritable] = await Promise.all([sizes(walked), unwritableDirs(walked)]);
-  const held = (path: string) => unwritable.some((dir) => dir === path || dir.startsWith(`${path}/`));
   return judged.map((finding) => {
     const path = finding.paths[0] as string;
+    const inside = unwritable.filter((dir) => dir === path || dir.startsWith(`${path}/`)).sort();
+    const blocked = inside.length ? { first: inside[0] as string, count: inside.length } : undefined;
     return {
       ...finding,
-      blockers: held(path) ? [...finding.blockers, treeUnwritable] : finding.blockers,
+      blockers: blocked ? [...finding.blockers, treeUnwritable(blocked)] : finding.blockers,
+      unwritable: blocked,
       bytes: bytes.get(path) ?? 0,
     };
   });
@@ -1335,7 +1338,9 @@ async function scanBuild(context: Context): Promise<Finding[]> {
       .flatMap(entries)
       .flatMap(entries)
       .filter((path) => buildDirs.test(path));
-    return [...top, ...nested].filter(isDirectory);
+    return [...top, ...nested].filter(
+      (path) => isDirectory(path) && selected(context, findingId("build", path, "").id),
+    );
   });
   // A recent build still counts, as blocked, so the space it holds shows as build output rather than as its worktree.
   const ignored = (
@@ -1362,12 +1367,7 @@ async function scanBuild(context: Context): Promise<Finding[]> {
     ],
   }));
   const bytes = await sizes(
-    judged
-      .filter(
-        (entry) =>
-          (context.sizeBlocked || !entry.blockers.length) && measured(context, findingId("build", entry.path, "").id),
-      )
-      .map((entry) => entry.path),
+    judged.filter((entry) => context.sizeBlocked || !entry.blockers.length).map((entry) => entry.path),
   );
   // Bytes stay out of the state: a batch charges a shared inode to whichever path it walks first, so the number
   // depends on the batch, not on this path. Recent-ness is what was judged here.

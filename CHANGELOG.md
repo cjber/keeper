@@ -7,6 +7,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+- **Planning a named worktree or build directory inspects only that path.** A scan made for `plan` or `apply` ids
+  skips the git status, pull request lookups and ignore checks of every other checkout, so naming one path costs about
+  inspecting it. Findings it did not name are no longer listed in that scan.
+- **A plan refused for an unwritable directory names it.** The refusal gives the first blocking directory and how many
+  there are, and `next` is the `chmod u+w` (or `find ... -exec chmod u+w`) that clears them.
+
 ## [0.9.2] - 2026-11-27
 
 - **`plan` on a named path no longer scans the whole machine.** The category that owns a path is found from the last

@@ -27,7 +27,17 @@ import {
   targetIds,
 } from "./scanners";
 import { defaultPaths, expandHome, holders, liveFiles, niceness, type Paths, run, sizes } from "./system";
-import { bulkEligible, eligible, type Finding, outermost, type Plan, type Risk, risks, schemaVersion } from "./types";
+import {
+  bulkEligible,
+  eligible,
+  type Finding,
+  outermost,
+  type Plan,
+  type Risk,
+  risks,
+  schemaVersion,
+  shellWord,
+} from "./types";
 
 export function loadConfig(paths: Paths): Config {
   let parsed: Partial<Config>;
@@ -214,6 +224,8 @@ export interface Skipped {
   id: string;
   reason: string;
   idle?: true;
+  /** The command that clears what blocks it, when one does. */
+  next?: string;
 }
 
 /**
@@ -239,10 +251,25 @@ export function pickById(
         idle: true,
       });
     else if (!eligible(finding))
-      skipped.push({ id: target, reason: `not eligible: ${finding.blockers.join("; ") || finding.action}` });
+      skipped.push({
+        id: target,
+        reason: `not eligible: ${finding.blockers.join("; ") || finding.action}`,
+        // The command only helps when the unwritable directory is all that holds the finding back.
+        next:
+          finding.unwritable && finding.blockers.length === 1
+            ? unwritableFix(finding.paths[0] as string, finding.unwritable)
+            : undefined,
+      });
     else if (!chosen.includes(finding)) chosen.push(finding);
   }
   return { chosen, skipped };
+}
+
+/** The command that gives keeper write access to every directory that blocks removing `path`. */
+function unwritableFix(path: string, { first, count: n }: { first: string; count: number }): string {
+  return n === 1
+    ? `chmod u+w ${shellWord(first)}`
+    : `find ${shellWord(path)} -xdev -type d ! -writable -exec chmod u+w {} +`;
 }
 
 export function readPlan(paths: Paths, id: string): Plan {
@@ -509,7 +536,7 @@ async function measuredFreed(plan: Plan, ctx: Context): Promise<Map<string, numb
       ...ctx,
       staleDays: plan.staleDays,
       appStaleDays: plan.appStaleDays ?? ctx.appStaleDays,
-      sizeOnly: new Set(plan.findingIds),
+      named: new Set(plan.findingIds),
     },
     plan.categories,
   );
@@ -543,7 +570,7 @@ async function applyUnlocked(plan: Plan, ctx: Context, measured: ReadonlyMap<str
           ...ctx,
           staleDays: plan.staleDays,
           appStaleDays: plan.appStaleDays ?? ctx.appStaleDays,
-          sizeOnly: new Set(plan.findingIds),
+          named: new Set(plan.findingIds),
         },
         plan.categories,
       )

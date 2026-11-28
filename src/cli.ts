@@ -40,6 +40,7 @@ import {
   type Risk,
   risks,
   schemaVersion,
+  shellWord,
 } from "./types";
 import { recordUsage } from "./usage";
 
@@ -96,11 +97,6 @@ interface Flags {
   appStaleDays: number;
   days?: number;
   reason?: string;
-}
-
-/** A word a POSIX shell reads back unchanged: as it is when it holds no special character, single-quoted otherwise. */
-function shellWord(word: string): string {
-  return /^[\w./~:@%+=,-]+$/.test(word) ? word : `'${word.replaceAll("'", "'\\''")}'`;
 }
 
 /** A mistake in how keeper was called. `next` is the command that gets the caller unstuck. */
@@ -349,8 +345,8 @@ async function dispatch(
       const ctx = context(flags.staleDays, flags.appStaleDays);
       // Targets found in the last scan rescan only their own categories, rather than every category on the machine.
       const only = flags.category ?? (rest.length ? categoriesOf(ctx, rest) : undefined);
-      // Named targets are the only findings a plan can take, so they are the only ones worth measuring.
-      const named = { ...ctx, sizeOnly: new Set(rest.flatMap(targetIds)) };
+      // Named targets are the only findings a plan can take, so they are the only ones worth inspecting.
+      const named = { ...ctx, named: new Set(rest.flatMap(targetIds)) };
       const report = await cachedScan(rest.length ? named : ctx, { reuse: false, only });
       const { chosen, skipped } = rest.length
         ? pickById(report.findings, rest)
@@ -361,7 +357,7 @@ async function dispatch(
           skipped.map(({ id, reason }) => `${id}: ${reason}`).join("; "),
           skipped.every((entry) => entry.idle)
             ? `keeper plan ${rest.map(shellWord).join(" ")} --stale-days 0`
-            : "keeper scan",
+            : (skipped.length === 1 && skipped[0]?.next) || "keeper scan",
         );
       const plan = await createPlan(paths, chosen, flags.staleDays, flags.appStaleDays);
       const skippedText = skipped.map(({ id, reason }) => `\nskipped ${id}: ${reason}`).join("");

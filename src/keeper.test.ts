@@ -25,6 +25,7 @@ import {
   type Context,
   defaultConfig,
   dockerFindings,
+  findingId,
   headOwner,
   isCheckout,
   type ProcessInfo,
@@ -186,6 +187,28 @@ test("a pushed, clean, idle worktree is the only eligible one", async () => {
   expect(by(recent)?.blockers.join()).toContain("touched");
   expect(by(clean)?.bytes).toBeGreaterThan(0);
   expect(by(dirty)?.bytes).toBe(0);
+});
+
+test("a scan for a named worktree inspects only that checkout", async () => {
+  const wanted = await worktree("wanted");
+  const other = await worktree("other");
+  age(wanted);
+  age(other);
+  const asked: string[] = [];
+  const named = new Set([findingId("worktree", wanted, "").id]);
+  const report = await scan(
+    {
+      ...ctx,
+      named,
+      pullRequests: async (path) => {
+        asked.push(path);
+        return [];
+      },
+    },
+    ["worktree"],
+  );
+  expect(report.findings.map((finding) => finding.paths[0])).toEqual([wanted]);
+  expect(asked).toEqual([wanted]);
 });
 
 test("a worktree inside a repo's own .claude/worktrees is judged like any other", async () => {
@@ -533,8 +556,19 @@ test("claimed output holding a directory keeper cannot write is blocked rather t
   const { findings } = await scan(ctx, ["agent"]);
   chmodSync(locked, 0o700);
   const finding = findings.find((item) => item.paths[0] === scratch);
-  expect(finding?.blockers).toContain("holds a directory keeper cannot write, so it cannot delete it whole");
+  expect(finding?.blockers).toEqual([
+    `holds 1 directory keeper cannot write, the first is ${locked}, so it cannot delete it whole`,
+  ]);
+  expect(finding?.unwritable).toEqual({ first: locked, count: 1 });
   expect(findings.filter(eligible)).toEqual([]);
+  // The refusal names how to clear it: one directory by itself, several through the claimed path.
+  expect(pickById(findings, [scratch]).skipped[0]?.next).toBe(`chmod u+w ${locked}`);
+  expect(
+    pickById([{ ...(finding as Finding), blockers: ["in use", "x"] }], [scratch]).skipped[0]?.next,
+  ).toBeUndefined();
+  expect(
+    pickById([{ ...(finding as Finding), unwritable: { first: locked, count: 4 } }], [scratch]).skipped[0]?.next,
+  ).toBe(`find ${scratch} -xdev -type d ! -writable -exec chmod u+w {} +`);
 });
 
 test("temp names group by the pattern their random part leaves", () => {
@@ -840,7 +874,7 @@ test("a gh that never returns is asked once, then leaves its repo's worktrees bl
   expect(report.findings[0]?.blockers.join()).toContain("could not be listed");
 });
 
-test("a scan for named ids measures only them, and is never reused as a complete scan", async () => {
+test("a scan for named ids reports only them, and is never reused as a complete scan", async () => {
   const config = { ...ctx.config, agentRoots: ["~/batch", "~/other"] };
   for (const name of ["batch", "other"]) {
     mkdirSync(join(home, name));
@@ -850,10 +884,10 @@ test("a scan for named ids measures only them, and is never reused as a complete
   const all = await scan({ ...ctx, config }, ["agent"]);
   const wanted = all.findings.find((finding) => finding.paths[0] === join(home, "batch")) as Finding;
   expect(all.findings.every((finding) => finding.bytes > 0)).toBe(true);
-  const named = { ...ctx, config, sizeOnly: new Set([wanted.id]) };
+  const named = { ...ctx, config, named: new Set([wanted.id]) };
   const report = await cachedScan(named, { reuse: false, only: ["agent"] });
   const bytes = Object.fromEntries(report.findings.map((finding) => [finding.title, finding.bytes]));
-  expect(bytes).toEqual({ "~/batch": wanted.bytes, "~/other": 0 });
+  expect(bytes).toEqual({ "~/batch": wanted.bytes });
   // The unmeasured row must not be served later as if the whole category had been sized.
   expect((await cachedScan({ ...ctx, config }, { only: ["agent"] })).cached).toEqual([]);
   // The plan's state still matches, so applying it takes the named finding.

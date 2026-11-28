@@ -953,7 +953,7 @@ async function scanOrphans(): Promise<Finding[]> {
 async function unwritableDirs(roots: readonly string[]): Promise<string[]> {
   if (roots.length === 0) return [];
   const found = await run(["find", ...roots, "-xdev", "-type", "d", "!", "-writable", "-printf", "%p\\0"]);
-  return [...found.stdout.split("\0").filter(Boolean), ...quotedPaths(found.stderr)];
+  return [...new Set([...found.stdout.split("\0").filter(Boolean), ...quotedPaths(found.stderr)])];
 }
 
 async function scanAgent(context: Context): Promise<Finding[]> {

@@ -254,7 +254,11 @@ export function pickById(
       skipped.push({
         id: target,
         reason: `not eligible: ${finding.blockers.join("; ") || finding.action}`,
-        next: finding.unwritable && unwritableFix(finding.paths[0] as string, finding.unwritable),
+        // The command only helps when the unwritable directory is all that holds the finding back.
+        next:
+          finding.unwritable && finding.blockers.length === 1
+            ? unwritableFix(finding.paths[0] as string, finding.unwritable)
+            : undefined,
       });
     else if (!chosen.includes(finding)) chosen.push(finding);
   }

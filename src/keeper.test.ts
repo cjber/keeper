@@ -564,6 +564,9 @@ test("claimed output holding a directory keeper cannot write is blocked rather t
   // The refusal names how to clear it: one directory by itself, several through the claimed path.
   expect(pickById(findings, [scratch]).skipped[0]?.next).toBe(`chmod u+w ${locked}`);
   expect(
+    pickById([{ ...(finding as Finding), blockers: ["in use", "x"] }], [scratch]).skipped[0]?.next,
+  ).toBeUndefined();
+  expect(
     pickById([{ ...(finding as Finding), unwritable: { first: locked, count: 4 } }], [scratch]).skipped[0]?.next,
   ).toBe(`find ${scratch} -xdev -type d ! -writable -exec chmod u+w {} +`);
 });

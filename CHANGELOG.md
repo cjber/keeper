@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-11-28
+
 - **Planning a named worktree or build directory inspects only that path.** A scan made for `plan` or `apply` ids
   skips the git status, pull request lookups and ignore checks of every other checkout, so naming one path costs about
   inspecting it. Findings it did not name are no longer listed in that scan.

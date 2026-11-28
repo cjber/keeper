@@ -187,7 +187,7 @@ export async function cachedScan(
         scanned[category] = {
           scannedAt: at,
           findings,
-          incomplete: warned || context.sizeOnly !== undefined || undefined,
+          incomplete: warned || context.named !== undefined || undefined,
           sizedBlocked: context.sizeBlocked || undefined,
         };
       done?.(category, findings?.length, false);

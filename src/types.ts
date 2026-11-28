@@ -69,6 +69,8 @@ export interface Finding {
    * them, because a person deciding "medium risk is fine" has not seen which game data or app it would remove.
    */
   explicit?: true;
+  /** The directories keeper cannot write inside the paths, which stop a removal partway: how many, and the first. */
+  unwritable?: { first: string; count: number };
   /** Git common dir, so deleting the worktree also prunes its metadata. */
   gitDir?: string;
   /** Branch and commit of a worktree, so deleting it also deletes the local branch, only if it has not moved. */
@@ -123,6 +125,11 @@ export function eligible(finding: Finding): boolean {
 /** Eligible for a plan with no ids. Personal files and apps are deliberately left out of that sweep. */
 export function bulkEligible(finding: Finding): boolean {
   return eligible(finding) && finding.explicit !== true;
+}
+
+/** A word a POSIX shell reads back unchanged: as it is when it holds no special character, single-quoted otherwise. */
+export function shellWord(word: string): string {
+  return /^[\w./~:@%+=,-]+$/.test(word) ? word : `'${word.replaceAll("'", "'\\''")}'`;
 }
 
 /** "1 file", "2 files": a count with its noun in the right number. */
